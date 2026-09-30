@@ -1,0 +1,58 @@
+{
+  "name": "Digital Twin Dev Container",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu24.04",
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {
+      "configureZshAsDefaultShell": false,
+      "installZsh": false,
+      "upgradePackages": false,
+      "username": "vscode"
+    },
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/devcontainers/features/copilot-cli:1": {},
+    "ghcr.io/devcontainers/features/powershell:2": {},
+    "ghcr.io/devcontainers/features/node:2": {
+      "version": "lts"
+    },
+    "ghcr.io/devcontainers/features/java:1": {
+      "version": "21",
+      "jdkDistro": "ms",
+      "installMaven": true
+    },
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "vscjava.vscode-java-pack",
+        "ms-playwright.playwright"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "pwsh"
+      }
+    }
+  },
+  "mounts": [
+    "source=${localWorkspaceFolder}/.devcontainer/gitconfig.effective,target=${containerWorkspaceFolder}/.devcontainer/gitconfig.effective,type=bind,consistency=cached",
+    "source=${localEnv:COPILOT_HOME:${localEnv:HOME}/.copilot},target=/home/vscode/.copilot,type=bind,consistency=cached",
+    "source=D:\\packages\\cargo,target=/opt/host-caches/CARGO_HOME,type=bind,consistency=cached",
+    "source=D:\\.copilot,target=/opt/host-caches/COPILOT_HOME,type=bind,consistency=cached",
+    "source=D:\\packages\\nuget,target=/opt/host-caches/NUGET_PACKAGES,type=bind,consistency=cached",
+    "source=D:\\packages\\pip,target=/opt/host-caches/PIP_CACHE_DIR,type=bind,consistency=cached",
+    "source=D:\\packages\\vcpkg,target=/opt/host-caches/VCPKG_DEFAULT_BINARY_CACHE,type=bind,consistency=cached",
+    "source=D:\\packages,target=/opt/host-caches/XDG_DATA_HOME,type=bind,consistency=cached"
+  ],
+  "containerEnv": {
+    "POWERSHELL_DISTRIBUTION_CHANNEL": "DevContainers",
+    "CARGO_HOME": "/opt/host-caches/CARGO_HOME",
+    "COPILOT_HOME": "/opt/host-caches/COPILOT_HOME",
+    "NUGET_PACKAGES": "/opt/host-caches/NUGET_PACKAGES",
+    "PIP_CACHE_DIR": "/opt/host-caches/PIP_CACHE_DIR",
+    "VCPKG_DEFAULT_BINARY_CACHE": "/opt/host-caches/VCPKG_DEFAULT_BINARY_CACHE",
+    "XDG_DATA_HOME": "/opt/host-caches/XDG_DATA_HOME",
+    "COPILOT_CACHE_HOME": "/opt/host-caches/COPILOT_HOME/cache"
+  },
+  "postCreateCommand": "bash .devcontainer/scripts/bootstrap-ghcp-digital-twin.sh",
+  "postStartCommand": "bash .devcontainer/scripts/apply-global-git-config.sh .devcontainer/gitconfig.effective",
+  "remoteUser": "vscode"
+}

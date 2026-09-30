@@ -1,0 +1,46 @@
+{
+  "name": "Digital Twin Dev Container",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {
+      "configureZshAsDefaultShell": false,
+      "installZsh": false,
+      "upgradePackages": false,
+      "username": "vscode"
+    },
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/devcontainers/features/copilot-cli:1": {},
+    "ghcr.io/devcontainers/features/azure-cli:1": {},
+    "ghcr.io/azure/azure-dev/azd:latest": {},
+    "ghcr.io/devcontainers/features/powershell:2": {},
+    "ghcr.io/devcontainers/features/node:2": {
+      "version": "lts"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        // Add repository-specific language server, linting, formatting, and testing extensions here.
+        "ms-azuretools.vscode-azureresourcegroups",
+        "ms-azuretools.vscode-bicep",
+        "github.copilot",
+        "github.copilot-chat"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "pwsh"
+      }
+    }
+  },
+  "mounts": [
+    "source=${localWorkspaceFolder}/.devcontainer/gitconfig.effective,target=${containerWorkspaceFolder}/.devcontainer/gitconfig.effective,type=bind,consistency=cached",
+    "source=${localEnv:COPILOT_HOME:${localEnv:HOME}/.copilot},target=/home/vscode/.copilot,type=bind,consistency=cached"
+    // Additional cache mounts are merged in by merge-devcontainer-config.sh from cache-mounts.generated.json
+  ],
+  "containerEnv": {
+    "POWERSHELL_DISTRIBUTION_CHANNEL": "DevContainers"
+    // Additional cache env vars are merged in by merge-devcontainer-config.sh from cache-mounts.generated.json
+  },
+  "postCreateCommand": "bash .devcontainer/scripts/bootstrap-ghcp-digital-twin.sh",
+  "postStartCommand": "bash .devcontainer/scripts/apply-global-git-config.sh .devcontainer/gitconfig.effective",
+  "remoteUser": "vscode"
+}

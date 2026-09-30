@@ -46,3 +46,5 @@ data/
 
 #e2e test output
 tests/e2e/node_modules/
+.devcontainer/cache-mounts.generated.json
+.devcontainer/gitconfig.effective
