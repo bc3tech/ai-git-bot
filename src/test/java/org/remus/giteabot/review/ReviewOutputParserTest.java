@@ -104,6 +104,15 @@ class ReviewOutputParserTest {
     }
 
     @Test
+    void nonArrayFindingsFallsBackToOriginalTextWithWarning() {
+        String raw = "{\"summary\": \"\", \"findings\": \"critical issue in Foo.java\"}";
+        ReviewOutputParser.Result result = ReviewOutputParser.parse(raw);
+        assertThat(result.warning()).isNotNull();
+        assertThat(result.document().structured()).isFalse();
+        assertThat(result.document().summary()).isEqualTo(raw);
+    }
+
+    @Test
     void classificationBlockAloneIsNotAnEnvelope() {
         String raw = "Fine.\n{\"blocker\": 0, \"medium\": 0, \"low\": 1, \"findings\": [{\"severity\": \"low\"}]}";
         assertThat(ReviewOutputParser.parse(raw).document().structured()).isFalse();

@@ -60,6 +60,11 @@ public final class ReviewOutputParser {
         List<ReviewDocument.Finding> findings = new ArrayList<>();
         int dropped = 0;
         JsonNode findingsNode = root.get("findings");
+        if (findingsNode != null && !findingsNode.isNull() && !findingsNode.isArray()) {
+            String warning = "Structured review output has a non-array findings field; publishing it as text";
+            log.warn(warning);
+            return new Result(ReviewDocument.text(raw), warning);
+        }
         if (findingsNode != null && findingsNode.isArray()) {
             for (JsonNode element : findingsNode) {
                 ReviewDocument.Finding finding = toFinding(element, findings.size() + 1);

@@ -162,6 +162,26 @@ class ReviewDiffPositionParserTest {
                 +b
                 """;
         assertThat(ReviewDiffPositionParser.parse(headerless).file("anything")).isEmpty();
+
+        String cutAfterHeader = "diff --git a/H.java b/H.java\n--- a/H.java\n+++ b/H.java\n@@ -1 +1 @@\n";
+        assertThat(anchor(cutAfterHeader, "H.java", DiffSide.NEW, 1)).isEmpty();
+
+        String cutAfterContext = "diff --git a/C.java b/C.java\n--- a/C.java\n+++ b/C.java\n@@ -1,2 +1,2 @@\n a\n";
+        assertThat(anchor(cutAfterContext, "C.java", DiffSide.NEW, 1)).isEmpty();
+    }
+
+    @Test
+    void strippedBlankContextLineMidHunkStillCountsAsContext() {
+        String diff = "diff --git a/S.java b/S.java\n--- a/S.java\n+++ b/S.java\n@@ -1,3 +1,3 @@\n a\n\n-b\n+c\n";
+        assertThat(anchor(diff, "S.java", DiffSide.NEW, 3)).isPresent();
+    }
+
+    @Test
+    void malformedOctalEscapeInQuotedPathDoesNotAbortParsing() {
+        String diff = "diff --git \"a/x\\19.txt\" \"b/x\\19.txt\"\n--- \"a/x\\19.txt\"\n+++ \"b/x\\19.txt\"\n"
+                + "@@ -1 +1 @@\n-a\n+b\n"
+                + "diff --git a/Ok.java b/Ok.java\n--- a/Ok.java\n+++ b/Ok.java\n@@ -1 +1 @@\n-a\n+b\n";
+        assertThat(anchor(diff, "Ok.java", DiffSide.NEW, 1)).isPresent();
     }
 
     @Test

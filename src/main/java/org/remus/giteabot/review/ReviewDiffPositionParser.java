@@ -41,11 +41,17 @@ public final class ReviewDiffPositionParser {
         int remainingOld = 0;
         int remainingNew = 0;
 
-        for (String rawLine : diff.split("\n", -1)) {
+        String[] rawLines = diff.split("\n", -1);
+        for (int index = 0; index < rawLines.length; index++) {
+            String rawLine = rawLines[index];
             String line = rawLine.endsWith("\r") ? rawLine.substring(0, rawLine.length() - 1) : rawLine;
             boolean inHunk = remainingOld > 0 || remainingNew > 0;
             if (inHunk && current != null) {
-                char c = line.isEmpty() ? ' ' : line.charAt(0);
+                // A blank line mid-hunk is a context line whose leading space was stripped in transit, but
+                // the trailing element after the final newline means the diff was cut short: never infer
+                // a coordinate from it.
+                boolean truncated = line.isEmpty() && index == rawLines.length - 1;
+                char c = truncated ? '\0' : line.isEmpty() ? ' ' : line.charAt(0);
                 switch (c) {
                     case ' ' -> {
                         current.newLines.put(newNo, oldNo);
@@ -183,7 +189,7 @@ public final class ReviewDiffPositionParser {
                 case 'v' -> out.write(11);
                 case '"', '\\' -> out.write(next);
                 default -> {
-                    if (next >= '0' && next <= '7' && i + 2 < chars.length) {
+                    if (i + 2 < chars.length && isOctal(next) && isOctal(chars[i + 1]) && isOctal(chars[i + 2])) {
                         out.write(Integer.parseInt(new String(chars, i, 3, StandardCharsets.US_ASCII), 8));
                         i += 2;
                     } else {
@@ -194,6 +200,10 @@ public final class ReviewDiffPositionParser {
             }
         }
         return out.toString(StandardCharsets.UTF_8);
+    }
+
+    private static boolean isOctal(byte b) {
+        return b >= '0' && b <= '7';
     }
 
     private static final class FileBuilder {
