@@ -24,8 +24,12 @@ import org.remus.giteabot.ai.ToolCall;
 import org.remus.giteabot.config.AgentConfigProperties;
 import org.remus.giteabot.eventhook.EventHookPublisher;
 import org.remus.giteabot.gitea.model.WebhookPayload;
+import org.remus.giteabot.prworkflow.WorkflowCancelledException;
 import org.remus.giteabot.repository.PostReviewAction;
 import org.remus.giteabot.repository.RepositoryApiClient;
+import org.remus.giteabot.repository.model.ReviewAnchorComment;
+import org.remus.giteabot.repository.model.ReviewPublicationResult;
+import org.remus.giteabot.repository.model.ReviewSnapshot;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -85,7 +89,7 @@ class AgentReviewCompletionTest {
                 new ToolExecutionService(config, catalog, workspaceService), catalog, workspaceService,
                 config, null, new Bot(), eventHooks);
         lenient().when(aiClient.supportsNativeTools()).thenReturn(true);
-        when(repositoryClient.getPullRequestDiff("owner", "repo", 1L)).thenReturn(DIFF);
+        lenient().when(repositoryClient.getPullRequestDiff("owner", "repo", 1L)).thenReturn(DIFF);
         lenient().when(workspaceService.prepareWorkspace(repositoryClient, "owner", "repo", "feature", 1L))
                 .thenReturn(WorkspaceResult.success(WORKSPACE));
     }
@@ -181,6 +185,57 @@ class AgentReviewCompletionTest {
         verify(repositoryClient).postReview(eq("owner"), eq("repo"), eq(1L),
                 argThat(body -> body.contains("No correctness issues found.") && !body.contains("Let me check")),
                 eq(PostReviewAction.NONE));
+        verify(workspaceService).cleanupWorkspace(WORKSPACE);
+    }
+
+    @Test
+    void structuredReviewWithDecisionPublishesInlineWithTheFormalAction() {
+        when(repositoryClient.getReviewSnapshot("owner", "repo", 1L))
+                .thenReturn(new ReviewSnapshot("head", "base", null, DIFF, true));
+        String finalReview = """
+                ```json
+                {"summary": "One problem.", "findings": [
+                  {"path": "Example.java", "side": "new", "line": 1, "severity": "BLOCKER", "body": "Broken."}
+                ]}
+                ```
+                {"blocker": 1, "medium": 0, "low": 0}""";
+        when(aiClient.chatWithTools(anyList(), any(), anyList(), anyString(), isNull(), anyInt()))
+                .thenReturn(ChatTurn.text(finalReview));
+        when(repositoryClient.publishInlineReview(any(), any(), any(), any(), anyString(), anyList(), any()))
+                .thenAnswer(inv -> {
+                    List<ReviewAnchorComment> anchors = inv.getArgument(5);
+                    return new ReviewPublicationResult(ReviewPublicationResult.Status.PUBLISHED,
+                            ReviewPublicationResult.Delivery.CONFIRMED,
+                            anchors.stream().map(a -> new ReviewPublicationResult.CommentOutcome(a,
+                                    ReviewPublicationResult.Delivery.CONFIRMED, "1")).toList(), null);
+                });
+
+        AgentReviewService.ReviewResult reviewed = service.reviewPullRequest(payload, 1, true, "Review criteria",
+                new AgentReviewService.SeverityThresholds(0, null, null), 1L, null);
+
+        assertThat(reviewed).isEqualTo(AgentReviewService.ReviewResult.POSTED);
+        verify(repositoryClient).publishInlineReview(eq("owner"), eq("repo"), eq(1L), any(),
+                argThat(body -> body.contains("One problem.") && !body.contains("Broken.")
+                        && !body.contains("\"blocker\"")),
+                argThat(anchors -> anchors.size() == 1 && anchors.getFirst().path().equals("Example.java")),
+                eq(PostReviewAction.REQUEST_CHANGES));
+        verify(repositoryClient, never()).postReview(anyString(), anyString(), anyLong(), anyString(), any());
+    }
+
+    @Test
+    void supersededReviewPropagatesWithoutPostingAnErrorComment() {
+        when(aiClient.chatWithTools(anyList(), any(), anyList(), anyString(), isNull(), anyInt()))
+                .thenReturn(ChatTurn.text("No correctness issues found."));
+
+        org.junit.jupiter.api.Assertions.assertThrows(WorkflowCancelledException.class,
+                () -> service.reviewPullRequest(payload, 1, false, null,
+                        new AgentReviewService.SeverityThresholds(null, null, null), 1L, null,
+                        location -> {
+                            throw new WorkflowCancelledException("superseded");
+                        }));
+
+        verify(repositoryClient, never()).postReview(anyString(), anyString(), anyLong(), anyString(), any());
+        verify(repositoryClient, never()).postPullRequestComment(anyString(), anyString(), anyLong(), anyString());
         verify(workspaceService).cleanupWorkspace(WORKSPACE);
     }
 

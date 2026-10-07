@@ -127,7 +127,7 @@ public class AgentReviewWorkflow implements PrWorkflow {
 
         AgentReviewService.ReviewResult reviewed = serviceFactory.create(bot)
                 .reviewPullRequest(payload, maxToolRounds, enableFormalDecision, decisionPrompt, thresholds,
-                        context.runId(), context.auditToolCallConsumer());
+                        context.runId(), context.auditToolCallConsumer(), context::requireActive);
 
         WorkflowResult result = switch (reviewed) {
             case POSTED -> WorkflowResult.success("Agentic review posted");

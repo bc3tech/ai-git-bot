@@ -26,8 +26,15 @@ import org.remus.giteabot.eventhook.EventHookEventType;
 import org.remus.giteabot.eventhook.EventHookPublisher;
 import org.remus.giteabot.gitea.model.WebhookPayload;
 import org.remus.giteabot.mcp.McpOrchestrationService;
+import org.remus.giteabot.prworkflow.WorkflowCancelledException;
 import org.remus.giteabot.repository.PostReviewAction;
 import org.remus.giteabot.repository.RepositoryApiClient;
+import org.remus.giteabot.repository.model.ReviewSnapshot;
+import org.remus.giteabot.review.ReviewDocument;
+import org.remus.giteabot.review.ReviewFence;
+import org.remus.giteabot.review.ReviewOutputInstructions;
+import org.remus.giteabot.review.ReviewOutputParser;
+import org.remus.giteabot.review.ReviewPublicationService;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -175,6 +182,21 @@ public class AgentReviewService {
                                          SeverityThresholds severityThresholds,
                                          Long runId,
                                          Consumer<AgentRunContext.ToolCallRecord> toolCallConsumer) {
+        return reviewPullRequest(payload, maxToolRounds, enableFormalDecision, decisionPrompt, severityThresholds,
+                runId, toolCallConsumer, ReviewFence.NONE);
+    }
+
+    /**
+     * Same as {@link #reviewPullRequest(WebhookPayload, int, boolean, String, SeverityThresholds, Long, Consumer)},
+     * checking {@code fence} before publishing. A cancelled run propagates its
+     * {@link WorkflowCancelledException} instead of posting an error comment.
+     */
+    public ReviewResult reviewPullRequest(WebhookPayload payload, int maxToolRounds,
+                                         boolean enableFormalDecision, String decisionPrompt,
+                                         SeverityThresholds severityThresholds,
+                                         Long runId,
+                                         Consumer<AgentRunContext.ToolCallRecord> toolCallConsumer,
+                                         ReviewFence fence) {
         String owner = payload.getRepository().getOwner().getLogin();
         String repo = payload.getRepository().getName();
         Long prNumber = payload.getPullRequest().getNumber();
@@ -184,7 +206,8 @@ public class AgentReviewService {
         log.info("Starting agentic review for PR #{} '{}' in {}/{} (formalDecision={})",
                 prNumber, prTitle, owner, repo, enableFormalDecision);
 
-        String diff = repositoryClient.getPullRequestDiff(owner, repo, prNumber);
+        ReviewSnapshot snapshot = ReviewPublicationService.snapshot(repositoryClient, owner, repo, prNumber);
+        String diff = snapshot.diff();
         if (diff == null || diff.isBlank()) {
             log.warn("No diff found for PR #{} in {}/{} — skipping agentic review", prNumber, owner, repo);
             return ReviewResult.NO_DIFF;
@@ -214,7 +237,7 @@ public class AgentReviewService {
             workspaceDir = wsResult.workspacePath();
 
             String systemPrompt = resolveSystemPrompt(enableFormalDecision, decisionPrompt);
-            String userMessage = buildKickoffMessage(prTitle, prBody, diffSummary);
+            String userMessage = buildKickoffMessage(prTitle, prBody, diffSummary, enableFormalDecision);
 
             AgentSession session = new AgentSession(owner, repo, prNumber, prTitle);
 
@@ -237,13 +260,20 @@ public class AgentReviewService {
                     ? parseFormalReviewResult(review, severityThresholds) : ParseResult.noDecision(review);
 
             PostReviewAction action = parsed.action() != null ? parsed.action() : PostReviewAction.NONE;
-            String reviewBody = formatReview(parsed.reviewText());
+            ReviewOutputParser.Result output = ReviewOutputParser.parse(parsed.reviewText());
+            if (output.warning() != null) {
+                log.warn("Agentic review output for PR #{} was not a valid review envelope: {}",
+                        prNumber, output.warning());
+            }
+            ReviewDocument document = output.document();
             try {
-                repositoryClient.postReview(owner, repo, prNumber, reviewBody, action);
-                if (action != PostReviewAction.NONE) {
-                    log.info("Agentic review posted formal decision {} for PR #{} in {}/{}",
-                            action, prNumber, owner, repo);
-                }
+                ReviewPublicationService.Outcome published = ReviewPublicationService.publish(repositoryClient,
+                        owner, repo, prNumber, snapshot, document, action, this::formatReview, fence);
+                log.info("Agentic review for PR #{} in {}/{}: inline {} ({}/{} confirmed), decision {} {}",
+                        prNumber, owner, repo, published.inlineStatus(), published.inlineConfirmed(),
+                        published.inlineRequested(), action, published.action());
+            } catch (WorkflowCancelledException e) {
+                throw e;
             } catch (Exception e) {
                 if (action == PostReviewAction.NONE) {
                     throw e;
@@ -252,13 +282,17 @@ public class AgentReviewService {
                 log.warn("Failed to post formal review {} for PR #{} in {}/{}: {} — "
                         + "falling back to a plain review comment",
                         action, prNumber, owner, repo, e.getMessage());
-                repositoryClient.postReviewComment(owner, repo, prNumber, reviewBody);
+                fence.requireActive("before posting the plain review fallback");
+                repositoryClient.postReviewComment(owner, repo, prNumber, formatReview(
+                        ReviewPublicationService.render(document.summary(), document.findings(), false)));
             }
 
             publishFindingEvents(eventHookPublisher, bot, parsed, owner, repo, prNumber);
             log.info("Agentic review completed for PR #{} in {}/{} (decision={})",
                     prNumber, owner, repo, action);
             return ReviewResult.POSTED;
+        } catch (WorkflowCancelledException e) {
+            throw e;
         } catch (Exception e) {
             log.error("Agentic review failed for PR #{} in {}/{}: {}", prNumber, owner, repo, e.getMessage(), e);
             postErrorComment(owner, repo, prNumber, "Agentic Review",
@@ -383,10 +417,12 @@ public class AgentReviewService {
         return ParseResult.noDecision(review);
     }
 
-    /** A trailing JSON block only counts as a classification when it names a severity count. */
+    /** A trailing JSON block only counts as a classification when it has a severity count key. */
     private static boolean containsSeverityKey(String json) {
-        return json.contains("\"blocker\"") || json.contains("\"medium\"") || json.contains("\"low\"");
+        return SEVERITY_KEY_PATTERN.matcher(json).find();
     }
+
+    private static final Pattern SEVERITY_KEY_PATTERN = Pattern.compile("\"(blocker|medium|low)\"\\s*:");
 
     private static ParseResult toParseResult(String cleaned, ClassificationBlock block,
                                              SeverityThresholds thresholds) {
@@ -647,7 +683,8 @@ public class AgentReviewService {
         return base + "\n\n" + prompt + DECISION_FORMAT_INSTRUCTION;
     }
 
-    private String buildKickoffMessage(String prTitle, String prBody, DiffSummary diffSummary) {
+    private String buildKickoffMessage(String prTitle, String prBody, DiffSummary diffSummary,
+                                       boolean enableFormalDecision) {
         StringBuilder sb = new StringBuilder();
         sb.append("Please review the following pull request.\n\n");
         sb.append("Title: ").append(prTitle == null ? "(none)" : prTitle).append('\n');
@@ -668,8 +705,10 @@ public class AgentReviewService {
                 file path. To read the full current content of a file, use `cat`. To understand \
                 a file's structure before reading it, use `ctags-signatures`.
                 
-                When you have gathered enough context, reply with your final review as plain \
-                Markdown (no tool calls). Summarise correctness, risks, and concrete suggestions.""");
+                When you have gathered enough context, reply with your final review (no tool calls). \
+                Cover correctness, risks, and concrete suggestions. Anchor each finding to the \
+                changed line it concerns using the line numbers from `pr-diff`.""");
+        sb.append(ReviewOutputInstructions.agentic(enableFormalDecision));
         return sb.toString();
     }
 

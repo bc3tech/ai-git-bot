@@ -155,7 +155,8 @@ public final class ReviewPublicationService {
         return label.isEmpty() ? finding.body() : label + "\n\n" + finding.body();
     }
 
-    static String render(String summary, List<ReviewDocument.Finding> findings, boolean othersOnly) {
+    /** Renders a summary plus findings (with their locations) as Markdown. */
+    public static String render(String summary, List<ReviewDocument.Finding> findings, boolean othersOnly) {
         StringBuilder out = new StringBuilder();
         String text = summary == null ? "" : summary.strip();
         out.append(text.isEmpty() && findings.isEmpty() ? NO_ISSUES : text);
