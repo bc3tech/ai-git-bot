@@ -46,7 +46,13 @@ public final class ReviewPublicationService {
      */
     public static ReviewSnapshot snapshot(RepositoryApiClient client, String owner, String repo, Long pr) {
         try {
-            return client.getReviewSnapshot(owner, repo, pr);
+            ReviewSnapshot snapshot = client.getReviewSnapshot(owner, repo, pr);
+            if (snapshot != null) {
+                return snapshot;
+            }
+            log.warn("No review snapshot available for PR #{} in {}/{}; this review will be summary-only",
+                    pr, owner, repo);
+            return ReviewSnapshot.summaryOnly(client.getPullRequestDiff(owner, repo, pr));
         } catch (RuntimeException e) {
             log.warn("Could not capture a revision-bound snapshot for PR #{} in {}/{}: {}; "
                     + "this review will be summary-only", pr, owner, repo, e.getMessage());

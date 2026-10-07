@@ -86,7 +86,7 @@ class ReviewWorkflowTest {
     void successWhenCodeReviewServicePostedReview() {
         Bot bot = botWith(PostReviewAction.NONE);
         WebhookPayload payload = payloadFor("acme", "web", 7L);
-        when(codeReviewService.reviewPullRequest(eq(payload), eq(null))).thenReturn(true);
+        when(codeReviewService.runReview(eq(payload), eq(null), any())).thenReturn(new CodeReviewService.ReviewRun(true, true));
 
         WorkflowResult result = workflow.run(ctx(bot, payload));
 
@@ -98,7 +98,7 @@ class ReviewWorkflowTest {
     void skippedWhenCodeReviewServiceReportedNoReview() {
         Bot bot = botWith(PostReviewAction.APPROVE);
         WebhookPayload payload = payloadFor("acme", "web", 8L);
-        when(codeReviewService.reviewPullRequest(eq(payload), eq(null))).thenReturn(false);
+        when(codeReviewService.runReview(eq(payload), eq(null), any())).thenReturn(new CodeReviewService.ReviewRun(false, false));
 
         WorkflowResult result = workflow.run(ctx(bot, payload));
 
@@ -107,8 +107,20 @@ class ReviewWorkflowTest {
     }
 
     @Test
-    void botCommandFailureIsExposedInsteadOfReturningSuccess() {
-        Bot bot = botWith(PostReviewAction.NONE);
+    void skipsPostReviewActionWhenPendingReviewBlocksIt() {
+        Bot bot = botWith(PostReviewAction.APPROVE);
+        WebhookPayload payload = payloadFor("acme", "web", 11L);
+        when(codeReviewService.runReview(eq(payload), eq(null), any()))
+                .thenReturn(new CodeReviewService.ReviewRun(true, false));
+
+        WorkflowResult result = workflow.run(ctx(bot, payload));
+
+        assertEquals(WorkflowResultStatus.SUCCESS, result.status());
+        verify(repoClient, never()).postReviewAction(any(), any(), anyLong(), any());
+    }
+
+    @Test
+    void botCommandFailureIsExposedInsteadOfReturningSuccess() {        Bot bot = botWith(PostReviewAction.NONE);
         WebhookPayload payload = payloadFor("acme", "web", 10L);
         IllegalStateException writeFailure = new IllegalStateException("comment write failed");
         doThrow(writeFailure).when(codeReviewService).handleBotCommand(payload, null);
@@ -145,7 +157,7 @@ class ReviewWorkflowTest {
                 () -> workflow.run(cancelledCtx(bot, payload)));
 
         // CodeReviewService must not even be invoked when the run is already superseded.
-        verify(codeReviewService, never()).reviewPullRequest(any(), any());
+        verify(codeReviewService, never()).runReview(any(), any(), any());
         verify(repoClient, never()).postReviewAction(any(), any(), anyLong(), any());
     }
 
