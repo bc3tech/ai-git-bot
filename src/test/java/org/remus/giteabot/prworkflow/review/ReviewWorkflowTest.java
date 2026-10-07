@@ -22,7 +22,9 @@ import org.remus.giteabot.review.CodeReviewService;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -70,6 +72,14 @@ class ReviewWorkflowTest {
         assertEquals(ReviewWorkflow.KEY, workflow.key());
         assertEquals("PR Review", workflow.displayName());
         assertEquals(PrWorkflowCategory.REVIEW, workflow.category());
+    }
+
+    @Test
+    void onlyFullReviewsSupersedeOtherReviews() {
+        assertTrue(workflow.supersedesReviews(java.util.Map.of()));
+        assertTrue(workflow.supersedesReviews(java.util.Map.of(ReviewWorkflow.HINT_REVIEW_ACTION, ReviewWorkflow.ACTION_REVIEW)));
+        assertFalse(workflow.supersedesReviews(java.util.Map.of(ReviewWorkflow.HINT_REVIEW_ACTION, ReviewWorkflow.ACTION_BOT_COMMAND)));
+        assertFalse(workflow.supersedesReviews(java.util.Map.of(ReviewWorkflow.HINT_REVIEW_ACTION, ReviewWorkflow.ACTION_PR_CLOSED)));
     }
 
     @Test

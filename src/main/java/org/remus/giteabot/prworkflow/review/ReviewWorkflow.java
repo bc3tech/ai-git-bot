@@ -127,6 +127,12 @@ public class ReviewWorkflow implements PrWorkflow {
     }
 
     @Override
+    public boolean supersedesReviews(Map<String, String> hints) {
+        String action = hints == null ? null : hints.get(HINT_REVIEW_ACTION);
+        return action == null || action.isEmpty() || ACTION_REVIEW.equals(action);
+    }
+
+    @Override
     public WorkflowResult run(PrWorkflowContext context) {
         String action = context.hint(HINT_REVIEW_ACTION);
         if (action == null || action.isEmpty()) {

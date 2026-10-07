@@ -18,6 +18,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -55,6 +56,14 @@ class AgentReviewWorkflowTest {
         assertEquals(PrWorkflowCategory.REVIEW, wf.category());
         assertEquals(6, wf.paramsSchema().fields().size());
         assertFalse(wf.paramsSchema().isEmpty());
+    }
+
+    @Test
+    void onlyFullReviewsSupersedeOtherReviews() {
+        AgentReviewWorkflow wf = workflow();
+        assertTrue(wf.supersedesReviews(java.util.Map.of()));
+        assertFalse(wf.supersedesReviews(java.util.Map.of(
+                org.remus.giteabot.prworkflow.PrWorkflowContext.HINT_AGENTIC_REVIEW_CLARIFICATION, "why?")));
     }
 
     @Test

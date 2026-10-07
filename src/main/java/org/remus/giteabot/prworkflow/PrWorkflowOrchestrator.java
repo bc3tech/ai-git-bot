@@ -14,6 +14,7 @@ import org.remus.giteabot.eventhook.EventHookEventType;
 import org.remus.giteabot.eventhook.EventHookPublisher;
 import org.remus.giteabot.gitea.model.WebhookPayload;
 import org.remus.giteabot.notification.WorkflowRetryNotices;
+import org.remus.giteabot.prworkflow.agentreview.AgentReviewWorkflow;
 import org.remus.giteabot.prworkflow.config.WorkflowSelectionService;
 import org.remus.giteabot.prworkflow.review.ReviewWorkflow;
 import org.springframework.stereotype.Service;
@@ -31,6 +32,9 @@ import java.util.function.Consumer;
 @RequiredArgsConstructor
 public class PrWorkflowOrchestrator {
 
+    /** Shared start lock for every REVIEW-category workflow so supersession is serialized. */
+    static final String REVIEW_FAMILY_LOCK_KEY = "review-family";
+
     private final PrWorkflowRegistry registry;
     private final PrWorkflowRunService runService;
     private final PrWorkflowMetrics metrics;
@@ -43,7 +47,7 @@ public class PrWorkflowOrchestrator {
 
     public List<PrWorkflowRun> runAll(Bot bot, WebhookPayload payload) {
         if (bot == null) throw new IllegalArgumentException("bot must not be null");
-        List<String> workflowKeys = enabledWorkflowKeys(bot, workflowSelectionService);
+        List<String> workflowKeys = preferAgenticReview(enabledWorkflowKeys(bot, workflowSelectionService));
         if (workflowKeys.isEmpty()) {
             log.debug("[Bot '{}'] No workflows enabled", bot.getName());
             return List.of();
@@ -72,6 +76,17 @@ public class PrWorkflowOrchestrator {
             return List.of(ReviewWorkflow.KEY);
         }
         return workflowSelectionService.enabledWorkflowKeys(bot.getWorkflowConfiguration().getId());
+    }
+
+    /**
+     * When one update would trigger both the standard and the agentic review, only the agentic
+     * review runs so the pull request receives a single review.
+     */
+    static List<String> preferAgenticReview(List<String> workflowKeys) {
+        if (workflowKeys.contains(ReviewWorkflow.KEY) && workflowKeys.contains(AgentReviewWorkflow.KEY)) {
+            return workflowKeys.stream().filter(key -> !ReviewWorkflow.KEY.equals(key)).toList();
+        }
+        return workflowKeys;
     }
 
     public PrWorkflowRun run(Bot bot, WebhookPayload payload, String workflowKey) {
@@ -104,8 +119,20 @@ public class PrWorkflowOrchestrator {
     private PrWorkflowRun runWithPermit(Bot bot, WebhookPayload payload, PrWorkflow workflow,
                                         Map<String, String> hints, String owner, String repoName,
                                         Long prNumber) {
-        PrWorkflowRun run = lockManager.withLock(bot.getId(), owner, repoName, prNumber, workflow.key(),
-                () -> runService.start(bot.getId(), owner, repoName, prNumber, workflow.key()));
+        boolean review = workflow.category() == PrWorkflowCategory.REVIEW;
+        boolean supersedeOtherReviews = review && workflow.supersedesReviews(hints);
+        String lockKey = review ? REVIEW_FAMILY_LOCK_KEY : workflow.key();
+        PrWorkflowRun run = lockManager.withLock(bot.getId(), owner, repoName, prNumber, lockKey, () -> {
+            if (supersedeOtherReviews) {
+                // The newest review request wins regardless of which review workflow produced it.
+                for (PrWorkflow other : registry.all()) {
+                    if (other.category() == PrWorkflowCategory.REVIEW && !other.key().equals(workflow.key())) {
+                        runService.cancelActiveRunsForPr(bot.getId(), owner, repoName, prNumber, other.key());
+                    }
+                }
+            }
+            return runService.start(bot.getId(), owner, repoName, prNumber, workflow.key());
+        });
         log.debug("[Workflow '{}'] Started run id={}", workflow.key(), run.getId());
 
         auditService.record(PrAuditEvent.builder()
