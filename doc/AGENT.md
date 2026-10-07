@@ -23,12 +23,75 @@ Writer bots do not mutate repositories. If a coding-agent session already exists
 flowchart LR
     A[Assign bot to issue] --> B{Bot type}
     B -->|Coding bot| C[Reads context, edits workspace, validates]
-    C --> D[Pushes branch and opens PR]
-    B -->|Writer bot| E[Reads context and checks issue quality]
-    E --> F[Asks author questions or creates improved issue]
+    C --> D{Workspace changed?}
+    D -->|Yes| E[Pushes branch and opens PR]
+    D -->|No, the issue needs no change| F[Posts the answer as an issue comment]
+    B -->|Writer bot| G[Reads context and checks issue quality]
+    G --> H[Asks author questions or creates improved issue]
 ```
 
 Both agents post visible progress, error, and completion comments on the issue. Repository context gathering is not posted publicly. For the coding agent, build/test output may be posted when validation fails so users can understand why the bot is retrying.
+
+Treat the model's text in those comments as unreviewed output: an answer is published verbatim, so a model that read a file (a `.env`, a config with credentials) can quote it, and any `@name` it writes lands in a public comment. The bot ignores webhook events from its own user (`BotWebhookService#isBotUser`, checked in every platform handler), so a self-mention cannot make it respond to its own comment.
+
+## How a coding run ends
+
+A coding run ends in exactly one of three ways, and the comment on the issue always says which:
+
+| Outcome | When | What you see |
+|---------|------|--------------|
+| **Pull request** | the agent changed files and validation passed | success comment with the PR link |
+| **Answer** (no PR) | the model concluded the issue needs no repository change — a question, an analysis, or an explicitly read-only request | the model's response as a comment (*"I did not make any code changes…"*) plus a note that no pull request was opened; session status `ANSWERED` |
+| **Failure** | the agent tried to implement and produced no diff, or the model neither called tools nor answered | *"I was unable to produce a valid implementation…"* |
+
+The answer outcome exists because an issue that needs no code change can never produce a diff. The agent asks the model once to either call tools or answer in plain language, and then acts on that decision instead of retrying. Follow-up comments keep working after an answer — mention the bot again and it can still open a PR.
+
+The answer is the reply that follows that nudge, and the nudge asks for the complete answer to be written out again instead of referring back to an earlier message. A reply that is empty or was cut off at the token limit is not retried: the run publishes the complete reply the model gave *before* the nudge when there was one, and fails otherwise — a truncated sentence is never posted, and neither is a run that never answered at all. A reply that follows a change to the repository (a file write, however small) always fails when it left no diff, because "nothing needed changing" is not a conclusion the agent can verify. Only *file-changing* tools count as such an attempt: a read-only request that runs the build or test suite to report on it ("run the tests and tell me whether they pass") still ends as an answer. The comment names what the agent did, not what the issue needs, because a weak model can talk itself out of the work — watch the outcome instead: `giteabot.agent_sessions{status="answered"}` (see `doc/DEPLOYMENT.md`) climbs when runs start answering instead of working.
+
+## How a writer run ends
+
+A writer run reads repository context, then ends in exactly one of three ways:
+
+| Outcome | When | What you see |
+|---------|------|--------------|
+| **Improved issue** | the model has enough information | a new issue created from the discussion, linked back in a comment |
+| **Clarifying questions** | a fact is missing that only the author can supply | the questions as a comment, and the session stays open for the next reply |
+| **More context needed** | the model still asks for repository context after the wrap-up round was offered, or narrates twice instead of answering | *"I need more context before I can continue…"* |
+
+The wrap-up round exists for that last case. A run has `agent.writer.max-tool-rounds`
+repository-context rounds (default 5); the round after them is the **wrap-up round** — no tool is
+executed any more, every pending call is answered with *"not executed — the writer's
+repository-context budget is exhausted for this run"*, and the model is told the budget is spent and
+asked for its final answer from what it has already read (a revised issue draft, or the specific
+question it could not verify). The round after that is the model's answer, and it keeps its tool
+declarations: an empty tool list makes every client fall back to its plain-text message shape, which
+cannot carry the tool exchanges that round replays — the calls collapse into a `[called …]`
+placeholder, the results into user text, and a turn whose only content was its calls used to arrive
+as an empty message, which Anthropic and Gemini reject. A model that keeps calling tools ends on the
+*"more context needed"* comment, the same as a model that never answers; the lever for that is
+`agent.writer.max-tool-rounds`, not a request without tools. A run that reaches the round cap without any decision — the model narrated twice instead of
+answering — now posts the same comment rather than ending silently. Before the wrap-up round existed,
+a run whose tool calls arrived at the limit discarded them and ended, throwing away everything the
+model had gathered; the output contract now names the limit so the model can spend its rounds
+deliberately.
+
+A follow-up comment starts a new run, which replays the previous tool exchanges — the assistant
+turns with their calls and the tool results — from the session history, so the model does not read
+the same files twice. The replay applies to **every** agent on the loop (the coding agent included),
+not just the writer, and a pair is only replayed when it is complete:
+
+- an assistant turn keeps its `tool_calls` only when the tool rows behind it answer *every* announced
+  id; a turn whose calls were never answered — what a run that finishes on a tool-call turn leaves
+  behind, e.g. the writer's give-up branch — is replayed as plain content, or skipped when it has
+  none, because both OpenAI and Anthropic reject an unanswered `tool_calls` message;
+- ids are rewritten to the `[a-zA-Z0-9_-]` alphabet every provider accepts, so a session that
+  outlives the integration which wrote it (a local model hands out ids like `cat:0`, Anthropic
+  rejects them) still replays;
+- the `[<id>]` review marker the loop stores with a result is stripped, and orphaned or duplicated
+  tool rows are dropped.
+
+Sessions written before that payload was persisted (Flyway `V53`) drop those exchanges on replay
+instead and answer from a shorter history.
 
 ## Setup
 
@@ -76,6 +139,7 @@ Common issue-agent settings can be set as environment variables or Spring proper
 | `AGENT_CONTEXT_MAX_ISSUE_COMMENTS_CHARS` | `agent.context.max-issue-comments-chars` | `20000` | Coding | Total issue-comment context budget |
 | `AGENT_CONTEXT_MAX_SINGLE_ISSUE_COMMENT_CHARS` | `agent.context.max-single-issue-comment-chars` | `4000` | Coding | Per-comment context budget |
 | `AGENT_VALIDATION_ENABLED` | `agent.validation.enabled` | `true` | Coding | Require build/test validation before finishing |
+| `AGENT_VALIDATION_TOOL_TIMEOUT_SECONDS` | `agent.validation.tool-timeout-seconds` | `300` | Coding | Timeout for each build/test/validation command, including `execute` scripts |
 | `AGENT_BUDGET_MAX_ROUNDS` | `agent.budget.max-rounds` | `20` | Both | Maximum agent loop rounds |
 | `AGENT_BUDGET_MAX_CONTENT_ROUNDS` | `agent.budget.max-context-rounds` | `10` | Both | Maximum context-only rounds |
 | `AGENT_BUDGET_MAX_CONTEXT_TOOL_REQUESTS_PER_ROUND` | `agent.budget.max-context-tool-requests-per-round` | `10` | Coding | Context-tool requests per AI round |
@@ -85,6 +149,7 @@ Common issue-agent settings can be set as environment variables or Spring proper
 | `AGENT_BUDGET_MAX_TOOL_RESULT_CHARS` | `agent.budget.max-tool-result-chars` | `8000` | Both | Maximum characters for tool execution results |
 | `AGENT_TRIAGE_MAX_TOOL_ROUNDS` | `agent.triage.max-tool-rounds` | `5` | Triage | Context-gathering rounds before a routing decision is required |
 | `AGENT_TRIAGE_MAX_INITIAL_TREE_FILES` | `agent.triage.max-initial-tree-files` | `100` | Triage | Repository tree entries in the initial triage prompt |
+| `AGENT_WRITER_MAX_TOOL_ROUNDS` | `agent.writer.max-tool-rounds` | `5` | Writer | Repository-context rounds before the wrap-up round requires an answer |
 
 Additional advanced properties include `agent.validation.max-tool-executions`, `agent.validation.tool-timeout-seconds`, `agent.validation.available-tools`, `agent.schema.enforce`, and the opt-in `agent.critic.*` settings. Keep defaults unless you are tuning cost, reliability, or the installed toolchain.
 
@@ -110,6 +175,8 @@ services:
 The coding agent can inspect the repository, edit files, and ask to run validation tools that are enabled for the bot. Validation output is visible on the issue when it fails; successful file edits are not posted as public tool logs.
 
 The default validation tool allow-list includes Maven, Gradle, npm/Node, Go, Cargo/Rust, Python/pip, Make, gcc/g++, Ruby/Bundler, and .NET. The application Docker image is expected to contain those tools. If your image does not, adjust `agent.validation.available-tools` and the bot's **Tool Configuration** so the model only sees commands that can run.
+
+Repositories without a conventional build command — documentation-only, CI/CD and infrastructure repositories — can use the **`execute`** validation tool instead. Once it is enabled in the bot's **Tool Configuration**, the agent runs a script committed inside the checkout, addressed by its repository-relative path (`execute scripts/validate.sh`). Exit code `0` means validation passed; any non-zero exit code fails validation and returns the script's stdout/stderr to the model. The path is resolved against the workspace, so absolute paths, `..` traversal and symlinked directories are rejected, the script is executed directly rather than through a shell, and it must be committed with the executable bit. The script must also still match the committed version — `execute` refuses a script the run has changed, so the agent cannot edit the script that validates it. `execute` is additive — it never replaces the built-in tooling. See [Coding Agent → Custom validation scripts](CODING_AGENT.md#custom-validation-scripts-execute).
 
 Build/test workflows can auto-detect common project types from files such as `pom.xml`, `build.gradle`, `package.json`, `go.mod`, `Cargo.toml`, `*.csproj`, `Gemfile`, `pyproject.toml`, and `Makefile`. The coding agent still relies on the model to choose an appropriate validation command for the actual change.
 

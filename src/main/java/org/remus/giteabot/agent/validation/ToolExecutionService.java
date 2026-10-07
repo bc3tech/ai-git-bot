@@ -50,8 +50,9 @@ public class ToolExecutionService {
     private final WorkspaceService workspaceService;
 
     /**
-     * Executes a configured validation tool (mvn, gradle, …) in the given
-     * workspace directory. Rejects tools not in
+     * Executes a configured validation tool in the given workspace directory:
+     * either a binary from {@code PATH} (mvn, gradle, …) or, for {@code execute},
+     * a script committed inside the repository. Rejects tools not in
      * {@link ToolCatalog#validationToolNames()}.
      */
     public ToolResult executeTool(Path workspaceDir, String tool, List<String> arguments) {
@@ -63,18 +64,108 @@ public class ToolExecutionService {
                     "");
         }
 
-        String[] command = new String[1 + (arguments != null ? arguments.size() : 0)];
-        command[0] = tool;
+        return switch (tool) {
+            case "execute" -> executeScriptTool(workspaceDir, arguments);
+            default -> executePathTool(workspaceDir, tool, arguments);
+        };
+    }
+
+    /**
+     * Runs a binary from {@code PATH} with the supplied arguments.
+     */
+    private ToolResult executePathTool(Path workspaceDir, String tool, List<String> arguments) {
+        List<String> command = new ArrayList<>();
+        command.add(tool);
         if (arguments != null) {
-            for (int i = 0; i < arguments.size(); i++) {
-                command[i + 1] = arguments.get(i);
-            }
+            command.addAll(arguments);
         }
 
         log.info("Executing tool: {} {}", tool,
                 arguments != null ? String.join(" ", arguments) : "");
 
-        return executeCommand(workspaceDir, command);
+        return executeCommand(workspaceDir, command.toArray(String[]::new));
+    }
+
+    /**
+     * Runs the validation script committed inside the repository (the {@code execute}
+     * tool), addressed by its repository-relative path. The path must resolve to an
+     * executable regular file inside the workspace and is executed directly — never
+     * through a shell — so the argument cannot smuggle additional commands. Arguments
+     * after the path are forwarded verbatim; exit code {@code 0} means passed.
+     */
+    private ToolResult executeScriptTool(Path workspaceDir, List<String> arguments) {
+        if (arguments == null || arguments.isEmpty()
+                || arguments.getFirst() == null || arguments.getFirst().isBlank()) {
+            return new ToolResult(false, -1, "",
+                    "execute requires the repository-relative path to a validation script "
+                            + "(for example scripts/validate.sh).");
+        }
+
+        String relativePath = arguments.getFirst().strip();
+        Path script;
+        try {
+            script = resolveWorkspacePath(workspaceDir, relativePath);
+        } catch (IOException e) {
+            return new ToolResult(false, -1, "", "Validation script rejected: " + e.getMessage());
+        }
+        if (!Files.isRegularFile(script)) {
+            return new ToolResult(false, -1, "",
+                    "Validation script not found inside the repository: " + relativePath);
+        }
+        if (!Files.isExecutable(script)) {
+            return new ToolResult(false, -1, "",
+                    "Validation script is not executable: " + relativePath
+                            + ". Commit the executable bit (chmod +x / git update-index --chmod=+x) — "
+                            + "the tool never falls back to a shell interpreter.");
+        }
+
+        String status = scriptStatus(workspaceDir, relativePath);
+        if (status == null) {
+            return new ToolResult(false, -1, "",
+                    "Validation script could not be verified against the repository: " + relativePath
+                            + " (git status failed — is the workspace a git checkout?)");
+        }
+        if (!status.isEmpty()) {
+            return new ToolResult(false, -1, "",
+                    "Validation script must be the committed version: " + relativePath
+                            + " differs from HEAD (" + status + "). Editing the script cannot"
+                            + " change the validation result.");
+        }
+
+        List<String> command = new ArrayList<>(arguments.size());
+        command.add(script.toAbsolutePath().toString());
+        command.addAll(arguments.subList(1, arguments.size()));
+
+        log.info("Executing repository validation script: {}", relativePath);
+        // Pre-flight checks and the launch are not atomic: the file could be swapped in
+        // between, but only by something already inside the workspace — accepted.
+        return executeCommand(workspaceDir, command.toArray(String[]::new));
+    }
+
+    /**
+     * Porcelain status of the script: {@code ""} when it matches HEAD, non-empty when it is
+     * modified, staged, untracked, deleted or ignored, {@code null} when git could not be
+     * asked. {@code --ignored} matters because an ignored script never appears in a plain
+     * status, yet it is just as editable by the agent.
+     */
+    private String scriptStatus(Path workspaceDir, String relativePath) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder(
+                    "git", "status", "--porcelain", "--ignored", "--", relativePath);
+            pb.directory(workspaceDir.toFile());
+            pb.redirectErrorStream(true);
+            ProcessSupport.scrubEnvironment(pb);
+
+            ProcessSupport.CommandResult result = ProcessSupport.run(pb,
+                    agentConfig.getValidation().getToolTimeoutSeconds(), TimeUnit.SECONDS, 1_000);
+            return result.finished() && result.exitCode() == 0 ? result.output().strip() : null;
+        } catch (IOException e) {
+            log.warn("Could not read the git status of {}: {}", relativePath, e.getMessage());
+            return null;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        }
     }
 
     /**

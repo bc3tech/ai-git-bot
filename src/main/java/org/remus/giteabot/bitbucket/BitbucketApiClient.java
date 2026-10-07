@@ -54,6 +54,15 @@ public class BitbucketApiClient implements RepositoryApiClient {
     // ---- Pull request operations ----
 
     @Override
+    public boolean isPullRequestOpen(String owner, String repo, Long pullNumber) {
+        Map<String, Object> pr = restClient.get()
+                .uri("/repositories/{workspace}/{repo}/pullrequests/{pr_id}", owner, repo, pullNumber)
+                .retrieve()
+                .body(new ParameterizedTypeReference<>() {});
+        return pr != null && "OPEN".equals(pr.get("state"));
+    }
+
+    @Override
     public String getPullRequestDiff(String owner, String repo, Long pullNumber) {
         log.info("Fetching diff for PR #{} in {}/{} from baseUrl={}", pullNumber, owner, repo, credentials.baseUrl());
         try {
@@ -344,22 +353,6 @@ public class BitbucketApiClient implements RepositoryApiClient {
 
 
     @Override
-    public void createOrUpdateFile(String owner, String repo, String path, String content,
-                                   String message, String branch, String sha) {
-        log.info("Creating/updating file {} on branch '{}' in {}/{}", path, branch, owner, repo);
-        // Bitbucket uses the src endpoint with form data for file operations.
-        // Use a multipart-like approach with the commit endpoint.
-        restClient.post()
-                .uri("/repositories/{workspace}/{repo}/src", owner, repo)
-                .header("Content-Type", "application/x-www-form-urlencoded")
-                .body(String.format("message=%s&branch=%s&%s=%s",
-                        urlEncode(message), urlEncode(branch), urlEncode(path), urlEncode(content)))
-                .retrieve()
-                .toBodilessEntity();
-        log.info("File {} committed successfully", path);
-    }
-
-    @Override
     public Long createPullRequest(String owner, String repo, String title, String body,
                                   String head, String base) {
         log.info("Creating pull request '{}' in {}/{} from {} to {}", title, owner, repo, head, base);
@@ -457,9 +450,5 @@ public class BitbucketApiClient implements RepositoryApiClient {
                     : WorkflowRunStatus.COMPLETED_FAILURE;
             default -> WorkflowRunStatus.IN_PROGRESS;
         };
-    }
-
-    private String urlEncode(String value) {
-        return java.net.URLEncoder.encode(value, java.nio.charset.StandardCharsets.UTF_8);
     }
 }

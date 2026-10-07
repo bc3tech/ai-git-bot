@@ -93,6 +93,7 @@ public class AiClientFactory {
                                 long cacheCreationInputTokens, long cacheReadInputTokens,
                                 String rawRequest, String rawResponse) {
             aiUsageService.recordUsage(integrationName, AiAuditContext.getSessionId(),
+                    AiAuditContext.getRound(),
                     inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens,
                     rawRequest, rawResponse);
         }

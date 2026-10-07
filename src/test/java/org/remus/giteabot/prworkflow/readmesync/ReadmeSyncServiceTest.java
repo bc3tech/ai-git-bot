@@ -154,6 +154,7 @@ class ReadmeSyncServiceTest {
 
     @Test
     void offerAsPr_followUpCreationFailure_isWorkflowFailure(@TempDir Path workspace) throws Exception {
+        when(repoClient.isPullRequestOpen("acme", "my-repo", 42L)).thenReturn(true);
         Files.writeString(workspace.resolve("README.md"), "before");
         WebhookPayload payload = payloadWithoutHeadRef();
         WebhookPayload.Head head = new WebhookPayload.Head();
@@ -171,7 +172,7 @@ class ReadmeSyncServiceTest {
                 });
         when(workspaceService.listChangedFiles(workspace)).thenReturn(List.of("README.md"));
         when(workspaceService.commitAndPush(eq(workspace), anyString(), anyString(),
-                anyString(), anyString(), eq(true))).thenReturn(true);
+                anyString(), anyString(), eq(true), any(Runnable.class))).thenReturn(true);
         when(repoClient.createPullRequest(eq("acme"), eq("my-repo"), anyString(), anyString(),
                 anyString(), eq("feature/docs"))).thenReturn(null);
 

@@ -12,6 +12,7 @@ import org.springframework.stereotype.Service;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
@@ -22,9 +23,11 @@ import java.nio.file.attribute.AclFileAttributeView;
 import java.nio.file.attribute.PosixFilePermission;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -86,9 +89,11 @@ public class WorkspaceService {
                                             String owner, String repo, String branch, Long prNumber) {
         final String repositoryRemote;
         final RepositoryCredentials credentials;
+        final boolean usesAuthorizationHeader;
         try {
             repositoryRemote = repositoryClient.getRepositoryRemote(owner, repo);
             credentials = repositoryClient.getCredentials();
+            usesAuthorizationHeader = repositoryClient.usesGitAuthorizationHeader();
             if (repositoryRemote == null || repositoryRemote.isBlank() || credentials == null) {
                 throw new IllegalStateException("Repository client returned incomplete checkout configuration");
             }
@@ -104,7 +109,7 @@ public class WorkspaceService {
             Path workspaceDir = setup.workspaceDir();
             log.info("Cloning repository to {} for workspace", workspaceDir);
 
-            setup.setAuthentication(repositoryRemote, credentials);
+            setup.setAuthentication(repositoryRemote, credentials, usesAuthorizationHeader);
             CommandResult cloneResult = runRemoteCommand(setup, workspaceDir.getParent().toFile(), 60,
                     "clone", "--depth", "1", "--branch", branch,
                     repositoryRemote, workspaceDir.getFileName().toString());
@@ -124,7 +129,7 @@ public class WorkspaceService {
                 }
                 setup = createWorkspaceSetup();
                 workspaceDir = setup.workspaceDir();
-                setup.setAuthentication(repositoryRemote, credentials);
+                setup.setAuthentication(repositoryRemote, credentials, usesAuthorizationHeader);
 
                 CommandResult defaultCloneResult = runRemoteCommand(setup,
                         workspaceDir.getParent().toFile(), 60,
@@ -244,6 +249,17 @@ public class WorkspaceService {
      */
     public boolean commitAndPush(Path workspaceDir, String branchName, String commitMessage,
                                  String authorName, String authorEmail, boolean createNewBranch) {
+        return commitAndPush(workspaceDir, branchName, commitMessage, authorName, authorEmail,
+                createNewBranch, () -> { });
+    }
+
+    /**
+     * Runs the caller's live write check immediately before push; exceptions abort
+     * publication. The original overload preserves the contract of other workflows.
+     */
+    public boolean commitAndPush(Path workspaceDir, String branchName, String commitMessage,
+                                 String authorName, String authorEmail, boolean createNewBranch,
+                                 Runnable beforePush) {
         WorkspaceSetup setup = setupsByWorkspace.get(workspaceKey(workspaceDir));
         if (setup == null) {
             log.error("Cannot commit workspace without authentication state: {}", workspaceDir);
@@ -293,6 +309,9 @@ public class WorkspaceService {
                 return false;
             }
 
+            // The check may do network I/O under this workspace's lock. Keep it with
+            // the push so cleanup cannot release authentication between them.
+            beforePush.run();
             CommandResult pushResult = runRemoteCommand(setup, workspaceDir.toFile(), 60,
                     "push", "origin", branchName);
             if (!pushResult.success()) {
@@ -303,6 +322,23 @@ public class WorkspaceService {
             log.info("Successfully committed and pushed to branch '{}'", branchName);
             return true;
         }
+    }
+
+    /**
+     * Stages changes to include new/deleted files in a bounded comment preview.
+     * Call after checking the allowed file scope and before committing.
+     */
+    public String stagedDiff(Path workspaceDir) {
+        CommandResult add = runCommand(workspaceDir.toFile(), new String[]{"git", "add", "-A"}, 15);
+        if (!add.success()) {
+            throw new IllegalStateException("Cannot stage documentation diff: " + add.output());
+        }
+        CommandResult diff = runCommand(workspaceDir.toFile(),
+                new String[]{"git", "diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color", "HEAD", "--"}, 15);
+        if (!diff.success()) {
+            throw new IllegalStateException("Cannot read documentation diff: " + diff.output());
+        }
+        return diff.output();
     }
 
     /**
@@ -474,6 +510,11 @@ public class WorkspaceService {
     void createAuthenticationFiles(String repositoryRemote, RepositoryCredentials credentials,
                                     WorkspaceSetup setup) throws IOException {
         if (!credentials.usesSsh()) {
+            if (!authorizationHeaderEnvironment(setup).isEmpty()) {
+                // The token travels as an HTTP header, see authorizationHeaderEnvironment.
+                // Otherwise fall through, so opting in can never drop authentication.
+                return;
+            }
             createCredentialsFile(repositoryRemote, credentials.username(), credentials.token(),
                     setup.workspaceDir(), setup);
             return;
@@ -606,6 +647,32 @@ public class WorkspaceService {
         return args.toArray(String[]::new);
     }
 
+    /**
+     * Environment that makes Git send the token as a pre-emptive
+     * {@code Authorization: Basic} header, scoped to the workspace remote.
+     * Passed via {@code GIT_CONFIG_*} rather than {@code -c} so the token never
+     * appears in the process arguments, and never persisted to {@code .git/config}.
+     */
+    Map<String, String> authorizationHeaderEnvironment(WorkspaceSetup setup) {
+        if (setup == null || !setup.usesAuthorizationHeader()) {
+            return Map.of();
+        }
+        RepositoryCredentials credentials = setup.repositoryCredentials();
+        String remote = setup.repositoryRemote();
+        if (credentials == null || credentials.usesSsh()
+                || credentials.token() == null || credentials.token().isBlank()
+                || remote == null || !remote.toLowerCase(Locale.ROOT).matches("https?://.*")) {
+            return Map.of();
+        }
+        String username = credentials.hasUsername() ? credentials.username() : "";
+        String basic = Base64.getEncoder().encodeToString(
+                (username + ":" + credentials.token()).getBytes(StandardCharsets.UTF_8));
+        return Map.of(
+                "GIT_CONFIG_COUNT", "1",
+                "GIT_CONFIG_KEY_0", "http." + remote + ".extraheader",
+                "GIT_CONFIG_VALUE_0", "Authorization: Basic " + basic);
+    }
+
     String[] withGitConfig(String[] gitConfig, String... gitArgs) {
         String[] command = new String[1 + gitConfig.length + gitArgs.length];
         command[0] = "git";
@@ -643,8 +710,8 @@ public class WorkspaceService {
                 "fetch", "origin", "refs/heads/" + branch + ":refs/remotes/origin/" + branch);
     }
 
-    private CommandResult runRemoteCommand(WorkspaceSetup setup, File workDir, int timeoutSeconds,
-                                           String... gitArgs) {
+    CommandResult runRemoteCommand(WorkspaceSetup setup, File workDir, int timeoutSeconds,
+                                   String... gitArgs) {
         if (setup == null) {
             return new CommandResult(false, "Workspace authentication is unavailable");
         }
@@ -663,7 +730,8 @@ public class WorkspaceService {
                     result = new CommandResult(false, "Could not remove previous Git authentication files");
                 } else {
                     createAuthenticationFiles(setup.repositoryRemote(), setup.repositoryCredentials(), setup);
-                    result = runCommand(workDir, withGitConfig(gitConfigArgs(setup), gitArgs), timeoutSeconds);
+                    result = runCommand(workDir, withGitConfig(gitConfigArgs(setup), gitArgs), timeoutSeconds,
+                            authorizationHeaderEnvironment(setup));
                 }
             } catch (IOException e) {
                 result = new CommandResult(false, "Failed to prepare Git authentication: " + e.getMessage());
@@ -710,7 +778,12 @@ public class WorkspaceService {
         }
     }
 
-    private CommandResult runCommand(File workDir, String[] command, int timeoutSeconds) {
+    CommandResult runCommand(File workDir, String[] command, int timeoutSeconds) {
+        return runCommand(workDir, command, timeoutSeconds, Map.of());
+    }
+
+    private CommandResult runCommand(File workDir, String[] command, int timeoutSeconds,
+                                     Map<String, String> extraEnvironment) {
         Path disabledHooksDirectory = null;
         Path emptyGlobalGitConfig = null;
         try {
@@ -732,6 +805,7 @@ public class WorkspaceService {
             ProcessSupport.scrubEnvironmentForGit(pb);
             pb.environment().put("GIT_CONFIG_NOSYSTEM", "1");
             pb.environment().put("GIT_CONFIG_GLOBAL", emptyGlobalGitConfig.toString());
+            pb.environment().putAll(extraEnvironment);
 
             ProcessSupport.CommandResult result = ProcessSupport.run(
                     pb, timeoutSeconds, TimeUnit.SECONDS, 1024 * 1024);

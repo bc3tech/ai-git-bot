@@ -8,7 +8,7 @@ import lombok.Data;
 import java.util.List;
 
 /**
- * Request model for llama.cpp server's native /completion endpoint.
+ * Request model for llama.cpp server's OpenAI-compatible /v1/completions endpoint.
  * Supports the grammar field for structured JSON output constraints.
  * See: <a href="https://github.com/ggerganov/llama.cpp/blob/master/examples/server/README.md">...</a>
  */
@@ -16,6 +16,11 @@ import java.util.List;
 @Builder
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class LlamaCppRequest {
+
+    /**
+     * Model identifier used by llama.cpp router mode.
+     */
+    private String model;
 
     /**
      * The prompt to generate completion for.
@@ -26,8 +31,8 @@ public class LlamaCppRequest {
     /**
      * Maximum number of tokens to generate.
      */
-    @JsonProperty("n_predict")
-    private Integer nPredict;
+    @JsonProperty("max_tokens")
+    private Integer maxTokens;
 
     /**
      * Temperature for response generation (0.0 = deterministic, higher = more creative).
@@ -77,14 +82,25 @@ public class LlamaCppRequest {
     private List<String> stop;
 
     /**
-     * Whether to stream the response. We always set this to false.
+     * Whether to stream the response.
      */
     private Boolean stream;
+
+    @JsonProperty("stream_options")
+    private StreamOptions streamOptions;
 
     /**
      * Enable caching of the prompt for faster subsequent requests.
      */
     @JsonProperty("cache_prompt")
     private Boolean cachePrompt;
+
+    @Data
+    @Builder
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static class StreamOptions {
+        @JsonProperty("include_usage")
+        private Boolean includeUsage;
+    }
 
 }

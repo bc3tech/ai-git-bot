@@ -178,6 +178,25 @@ class AgentPromptBuilderTest {
         assertThat(result).contains("write-file");
     }
 
+    @Test
+    void buildNativeNoToolCallFeedback_namesBothExits_andDropsTheJsonProtocol() {
+        String result = builder.buildNativeNoToolCallFeedback();
+
+        // Exit 1: do the work through the function-calling API.
+        assertThat(result).contains("call the tools");
+        assertThat(result).contains("build or test tool");
+        // Exit 2: a task that needs no change ends with a plain-text answer.
+        assertThat(result).contains("no repository change");
+        assertThat(result).contains("plain text");
+        assertThat(result).contains("no pull request is opened");
+        // The earlier reply is not published on its own: the model is told to restate the
+        // whole answer instead of referring back to it.
+        assertThat(result).contains("Write that answer out in full");
+        assertThat(result).contains("do not refer back to an earlier message");
+        // The legacy JSON envelope instruction must not leak into NATIVE mode.
+        assertThat(result).doesNotContain("runTools");
+    }
+
     // ---- buildMultiToolFeedback tests ----
 
     @Test

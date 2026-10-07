@@ -24,7 +24,6 @@ import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.RestClient;
 
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -463,6 +462,26 @@ public class GiteaApiClient implements RepositoryApiClient {
     }
 
     @Override
+    public void addPullRequestReaction(String owner, String repo, Long pullNumber, String reaction) {
+        log.info("Adding '{}' reaction to PR #{} in {}/{}", reaction, pullNumber, owner, repo);
+        postIssueResourceReaction(owner, repo, pullNumber, reaction);
+    }
+
+    @Override
+    public void addIssueReaction(String owner, String repo, Long issueNumber, String reaction) {
+        log.info("Adding '{}' reaction to issue #{} in {}/{}", reaction, issueNumber, owner, repo);
+        postIssueResourceReaction(owner, repo, issueNumber, reaction);
+    }
+
+    private void postIssueResourceReaction(String owner, String repo, Long issueNumber, String reaction) {
+        giteaRestClient.post()
+                .uri("/api/v1/repos/{owner}/{repo}/issues/{index}/reactions", owner, repo, issueNumber)
+                .body(new ReactionRequest(reaction))
+                .retrieve()
+                .toBodilessEntity();
+    }
+
+    @Override
     public void postInlineReviewComment(String owner, String repo, Long pullNumber,
                                         String filePath, int line, String body) {
         log.info("Posting inline review comment on PR #{} in {}/{} at {}:{}", pullNumber, owner, repo, filePath, line);
@@ -580,34 +599,6 @@ public class GiteaApiClient implements RepositoryApiClient {
     }
 
 
-
-    @Override
-    public void createOrUpdateFile(String owner, String repo, String path, String content,
-                                   String message, String branch, String sha) {
-        log.info("Creating/updating file {} on branch '{}' in {}/{}", path, branch, owner, repo);
-        String base64Content = Base64.getEncoder().encodeToString(content.getBytes());
-
-        if (sha != null) {
-            giteaRestClient.put()
-                    .uri(uriBuilder -> uriBuilder
-                            .path("/api/v1/repos/{owner}/{repo}/contents/")
-                            .path(path)
-                            .build(owner, repo))
-                    .body(new UpdateFileRequest(base64Content, message, branch, sha))
-                    .retrieve()
-                    .toBodilessEntity();
-        } else {
-            giteaRestClient.post()
-                    .uri(uriBuilder -> uriBuilder
-                            .path("/api/v1/repos/{owner}/{repo}/contents/")
-                            .path(path)
-                            .build(owner, repo))
-                    .body(new CreateFileRequest(base64Content, message, branch))
-                    .retrieve()
-                    .toBodilessEntity();
-        }
-        log.info("File {} committed successfully", path);
-    }
 
 
     @Override
@@ -794,8 +785,6 @@ public class GiteaApiClient implements RepositoryApiClient {
     record ReactionRequest(String content) {}
     record InlineReviewRequest(String body, String event, List<InlineReviewComment> comments) {}
     record InlineReviewComment(String body, @com.fasterxml.jackson.annotation.JsonProperty("new_position") int newPosition, String path) {}
-    record CreateFileRequest(String content, String message, String branch) {}
-    record UpdateFileRequest(String content, String message, String branch, String sha) {}
     record CreatePullRequest(String title, String body, String head, String base) {}
     record CreateIssue(String title, String body) {}
     record EditIssueAssigneesRequest(List<String> assignees) {}

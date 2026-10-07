@@ -4,6 +4,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.remus.giteabot.agent.issueimpl.AiResponseParser;
 import org.remus.giteabot.agent.loop.ToolingMode;
 import org.remus.giteabot.agent.model.ImplementationPlan;
+import org.remus.giteabot.ai.AiAuditContext;
 import org.remus.giteabot.ai.AiClient;
 import org.remus.giteabot.ai.AiMessage;
 import org.remus.giteabot.ai.ChatTurn;
@@ -102,6 +103,7 @@ public final class UnitTestAgentRunner {
         for (int round = 1; round <= maxRounds; round++) {
             ChatTurn turn;
             try {
+                AiAuditContext.setRound(round);
                 if (mode == ToolingMode.NATIVE) {
                     turn = aiClient.chatWithTools(history, currentMessage, toolDescriptors,
                             systemPrompt, null, maxTokens);
@@ -112,6 +114,8 @@ public final class UnitTestAgentRunner {
             } catch (RuntimeException e) {
                 log.warn("[{}] AI call failed in round {}: {}", agentLabel, round, e.getMessage(), e);
                 return new Result(lastAssistantText, invocations, round - 1, true);
+            } finally {
+                AiAuditContext.clearRound();
             }
             lastAssistantText = turn.assistantText() == null ? "" : turn.assistantText();
             log.debug("[{}] round {}/{}: assistantTextLen={} toolCalls={}",
@@ -149,11 +153,7 @@ public final class UnitTestAgentRunner {
             if (currentMessage != null && !currentMessage.isEmpty()) {
                 history.add(AiMessage.builder().role("user").content(currentMessage).build());
             }
-            history.add(AiMessage.builder()
-                    .role("assistant")
-                    .content(lastAssistantText)
-                    .toolCalls(turn.toolCalls())
-                    .build());
+            history.add(turn.toAssistantMessage());
 
             for (ToolCall call : turn.toolCalls()) {
                 Map<String, Object> mapped = extractArgs(call.args());
@@ -261,4 +261,3 @@ public final class UnitTestAgentRunner {
         return node.toString();
     }
 }
-

@@ -74,6 +74,16 @@ public interface RepositoryApiClient {
         return cloneBaseUrl + "/" + owner + "/" + repo + ".git";
     }
 
+    /**
+     * Returns whether HTTP Git operations must authenticate with a pre-emptive
+     * {@code Authorization: Basic} header instead of a credential helper.
+     * Needed for providers (e.g. Azure DevOps) whose remotes reject the
+     * credential-store challenge/response flow.
+     */
+    default boolean usesGitAuthorizationHeader() {
+        return false;
+    }
+
     /** Returns the authentication token used by this client. */
     default String getToken() {
         return getCredentials().token();
@@ -163,6 +173,22 @@ public interface RepositoryApiClient {
 
     void addReaction(String owner, String repo, Long commentId, String reaction);
 
+    /**
+     * Adds a reaction to a pull request itself, rather than to a comment.
+     * Default implementation is a no-op for providers without support.
+     */
+    default void addPullRequestReaction(String owner, String repo, Long pullNumber, String reaction) {
+        // no-op by default; override where the provider supports it
+    }
+
+    /**
+     * Adds a reaction to an issue itself.
+     * Default implementation is a no-op for providers without support.
+     */
+    default void addIssueReaction(String owner, String repo, Long issueNumber, String reaction) {
+        // no-op by default; override where the provider supports it
+    }
+
     void postInlineReviewComment(String owner, String repo, Long pullNumber,
                                  String filePath, int line, String body);
 
@@ -220,6 +246,17 @@ public interface RepositoryApiClient {
     }
 
     /**
+     * Re-fetches whether a PR is open for workflow writes. The default understands
+     * GitHub/Gitea details; other providers override it. Missing state denies
+     * writes, and API failures propagate to the workflow.
+     */
+    default boolean isPullRequestOpen(String owner, String repo, Long pullNumber) {
+        Map<String, Object> details = getPullRequestDetails(owner, repo, pullNumber);
+        return details != null && "open".equals(details.get("state"))
+                && Boolean.FALSE.equals(details.get("merged"));
+    }
+
+    /**
      * Returns whether writable PR workspaces must resolve the provider's
      * authoritative head repository before cloning. Providers returning
      * {@code true} must implement {@link #getPullRequestHead} and fail closed
@@ -247,9 +284,6 @@ public interface RepositoryApiClient {
 
     String getFileContent(String owner, String repo, String path, String ref);
 
-
-    void createOrUpdateFile(String owner, String repo, String path, String content,
-                            String message, String branch, String sha);
 
     Long createPullRequest(String owner, String repo, String title, String body,
                            String head, String base);

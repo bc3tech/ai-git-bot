@@ -1,11 +1,19 @@
 package org.remus.giteabot.admin;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.remus.giteabot.ai.AiProviderMetadata;
+import org.remus.giteabot.ai.AiProviderRegistry;
+import org.remus.giteabot.ai.ollama.OllamaProviderMetadata;
 
+import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -20,8 +28,18 @@ class AiIntegrationServiceTest {
     @Mock
     private EncryptionService encryptionService;
 
+    @Mock private AiProviderRegistry providerRegistry;
+    @Mock private AiProviderMetadata provider;
+    @Mock
+    private AiIntegrationConcurrencyLimiter concurrencyLimiter;
+
     @InjectMocks
     private AiIntegrationService aiIntegrationService;
+
+    @BeforeEach
+    void providers() {
+        lenient().when(providerRegistry.getProviderOrThrow(any())).thenReturn(provider);
+    }
 
     @Test
     void save_encryptsApiKey() {
@@ -62,7 +80,92 @@ class AiIntegrationServiceTest {
         AiIntegration result = aiIntegrationService.save(integration);
 
         assertEquals("stored-encrypted-key", result.getApiKey());
-        verify(encryptionService, never()).encrypt(anyString());
+        verifyNoInteractions(encryptionService);
+        verify(provider).validateConfiguration(integration, null);
+    }
+
+    @Test
+    void save_providerChangeCannotReuseAStoredKey() {
+        AiIntegration existing = new AiIntegration();
+        existing.setProviderType("openai");
+        existing.setApiKey("stored-encrypted-key");
+        when(aiIntegrationRepository.findById(7L)).thenReturn(Optional.of(existing));
+        AiIntegration changed = new AiIntegration();
+        changed.setId(7L);
+        changed.setProviderType("openrouter");
+
+        assertThrows(IllegalArgumentException.class, () -> aiIntegrationService.save(changed));
+
+        verifyNoInteractions(encryptionService);
+        verify(aiIntegrationRepository, never()).save(any());
+    }
+
+    @Test
+    void save_switchToKeylessOllamaStillRequiresExplicitClear() {
+        AiIntegration existing = new AiIntegration();
+        existing.setProviderType("openai");
+        existing.setApiKey("stored-encrypted-key");
+        when(aiIntegrationRepository.findById(7L)).thenReturn(Optional.of(existing));
+        AiIntegration changed = new AiIntegration();
+        changed.setId(7L);
+        changed.setProviderType("ollama");
+
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                () -> ollamaService().save(changed));
+
+        assertEquals("Enter a new API key or explicitly clear the stored key when changing providers", error.getMessage());
+        verifyNoInteractions(encryptionService);
+        verify(aiIntegrationRepository, never()).save(any());
+    }
+
+    @Test
+    void save_switchToKeylessOllamaWithExplicitClearSavesWithoutACredential() {
+        AiIntegration changed = new AiIntegration();
+        changed.setId(7L);
+        changed.setProviderType("ollama");
+        changed.setApiUrl("http://localhost:11434");
+        changed.setModel("local-model");
+        changed.setApiKey("");
+        when(aiIntegrationRepository.save(any(AiIntegration.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        AiIntegration saved = ollamaService().save(changed, true);
+
+        assertEquals("ollama", saved.getProviderType());
+        assertNull(saved.getApiKey());
+        verifyNoInteractions(encryptionService);
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"", "unknown-provider"})
+    void save_requiresARegisteredProvider(String providerType) {
+        AiIntegration integration = new AiIntegration();
+        integration.setProviderType(providerType);
+
+        assertThrows(IllegalArgumentException.class, () -> ollamaService().save(integration));
+
+        verifyNoInteractions(aiIntegrationRepository, encryptionService);
+    }
+
+    private AiIntegrationService ollamaService() {
+        return new AiIntegrationService(aiIntegrationRepository, encryptionService,
+                new AiProviderRegistry(List.of(new OllamaProviderMetadata(null))), concurrencyLimiter);
+    }
+
+    @Test
+    void save_replacementKeyWinsOverClearAndDoesNotReadTheOldProviderKey() {
+        AiIntegration integration = new AiIntegration();
+        integration.setId(7L);
+        integration.setProviderType("openrouter");
+        integration.setApiKey("new-provider-key");
+        when(encryptionService.encrypt("new-provider-key")).thenReturn("new-ciphertext");
+        when(aiIntegrationRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        assertEquals("new-ciphertext", aiIntegrationService.save(integration, true).getApiKey());
+
+        verify(provider).validateConfiguration(integration, "new-provider-key");
+        verify(aiIntegrationRepository, never()).findById(anyLong());
+        verify(encryptionService, never()).decrypt(any());
     }
 
     @Test
@@ -117,6 +220,8 @@ class AiIntegrationServiceTest {
     @Test
     void deleteById_delegatesToRepository() {
         aiIntegrationService.deleteById(1L);
+
+        verify(concurrencyLimiter).forget(1L);
 
         verify(aiIntegrationRepository).deleteById(1L);
     }

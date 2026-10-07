@@ -67,6 +67,40 @@ class GitLabApiClientTest {
     }
 
     @Test
+    void addPullRequestReaction_postsEyesToMergeRequestAwardEndpoint() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitLabApiClient client = new GitLabApiClient(builder.build(), CREDS);
+
+        server.expect(requestTo(
+                        "https://gitlab.example.com/api/v4/projects/owner%2Frepo/merge_requests/42/award_emoji"))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(jsonPath("$.name").value("eyes"))
+                .andRespond(withSuccess());
+
+        client.addPullRequestReaction("owner", "repo", 42L, "eyes");
+
+        server.verify();
+    }
+
+    @Test
+    void addIssueReaction_postsEyesToIssueAwardEndpoint() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitLabApiClient client = new GitLabApiClient(builder.build(), CREDS);
+
+        server.expect(requestTo(
+                        "https://gitlab.example.com/api/v4/projects/owner%2Frepo/issues/12/award_emoji"))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(jsonPath("$.name").value("eyes"))
+                .andRespond(withSuccess());
+
+        client.addIssueReaction("owner", "repo", 12L, "eyes");
+
+        server.verify();
+    }
+
+    @Test
     void postReviewActionRequestChanges_callsGitLabRequestChangesEndpoint() {
         RestClient.Builder builder = RestClient.builder().baseUrl("https://gitlab.example.com");
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();

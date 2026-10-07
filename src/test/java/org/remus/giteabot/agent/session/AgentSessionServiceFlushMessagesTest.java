@@ -4,7 +4,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.remus.giteabot.agent.shared.AgentJackson;
 import org.remus.giteabot.ai.AiMessage;
+import org.remus.giteabot.ai.ToolCall;
 import org.remus.giteabot.session.ConversationMessage;
 
 import java.util.List;
@@ -65,5 +67,40 @@ class AgentSessionServiceFlushMessagesTest {
         // The service's replay view drops the tool message and preserves order.
         assertThat(svc.toAiMessages(managed)).extracting(AiMessage::getContent)
                 .containsExactly("kickoff", "first-ai", "follow-up");
+    }
+
+    @Test
+    void flushMessages_persistsTheNativeToolPayloadOfTheRound() {
+        AgentSession managed = new AgentSession("o", "r", 1L, "title");
+        managed.setId(7L);
+        when(repository.getReferenceById(7L)).thenReturn(managed);
+
+        AgentSessionService svc = new AgentSessionService(repository);
+
+        ToolCall call = new ToolCall("call_1", "cat",
+                AgentJackson.mapper().readTree("{\"path\":\"README.md\"}"), null);
+        svc.flushMessages(7L, List.of(
+                new PendingMessage("assistant", "reading",
+                        new PendingMessage.ToolPayload(List.of(call), null)),
+                new PendingMessage("tool", "[call_1] README body",
+                        new PendingMessage.ToolPayload(null, "call_1"))), 10L, 20L);
+
+        List<ConversationMessage> stored = managed.getMessages().stream()
+                .sorted((a, b) -> a.getCreatedAt().compareTo(b.getCreatedAt()))
+                .toList();
+
+        // The assistant turn carries the call (id, name and JSON args) ...
+        assertThat(stored.get(0).getToolCalls())
+                .contains("\"id\":\"call_1\"")
+                .contains("\"name\":\"cat\"")
+                .contains("\"path\":\"README.md\"");
+        assertThat(stored.get(0).getToolCallId()).isNull();
+        // ... and the tool row names the call it answers.
+        assertThat(stored.get(1).getToolCalls()).isNull();
+        assertThat(stored.get(1).getToolCallId()).isEqualTo("call_1");
+
+        // The pair is therefore replayable.
+        assertThat(svc.toAiMessages(managed)).extracting(AiMessage::getRole)
+                .containsExactly("assistant", "tool");
     }
 }

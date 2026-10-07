@@ -19,6 +19,7 @@ import org.remus.giteabot.prworkflow.readmesync.ReadmeSyncSlashCommandHandler;
 import org.remus.giteabot.prworkflow.review.ReviewWorkflow;
 import org.remus.giteabot.prworkflow.unittest.UnitTestSlashCommandHandler;
 import org.remus.giteabot.prworkflow.unittest.UnitTestWorkflow;
+import org.remus.giteabot.repository.Reactions;
 import org.remus.giteabot.repository.RepositoryApiClient;
 import org.remus.giteabot.review.CodeReviewService;
 import org.remus.giteabot.util.BranchFilter;
@@ -100,6 +101,7 @@ public class BotWebhookService {
             if (!isCallerAllowed(bot, payload)) {
                 return;
             }
+            acknowledgePullRequest(bot, payload);
             try {
                 prWorkflowOrchestrator.runAll(bot, payload);
             } catch (Exception e) {
@@ -108,6 +110,62 @@ public class BotWebhookService {
             }
         } finally {
             AiAuditContext.clear();
+        }
+    }
+
+    private void acknowledgeAssignedIssue(Bot bot, WebhookPayload payload) {
+        if (payload.getIssue() == null
+                || payload.getIssue().getNumber() == null
+                || payload.getRepository() == null) {
+            return;
+        }
+        String owner = payload.getRepository().getOwner() != null
+                ? payload.getRepository().getOwner().getLogin() : null;
+        String repo = payload.getRepository().getName();
+        if (owner == null || repo == null) {
+            return;
+        }
+        Long issueNumber = payload.getIssue().getNumber();
+        try {
+            if (IssueWorkflowOrchestrator.enabledWorkflowKeys(bot, workflowSelectionService).isEmpty()) {
+                return;
+            }
+            giteaClientFactory.getApiClient(bot.getGitIntegration())
+                    .addIssueReaction(owner, repo, issueNumber, Reactions.EYES);
+        } catch (RuntimeException e) {
+            log.warn("[Bot '{}'] Failed to add 👀 reaction to issue #{}: {}: {}",
+                    bot.getName(), issueNumber, e.getClass().getSimpleName(), e.getMessage());
+            log.debug("[Bot '{}'] 👀 reaction failure details", bot.getName(), e);
+        }
+    }
+
+    private void acknowledgePullRequest(Bot bot, WebhookPayload payload) {
+        if (!"opened".equals(payload.getAction())
+                && !"review_requested".equals(payload.getAction())) {
+            return;
+        }
+        if (payload.getRepository() == null
+                || payload.getPullRequest() == null
+                || payload.getPullRequest().getNumber() == null) {
+            return;
+        }
+        String owner = payload.getRepository().getOwner() != null
+                ? payload.getRepository().getOwner().getLogin() : null;
+        String repo = payload.getRepository().getName();
+        if (owner == null || repo == null) {
+            return;
+        }
+        Long pullNumber = payload.getPullRequest().getNumber();
+        try {
+            if (PrWorkflowOrchestrator.enabledWorkflowKeys(bot, workflowSelectionService).isEmpty()) {
+                return;
+            }
+            giteaClientFactory.getApiClient(bot.getGitIntegration())
+                    .addPullRequestReaction(owner, repo, pullNumber, Reactions.EYES);
+        } catch (RuntimeException e) {
+            log.warn("[Bot '{}'] Failed to add 👀 reaction to PR #{}: {}: {}",
+                    bot.getName(), pullNumber, e.getClass().getSimpleName(), e.getMessage());
+            log.debug("[Bot '{}'] 👀 reaction failure details", bot.getName(), e);
         }
     }
 
@@ -435,6 +493,7 @@ public class BotWebhookService {
             if (!isCallerAllowed(bot, payload)) {
                 return;
             }
+            acknowledgeAssignedIssue(bot, payload);
             try {
                 issueWorkflowOrchestrator.runAssigned(bot, payload);
             } catch (Exception e) {

@@ -15,6 +15,7 @@ import org.remus.giteabot.ai.AiAuditRecorder;
 import org.remus.giteabot.ai.ChatTurn;
 import org.remus.giteabot.ai.StopReason;
 import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
 
 import java.io.IOException;
@@ -27,12 +28,13 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Streaming merge behaviour of {@link LlamaCppClient}: it now sends
- * {@code stream:true} to {@code /completion} and reassembles the SSE chunks
- * ({@code data: {json}}) into a single {@link LlamaCppResponse}. These tests
+ * {@code stream:true} to {@code /v1/completions} and reassembles the SSE chunks
+ * ({@code data: {json}}) into a single {@link LlamaCppCompletionResponse}. These tests
  * drive the real client against a JDK {@link HttpServer} stub that emits the
  * same chunk sequence a live llama.cpp server produces.
  */
@@ -72,7 +74,11 @@ class LlamaCppClientStreamingTest {
     }
 
     private LlamaCppClient client() {
-        return new LlamaCppClient(timedClient(server.getAddress().getPort(), 5000),
+        return client(5000);
+    }
+
+    private LlamaCppClient client(long readTimeoutMillis) {
+        return new LlamaCppClient(timedClient(server.getAddress().getPort(), readTimeoutMillis),
                 "qwen2.5-coder", 4096);
     }
 
@@ -129,7 +135,7 @@ class LlamaCppClientStreamingTest {
     /** Emits SSE chunks: each {@code data: <json>}, then a terminating
      *  {@code data: [DONE]} (both are valid llama.cpp stream framing). */
     private void emitSse(String... jsonChunks) {
-        server.createContext("/completion", exchange -> {
+        server.createContext("/v1/completions", exchange -> {
             try {
                 drain(exchange);
                 exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
@@ -153,15 +159,15 @@ class LlamaCppClientStreamingTest {
     }
 
     // -----------------------------------------------------------------
-    // AC 2: SSE merge — content concatenated, grammar output intact,
-    // usage counters + stoppedLimit from the final (stop:true) chunk.
+    // SSE merge — content concatenated, grammar output intact, with usage
+    // counters and finish reason from the final chunks.
     // -----------------------------------------------------------------
 
     @Test
     void sseMerge_concatenatesGrammarJsonAndTakesCountersFromFinalChunk() throws Exception {
         // A GBNF-constrained JSON response, split across chunks exactly as
-        // llama.cpp would emit it token by token, with the usage counters and
-        // stoppedLimit on the final chunk (stop:true).
+        // llama.cpp would emit it token by token, with usage and finish reason
+        // metadata at the end of the stream.
         String json = "{\"fileChanges\":[{\"file\":\"a.java\",\"content\":\"int x = 1;\"}],"
                 + "\"message\":\"looks good\",\"done\":true}";
         // Split into a few pieces; the merge must reproduce the exact JSON.
@@ -169,16 +175,10 @@ class LlamaCppClientStreamingTest {
         String b = "ent\":\"int x = 1;\"}],\"message\":\"look";
         String c = "s good\",\"done\":true}";
 
-        String mid1 = "{\"content\":\"" + j(a) + "\",\"model\":\"qwen\",\"stop\":false,"
-                + "\"stopped_eos\":false,\"stopped_limit\":false,\"stopped_word\":false,"
-                + "\"tokens_evaluated\":0,\"tokens_predicted\":0,\"truncated\":false}";
-        String mid2 = "{\"content\":\"" + j(b) + "\",\"model\":\"qwen\",\"stop\":false,"
-                + "\"stopped_eos\":false,\"stopped_limit\":false,\"stopped_word\":false,"
-                + "\"tokens_evaluated\":0,\"tokens_predicted\":0,\"truncated\":false}";
-        String fin = "{\"content\":\"" + j(c) + "\",\"model\":\"qwen\",\"stop\":true,"
-                + "\"stopped_eos\":false,\"stopped_limit\":true,\"stopped_word\":false,"
-                + "\"tokens_evaluated\":16,\"tokens_predicted\":491,\"truncated\":false,"
-                + "\"timings\":{\"prompt_n\":16,\"prompt_ms\":0.3,\"predicted_n\":491,\"predicted_ms\":20.3}}";
+        String mid1 = "{\"choices\":[{\"text\":\"" + j(a) + "\",\"finish_reason\":null}]}";
+        String mid2 = "{\"choices\":[{\"text\":\"" + j(b) + "\",\"finish_reason\":null}]}";
+        String fin = "{\"choices\":[{\"text\":\"" + j(c) + "\",\"finish_reason\":\"length\"}],"
+                + "\"usage\":{\"prompt_tokens\":16,\"completion_tokens\":491}}";
 
         emitSse(mid1, mid2, fin);
 
@@ -198,17 +198,15 @@ class LlamaCppClientStreamingTest {
     }
 
     // -----------------------------------------------------------------
-    // AC 5 / edge case: per-chunk counters must not be summed.
+    // Edge case: per-chunk counters must not be summed.
     // -----------------------------------------------------------------
 
     @Test
     void usageParity_recordsFinalChunkCountersNotASum() {
-        String mid1 = "{\"content\":\"a\",\"model\":\"m\",\"stop\":false,"
-                + "\"tokens_evaluated\":0,\"tokens_predicted\":7}";
-        String mid2 = "{\"content\":\"b\",\"model\":\"m\",\"stop\":false,"
-                + "\"tokens_evaluated\":0,\"tokens_predicted\":12}";
-        String fin = "{\"content\":\"\",\"model\":\"m\",\"stop\":true,"
-                + "\"stopped_limit\":false,\"tokens_evaluated\":22,\"tokens_predicted\":19}";
+        String mid1 = "{\"choices\":[{\"text\":\"a\",\"finish_reason\":null}]}";
+        String mid2 = "{\"choices\":[{\"text\":\"b\",\"finish_reason\":null}]}";
+        String fin = "{\"choices\":[{\"text\":\"\",\"finish_reason\":\"stop\"}],"
+                + "\"usage\":{\"prompt_tokens\":22,\"completion_tokens\":19}}";
 
         emitSse(mid1, mid2, fin);
 
@@ -219,18 +217,18 @@ class LlamaCppClientStreamingTest {
         String out = client.submitReviewPrompt("review", null, "hi");
 
         assertEquals("ab", out);
-        // 19, not 7+12+19.
+        // Final usage, not a sum across chunks.
         assertEquals(22L, recorder.input);
-        assertEquals(19L, recorder.output, "output tokens = final chunk tokens_predicted (not a sum)");
+        assertEquals(19L, recorder.output, "output tokens = final usage, not a sum");
     }
 
     @Test
     void typedTurnPreservesTokenLimitAndFinalUsage() {
         emitSse("""
-                {"content":"Partial ","stop":false,"tokens_evaluated":1,"tokens_predicted":7}
+                {"choices":[{"text":"Partial ","finish_reason":null}]}
                 """.strip(), """
-                {"content":"review","stop":true,"stopped_limit":true,
-                 "tokens_evaluated":22,"tokens_predicted":19}
+                {"choices":[{"text":"review","finish_reason":"length"}],
+                 "usage":{"prompt_tokens":22,"completion_tokens":19}}
                 """.replace("\n", ""));
         LlamaCppClient client = client();
         CapturingRecorder recorder = new CapturingRecorder();
@@ -250,11 +248,12 @@ class LlamaCppClientStreamingTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"limit, MAX_TOKENS", "eos, END_TURN", "word, END_TURN", "none, OTHER", "unknown, OTHER"})
-    void typedTurnRecognizesCurrentStopTypes(String stopType, StopReason expected) {
+    @CsvSource({"stop, END_TURN", "length, MAX_TOKENS", "content_filter, OTHER", "unknown, OTHER"})
+    void typedTurnMapsOpenAiFinishReasons(String finishReason, StopReason expected) {
         emitSse("""
-                {"content":"Review text","stop":true,"stop_type":"%s","tokens_evaluated":22,"tokens_predicted":19}
-                """.formatted(stopType).strip());
+                {"choices":[{"text":"Review text","finish_reason":"%s"}],
+                 "usage":{"prompt_tokens":22,"completion_tokens":19}}
+                """.formatted(finishReason).replace("\n", ""));
 
         ChatTurn turn = client().chatWithTools(List.of(), "Review this change", List.of(), "sys", null, null);
 
@@ -265,20 +264,9 @@ class LlamaCppClientStreamingTest {
     }
 
     @Test
-    void earlierContextTruncationCannotBeClearedByTheFinalChunk() {
-        emitSse("{\"content\":\"Review \",\"stop\":false,\"truncated\":true}",
-                "{\"content\":\"text\",\"stop\":true,\"stop_type\":\"eos\",\"truncated\":false}");
-
-        ChatTurn turn = client().chatWithTools(List.of(), "Review this change", List.of(), "sys", null, null);
-
-        assertEquals(StopReason.OTHER, turn.stopReason());
-        assertEquals("Review text", turn.assistantText());
-    }
-
-    @ParameterizedTest
-    @ValueSource(strings = {"stopped_eos", "stopped_word"})
-    void typedTurnRecognizesLegacyCompletionFlags(String flag) {
-        emitSse("{\"content\":\"Review text\",\"stop\":true,\"" + flag + "\":true}");
+    void finalFinishReasonIsUsedAfterIntermediateChunks() {
+        emitSse("{\"choices\":[{\"text\":\"Review \",\"finish_reason\":null}]}",
+                "{\"choices\":[{\"text\":\"text\",\"finish_reason\":\"stop\"}]}");
 
         ChatTurn turn = client().chatWithTools(List.of(), "Review this change", List.of(), "sys", null, null);
 
@@ -286,47 +274,174 @@ class LlamaCppClientStreamingTest {
         assertEquals("Review text", turn.assistantText());
     }
 
-    @ParameterizedTest
-    @ValueSource(strings = {
-            "\"stop\":false,\"stop_type\":\"eos\"",
-            "\"stop_type\":\"eos\"",
-            "\"stop\":true",
-            "\"stop\":true,\"stop_type\":\"eos\",\"truncated\":true",
-            "\"stop\":true,\"stop_type\":\"unknown\",\"stopped_eos\":true"
-    })
-    void typedTurnRejectsIncompleteUnknownOrTruncatedCompletion(String metadata) {
-        emitSse("{\"content\":\"Review text\"," + metadata + "}");
+    @Test
+    void usageOnlyFinalChunkKeepsEarlierFinishReason() {
+        emitSse("{\"choices\":[{\"text\":\"Review text\",\"finish_reason\":\"stop\"}]}",
+                "{\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2}}");
 
         ChatTurn turn = client().chatWithTools(List.of(), "Review this change", List.of(), "sys", null, null);
 
-        assertEquals(StopReason.OTHER, turn.stopReason());
+        assertEquals(StopReason.END_TURN, turn.stopReason());
         assertEquals("Review text", turn.assistantText());
+        assertEquals(3L, turn.inputTokens());
+        assertEquals(2L, turn.outputTokens());
     }
 
-    // -----------------------------------------------------------------
-    // edge case: empty stream (0 chunks) -> existing empty-response fallback.
-    // -----------------------------------------------------------------
-
     @Test
-    void emptyStream_returnsExistingEmptyResponseFallback() {
-        server.createContext("/completion", exchange -> {
+    void sseCommentsAndKeepalivesAreIgnored() {
+        server.createContext("/v1/completions", exchange -> {
             try {
                 drain(exchange);
-                exchange.sendResponseHeaders(200, 0); // empty 200, no body
-            } catch (IOException e) {
-                // best effort
+                exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
+                exchange.sendResponseHeaders(200, 0);
+                exchange.getResponseBody().write(("""
+                        : keepalive
+                        : another comment
+                        data: {"choices":[{"text":"Review text","finish_reason":"stop"}]}
+                        data: [DONE]
+                        """).getBytes(StandardCharsets.UTF_8));
             } finally {
                 exchange.close();
             }
         });
         server.start();
 
-        String out = client().submitReviewPrompt("review", null, "hi");
-        assertTrue(out.startsWith("Unable to generate review - empty response"),
-                "expected the historical empty-response fallback, got: " + out);
+        ChatTurn turn = client().chatWithTools(List.of(), "Review this change", List.of(), "sys", null, null);
 
-        ChatTurn turn = client().chatWithTools(List.of(), "hi", List.of(), "review", null, null);
-        assertEquals(StopReason.OTHER, turn.stopReason());
-        assertEquals("", turn.assistantText());
+        assertEquals(StopReason.END_TURN, turn.stopReason());
+        assertEquals("Review text", turn.assistantText());
+    }
+
+    @Test
+    void doneMarkerStopsReadingWithoutWaitingForConnectionClose() {
+        server.createContext("/v1/completions", exchange -> {
+            try {
+                drain(exchange);
+                exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
+                exchange.sendResponseHeaders(200, 0);
+                OutputStream os = exchange.getResponseBody();
+                os.write(("data: {\"choices\":[{\"text\":\"done\","
+                        + "\"finish_reason\":\"stop\"}]}\n").getBytes(StandardCharsets.UTF_8));
+                os.write("data: [DONE]\n".getBytes(StandardCharsets.UTF_8));
+                os.flush();
+                try {
+                    Thread.sleep(1000);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            } finally {
+                exchange.close();
+            }
+        });
+        server.start();
+
+        LlamaCppClient client = client(200);
+        String result = client.submitReviewPrompt("review", null, "hi");
+
+        assertEquals("done", result);
+    }
+
+    @Test
+    void eofAfterFinishReasonIsAcceptedWithoutDoneMarker() {
+        emitRawSse("data: {\"choices\":[{\"text\":\"complete\",\"finish_reason\":\"stop\"}]}\n");
+
+        assertEquals("complete", client().submitReviewPrompt("review", null, "hi"));
+    }
+
+    @Test
+    void doneMarkerCompletesStreamWithoutFinishReason() {
+        emitRawSse("""
+                data: {"choices":[{"text":"complete","finish_reason":null}]}
+                data: [DONE]
+                """);
+
+        assertEquals("complete", client().submitReviewPrompt("review", null, "hi"));
+    }
+
+    @Test
+    void eofWithoutFinishReasonOrDoneMarkerIsRejected() {
+        emitRawSse("data: {\"choices\":[{\"text\":\"partial\",\"finish_reason\":null}]}\n");
+
+        ResourceAccessException ex = assertThrows(ResourceAccessException.class,
+                () -> client().submitReviewPrompt("review", null, "hi"));
+
+        assertTrue(ex.getMessage().contains("missing finish_reason or [DONE]"));
+    }
+
+    @Test
+    void inBandErrorAfterPartialContentFailsTheRequest() {
+        emitRawSse("""
+                data: {"choices":[{"text":"partial","finish_reason":null}]}
+                data: {"error":{"message":"model route failed","type":"server_error","code":500}}
+                """);
+
+        ResourceAccessException ex = assertThrows(ResourceAccessException.class,
+                () -> client().submitReviewPrompt("review", null, "hi"));
+
+        assertTrue(ex.getMessage().contains("model route failed"));
+    }
+
+    @Test
+    void errorEventAfterPartialContentFailsTheRequest() {
+        emitRawSse("""
+                data: {"choices":[{"text":"partial","finish_reason":null}]}
+                error: {"message":"model route failed","type":"server_error","code":500}
+                """);
+
+        ResourceAccessException ex = assertThrows(ResourceAccessException.class,
+                () -> client().submitReviewPrompt("review", null, "hi"));
+
+        assertTrue(ex.getMessage().contains("model route failed"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "",
+            "data: {}%n" + "data: [DONE]%n",
+            "data: {\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":0}}%n"
+                    + "data: [DONE]%n"
+    })
+    void emptyOrMetadataOnlyStreamsAreRejected(String bodyTemplate) {
+        emitRawSse(bodyTemplate.formatted());
+
+        assertThrows(ResourceAccessException.class,
+                () -> client().submitReviewPrompt("review", null, "hi"));
+    }
+
+    @Test
+    void completedEmptyChoiceUsesTheExistingFallback() {
+        emitRawSse("data: {\"choices\":[{\"text\":\"\",\"finish_reason\":\"stop\"}]}%n".formatted());
+
+        assertEquals("Unable to generate review - empty response from AI.",
+                client().submitReviewPrompt("review", null, "hi"));
+    }
+
+    @Test
+    void emptyBodyIsRejectedWithoutNullPointerException() {
+        server.createContext("/v1/completions", exchange -> {
+            drain(exchange);
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+        });
+        server.start();
+
+        ResourceAccessException ex = assertThrows(ResourceAccessException.class,
+                () -> client().submitReviewPrompt("review", null, "hi"));
+
+        assertTrue(ex.getMessage().contains("missing finish_reason or [DONE]"));
+    }
+
+    private void emitRawSse(String body) {
+        server.createContext("/v1/completions", exchange -> {
+            try {
+                drain(exchange);
+                exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
+                exchange.sendResponseHeaders(200, 0);
+                exchange.getResponseBody().write(body.getBytes(StandardCharsets.UTF_8));
+            } finally {
+                exchange.close();
+            }
+        });
+        server.start();
     }
 }

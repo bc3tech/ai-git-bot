@@ -9,6 +9,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 
 /**
  * Shared line-oriented streaming transport for local-provider AI clients
@@ -27,7 +28,7 @@ import java.util.function.Consumer;
  *
  * <p>The helper is format-agnostic: it only strips line terminators and skips
  * blank lines. The consumer is responsible for any framing it needs — Ollama
- * emits NDJSON (one JSON object per line) and llama.cpp's {@code /completion}
+ * emits NDJSON (one JSON object per line) and llama.cpp's {@code /v1/completions}
  * with {@code stream:true} emits SSE ({@code data: {json}} per chunk) — and for
  * parsing / reassembling the chunks into the provider-specific response DTO.</p>
  *
@@ -74,6 +75,18 @@ public final class StreamingLineReader {
      */
     public static void streamLines(RestClient restClient, String uri, Object body,
                                    Consumer<String> lineConsumer) {
+        streamLinesUntil(restClient, uri, body, line -> {
+            lineConsumer.accept(line);
+            return true;
+        });
+    }
+
+    /**
+     * Streams non-blank response lines until EOF or until the predicate returns
+     * {@code false}.
+     */
+    public static void streamLinesUntil(RestClient restClient, String uri, Object body,
+                                        Predicate<String> linePredicate) {
         restClient.post()
                 .uri(uri)
                 .body(body)
@@ -90,6 +103,9 @@ public final class StreamingLineReader {
                         throw response.createException();
                     }
                     InputStream raw = response.getBody();
+                    if (raw == null) {
+                        return null;
+                    }
                     // No try-with-resources: the underlying InputStream is the
                     // response body, which the exchange call closes in its own
                     // finally block (single close). Reading to EOF (readLine()
@@ -99,8 +115,10 @@ public final class StreamingLineReader {
                             new InputStreamReader(raw, StandardCharsets.UTF_8));
                     String line;
                     while ((line = reader.readLine()) != null) {
-                        if (!line.isEmpty()) {
-                            lineConsumer.accept(line);
+                        if (!line.isEmpty() && !linePredicate.test(line)) {
+                            // A predicate may stop at an SSE terminal marker; the
+                            // exchange callback still closes the response body.
+                            break;
                         }
                     }
                     return null;

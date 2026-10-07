@@ -58,6 +58,13 @@ public class AiUsageLog {
     @Column(nullable = false)
     private long cacheReadInputTokens;
 
+    /**
+     * Agent-loop round that produced this interaction, or {@code null} for AI
+     * calls outside an agent loop (single-shot reviews, classification, ...).
+     */
+    @Column(name = "agent_round")
+    private Integer round;
+
     /** Raw request body sent to the AI provider (JSON), for audit/debug. */
     @Column(name = "raw_request", length = 65535)
     private String rawRequest;

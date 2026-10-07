@@ -111,6 +111,7 @@ public class ReadmeSyncService {
         }
 
         Path workspace = null;
+        String generatedDiff = null;
         try {
             if (request.lifecycleMode() == SuiteLifecycleMode.OFFER_AS_PR
                     && workspaceService.isAuthoritativePullRequestFromFork(
@@ -170,14 +171,26 @@ public class ReadmeSyncService {
                 return Result.failed("Out-of-scope files changed");
             }
 
-            return applyLifecycle(context, owner, repo, prNumber, headBranch, workspace, request, toolContext);
+            if (request.lifecycleMode() != SuiteLifecycleMode.EPHEMERAL) {
+                generatedDiff = workspaceService.stagedDiff(workspace);
+            }
+            Result result = applyLifecycle(context, owner, repo, prNumber, headBranch, workspace, request, toolContext);
+            if (result.status() == Result.Status.FAILED) {
+                postComment(owner, repo, prNumber,
+                        ReadmeSyncSummaryRenderer.renderFailed(prNumber, result.summary(), generatedDiff));
+            }
+            return result;
         } catch (WorkflowCancelledException e) {
+            if (generatedDiff != null) {
+                postComment(owner, repo, prNumber,
+                        ReadmeSyncSummaryRenderer.renderFailed(prNumber, e.getMessage(), generatedDiff));
+            }
             throw e;
         } catch (RuntimeException e) {
             log.warn("readme-sync workflow failed for PR #{} in {}/{}: {}",
                     prNumber, owner, repo, e.getMessage(), e);
             postComment(owner, repo, prNumber, ReadmeSyncSummaryRenderer.renderFailed(prNumber,
-                    "unexpected error: " + e.getMessage()));
+                    "unexpected error: " + e.getMessage(), generatedDiff));
             return Result.failed(e.getMessage());
         } finally {
             if (workspace != null) {
@@ -202,20 +215,25 @@ public class ReadmeSyncService {
         }
 
         context.requireActive("before committing documentation changes");
+        Runnable beforeWrite = () -> {
+            if (!repositoryClient.isPullRequestOpen(owner, repo, prNumber)) {
+                throw new IllegalStateException("PR is no longer open or its state could not be confirmed; "
+                        + "documentation publication stopped");
+            }
+            context.requireActive("before publishing documentation changes");
+        };
 
         if (mode == SuiteLifecycleMode.OFFER_AS_PR) {
             String workBranch = "ai-docs/pr-" + prNumber + "-" + System.currentTimeMillis();
             boolean pushed = workspaceService.commitAndPush(workspace, workBranch,
                     "docs: sync documentation for PR #" + prNumber,
-                    GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL, true);
+                    GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL, true, beforeWrite);
             if (!pushed) {
-                postReviewComment(owner, repo, prNumber, ReadmeSyncSummaryRenderer.renderCompletion(
-                        prNumber, toolContext, false, null, null));
                 context.appendStep("readme-sync-commit", "commit/push failed for branch " + workBranch);
                 return Result.failed("git commit/push failed");
             }
-            String target = "(follow-up PR against `" + headBranch + "`)";
-            Long followUp = null;
+            beforeWrite.run();
+            Long followUp;
             try {
                 followUp = repositoryClient.createPullRequest(owner, repo,
                         "Sync documentation for PR #" + prNumber,
@@ -229,21 +247,22 @@ public class ReadmeSyncService {
                 context.appendStep("readme-sync-commit", "follow-up PR creation returned no PR number");
                 return Result.failed("follow-up PR creation failed");
             }
-            target = "(follow-up PR #" + followUp + " against `" + headBranch + "`)";
+            String target = "(follow-up PR #" + followUp + " against `" + headBranch + "`)";
             postReviewComment(owner, repo, prNumber, ReadmeSyncSummaryRenderer.renderCompletion(
                     prNumber, toolContext, true, target, null));
             context.appendStep("readme-sync-commit",
-                    "offer-as-pr — pushed " + workBranch + (followUp == null ? "" : (", opened PR #" + followUp)));
+                    "offer-as-pr — pushed " + workBranch + ", opened PR #" + followUp);
             return Result.success(toolContext.changeCount() + " documentation change(s) offered as a follow-up PR");
         }
 
         // COMMIT_TO_PR (default): commit straight onto the PR head branch.
         boolean committed = workspaceService.commitAndPush(workspace, headBranch,
                 "docs: sync documentation for PR #" + prNumber,
-                GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL, false);
-        postReviewComment(owner, repo, prNumber, ReadmeSyncSummaryRenderer.renderCompletion(
-                prNumber, toolContext, committed,
-                committed ? "and committed to `" + headBranch + "`" : null, null));
+                GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL, false, beforeWrite);
+        if (committed) {
+            postReviewComment(owner, repo, prNumber, ReadmeSyncSummaryRenderer.renderCompletion(
+                    prNumber, toolContext, true, "and committed to `" + headBranch + "`", null));
+        }
         context.appendStep("readme-sync-commit",
                 committed ? "Committed documentation changes to " + headBranch : "Commit skipped / failed");
         return committed

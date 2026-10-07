@@ -4,6 +4,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.remus.giteabot.agent.session.AgentSessionService;
 import org.remus.giteabot.agent.session.PendingMessage;
 import org.remus.giteabot.agent.shared.AgentMetricsHolder;
+import org.remus.giteabot.ai.AiAuditContext;
 import org.remus.giteabot.ai.AiClient;
 import org.remus.giteabot.ai.AiMessage;
 import org.remus.giteabot.ai.ChatTurn;
@@ -83,16 +84,19 @@ public final class AgentLoop {
                 ctx.issueNumber(), providerTag, resolvedMode, tools.size());
 
         for (int round = 1; round <= budget.maxRounds(); round++) {
-            log.debug("AgentLoop round {}/{} for issue #{}: calling AI (history={} msgs, prompt={} chars, mode={})",
+            // The closing rounds keep their descriptors: empty the list and every client
+            // falls back to its plain-text message shape, which cannot carry the tool
+            // exchanges those rounds replay (see the writer's wrap-up round).
+            log.debug("AgentLoop round {}/{} for issue #{}: calling AI (history={} msgs, prompt={} chars, mode={}, tools={})",
                     round, budget.maxRounds(), ctx.issueNumber(), history.size(),
-                    currentMessage == null ? 0 : currentMessage.length(), resolvedMode);
+                    currentMessage == null ? 0 : currentMessage.length(), resolvedMode, tools.size());
 
             AgentMetricsHolder.recordToolCallMode(modeTag(resolvedMode), providerTag);
 
             long started = System.nanoTime();
             ChatTurn turn;
             try {
-                turn = callAiWithRetry(history, currentMessage, tools, systemPrompt);
+                turn = callAiWithRetry(history, currentMessage, tools, systemPrompt, round);
             } finally {
                 AgentMetricsHolder.recordLatency(modeTag(resolvedMode), providerTag,
                         Duration.ofNanos(System.nanoTime() - started));
@@ -103,7 +107,9 @@ public final class AgentLoop {
                     round, budget.maxRounds(), ctx.issueNumber(),
                     aiResponse == null ? 0 : aiResponse.length(),
                     turn.toolCalls().size(), turn.stopReason());
-            pending.add(new PendingMessage("assistant", aiResponse));
+            pending.add(new PendingMessage("assistant", aiResponse,
+                    turn.toolCalls().isEmpty() ? null
+                            : new PendingMessage.ToolPayload(turn.toolCalls(), null)));
 
             // Track token usage (accumulated in-memory on the session; persisted by
             // flushRound) and trigger tool-message truncation when the context
@@ -142,8 +148,7 @@ public final class AgentLoop {
                 // Include toolResult (not just content) and tool descriptors
                 // in the estimation — these are part of every API call.
                 int historyChars = history.stream()
-                        .mapToInt(m -> (m.getContent() == null ? 0 : m.getContent().length())
-                                + (m.getToolResult() == null ? 0 : m.getToolResult().length()))
+                        .mapToInt(HistoryCompactor::messageChars)
                         .sum();
                 int systemPromptChars = systemPrompt != null ? systemPrompt.length() : 0;
                 int currentMessageChars = currentMessage != null ? currentMessage.length() : 0;
@@ -210,11 +215,7 @@ public final class AgentLoop {
             if (currentMessage != null && !currentMessage.isEmpty()) {
                 history.add(AiMessage.builder().role("user").content(currentMessage).build());
             }
-            history.add(AiMessage.builder()
-                    .role("assistant")
-                    .content(aiResponse)
-                    .toolCalls(turn.toolCalls().isEmpty() ? null : turn.toolCalls())
-                    .build());
+            history.add(turn.toAssistantMessage());
 
             if (decision instanceof StepDecision.ContinueWithToolResults(
                     List<StepDecision.ToolCallResult> results, String follow
@@ -227,10 +228,12 @@ public final class AgentLoop {
                             .toolCallId(r.toolCallId())
                             .toolResult(r.resultText())
                             .build());
-                    // Persist a textual marker in the session log so post-hoc review still shows
-                    // the tool flow. Full structured replay is intentionally out of scope here.
+                    // The row keeps a textual marker for post-hoc review and carries the
+                    // native call id, so a follow-up run can rebuild the pair for the
+                    // provider instead of replaying an orphaned tool message.
                     pending.add(new PendingMessage("tool",
-                            "[" + r.toolCallId() + "] " + r.resultText()));
+                            "[" + r.toolCallId() + "] " + r.resultText(),
+                            new PendingMessage.ToolPayload(null, r.toolCallId())));
                 }
                 currentMessage = (follow == null || follow.isEmpty()) ? "" : follow;
                 if (!currentMessage.isEmpty()) {
@@ -306,11 +309,10 @@ public final class AgentLoop {
         return mode == ToolingMode.NATIVE ? "native" : "legacy";
     }
 
-    /** Sums content + toolResult character counts for all history messages. */
+    /** Sums visible content, tool results and opaque reasoning for all history messages. */
     private static int historyMessageChars(List<AiMessage> history) {
         return history.stream()
-                .mapToInt(m -> (m.getContent() == null ? 0 : m.getContent().length())
-                        + (m.getToolResult() == null ? 0 : m.getToolResult().length()))
+                .mapToInt(HistoryCompactor::messageChars)
                 .sum();
     }
 
@@ -351,10 +353,11 @@ public final class AgentLoop {
      * @throws RuntimeException if the failure is not retryable or the retry fails
      */
     private ChatTurn callAiWithRetry(List<AiMessage> history, String currentMessage,
-                                     List<ToolDescriptor> tools, String systemPrompt) {
+                                     List<ToolDescriptor> tools, String systemPrompt, int round) {
         int maxAttempts = 2;
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             try {
+                AiAuditContext.setRound(round);
                 return aiClient.chatWithTools(history, currentMessage, tools, systemPrompt,
                         null, budget.maxTokensPerCall());
             } catch (RuntimeException e) {
@@ -377,6 +380,8 @@ public final class AgentLoop {
                             + "Retrying without changing history. Error: {}",
                             attempt, maxAttempts, e.getMessage());
                 }
+            } finally {
+                AiAuditContext.clearRound();
             }
         }
         // Unreachable, but keeps the compiler happy

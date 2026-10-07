@@ -58,6 +58,21 @@ number of path segments), `*` (within a segment), and `?`. Examples:
 | `offer-as-pr` | A follow-up PR is opened with the documentation changes, for separate review. |
 | `ephemeral` | The proposed changes are reported in the comment but not committed. |
 
+Both write modes re-check the live PR state immediately before pushing, and
+`offer-as-pr` checks again before creating its follow-up PR. Closed, merged, or
+unconfirmed states stop publication; an API failure does not permit a write.
+GitLab's transitional `locked` state also stops publication. Report-only mode
+does not need this check.
+
+When publication stops or fails, the workflow attempts to post the generated
+documentation diff as a regular comment on the original PR. Oversized diffs are
+explicitly marked as truncated previews, not complete patches. The workspace is
+cleaned up normally; there is no retained patch or recovery directory. If the
+comment also fails, the error is logged and the generated changes are discarded.
+
+The state check and Git push are separate requests, so a merge occurring after
+the check can still race with the push; this is not an atomic platform lock.
+
 ## Running it
 
 - **Automatically** on PR open / update, when enabled on the bot.

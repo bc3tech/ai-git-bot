@@ -234,6 +234,18 @@ default; requires a Claude 5.x model (`claude-fable-5`, `claude-opus-5`,
 | `JPA_DDL_AUTO` | `validate` | Hibernate DDL auto mode. |
 | `FLYWAY_ENABLED` | `true` | Enable Flyway database migrations. |
 
+#### OpenRouter settings upgrade (V56)
+
+The H2 and PostgreSQL `V56__openrouter_settings.sql` migrations deliberately use `ADD COLUMN IF NOT EXISTS` to preserve settings when some OpenRouter columns already exist. This supports partial-column upgrades and SQL replay; it does **not** detect or repair schema drift. Flyway checksum validation does not validate existing column definitions.
+
+If these columns were added manually, verify the following definitions on `ai_integrations` before upgrading. All three columns must be **NOT NULL**; reconcile mismatches explicitly after backing up the database rather than relying on the existence guards.
+
+| Column | Type | Default |
+|--------|------|---------|
+| `openrouter_region` | `VARCHAR(16)` | `'GLOBAL'` |
+| `openrouter_data_collection` | `VARCHAR(16)` | `'DENY'` |
+| `openrouter_zdr` | `BOOLEAN` | `FALSE` |
+
 ### HTTP Client Timeouts (Optional)
 
 These timeouts apply to all outbound HTTP clients, including AI providers and Git host APIs:
@@ -379,6 +391,7 @@ Included metrics:
 | `giteabot_ai_usage_output_tokens{integration}` | gauge | Total output tokens per AI integration |
 | `giteabot_ai_errors` | gauge | Total AI provider errors |
 | `giteabot_audit_tool_calls` | gauge | Total tool calls recorded in the audit trail |
+| `giteabot_agent_sessions{status}` | gauge | Coding-agent sessions per status — terminal statuses (`answered`, `failed`, `completed`, …) only grow, so alert on `answered` to catch runs that answered instead of changing code |
 | `prworkflow.run_total` | counter | PR workflow runs by workflow and status |
 | `prworkflow.run_duration_seconds` | timer | PR workflow run durations |
 | `agent.tool_calls_total{provider}` | counter | Individual tool-call invocations per provider |

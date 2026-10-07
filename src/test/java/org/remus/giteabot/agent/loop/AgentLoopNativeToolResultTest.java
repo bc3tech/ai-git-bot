@@ -43,6 +43,8 @@ import static org.mockito.Mockito.when;
  *       {@code tool}-role {@link AiMessage} with the right {@code toolCallId}.</li>
  *   <li>No spurious empty user message is inserted between rounds when the
  *       strategy provides no follow-up text.</li>
+ *   <li>The flushed batch carries the same payload, so the exchange can be
+ *       replayed by a follow-up run.</li>
  * </ul>
  */
 @ExtendWith(MockitoExtension.class)
@@ -51,12 +53,11 @@ class AgentLoopNativeToolResultTest {
     @Mock private AiClient aiClient;
     @Mock private AgentSessionService sessionService;
 
-    private AgentSession session;
     private AgentRunContext ctx;
 
     @BeforeEach
     void setUp() {
-        session = new AgentSession("owner", "repo", 11L, "issue title");
+        AgentSession session = new AgentSession("owner", "repo", 11L, "issue title");
         session.setId(1L); // persisted session — the loop flushes id-bearing sessions
         ctx = new AgentRunContext(session, "owner", "repo", 11L, Path.of("/tmp/ws"), "main");
         when(sessionService.toAiMessages(session)).thenReturn(List.of());
@@ -142,13 +143,92 @@ class AgentLoopNativeToolResultTest {
         assertThat(toolB.getToolResult()).isEqualTo("rg found 3 matches");
 
         // The first round is flushed as one batch; the session log receives the
-        // tool results too (textual mirror), with no spurious follow-up user
-        // message since the strategy supplied none.
+        // tool results too (textual mirror for post-hoc review) plus the native
+        // payload that lets a later run replay the pair, with no spurious
+        // follow-up user message since the strategy supplied none.
         verify(sessionService).flushMessages(any(), eq(List.of(
                 new PendingMessage("user", "go"),
-                new PendingMessage("assistant", "inspecting…"),
-                new PendingMessage("tool", "[call_aaa] file content of cat"),
-                new PendingMessage("tool", "[call_bbb] rg found 3 matches"))),
+                new PendingMessage("assistant", "inspecting…",
+                        new PendingMessage.ToolPayload(List.of(call1, call2), null)),
+                new PendingMessage("tool", "[call_aaa] file content of cat",
+                        new PendingMessage.ToolPayload(null, "call_aaa")),
+                new PendingMessage("tool", "[call_bbb] rg found 3 matches",
+                        new PendingMessage.ToolPayload(null, "call_bbb")))),
+                anyLong(), anyLong());
+    }
+
+    @Test
+    void continueWithToolResults_deliversTheFollowUpTextAsTheNextUserTurn() {
+        when(aiClient.supportsNativeTools()).thenReturn(true);
+
+        ToolCall call = new ToolCall("call_aaa", "cat", null);
+        ChatTurn round1 = new ChatTurn("reading", List.of(call), StopReason.TOOL_USE, 0L, 0L);
+        ChatTurn round2 = new ChatTurn("final answer", List.of(), StopReason.END_TURN, 0L, 0L);
+        when(aiClient.chatWithTools(anyList(), anyString(), anyList(), anyString(), isNull(), anyInt()))
+                .thenReturn(round1, round2);
+
+        AgentLoop loop = new AgentLoop(aiClient, sessionService,
+                new AgentBudget(3, 2, 2, 4000, 8_000, 120_000, 200_000, 0.7));
+
+        AtomicInteger callCount = new AtomicInteger();
+        AgentStrategy strategy = new AgentStrategy() {
+            @Override public String systemPrompt() { return "sys"; }
+            @Override public ToolingMode preferredToolMode() { return ToolingMode.NATIVE; }
+            @Override public List<ToolDescriptor> toolDescriptors() {
+                return List.of(new ToolDescriptor("cat", "read", null));
+            }
+            @Override
+            public StepDecision step(AgentRunContext ctx, ChatTurn turn, int round) {
+                if (callCount.incrementAndGet() == 1) {
+                    // The writer's wrap-up round: the calls are refused and the follow
+                    // slot carries the instruction the model has to answer.
+                    return new StepDecision.ContinueWithToolResults(List.of(
+                            new StepDecision.ToolCallResult("call_aaa",
+                                    "not executed — the repository-context budget is exhausted")),
+                            "## Context rounds exhausted\n\nReturn your final answer now.");
+                }
+                return new StepDecision.Finish(LoopOutcome.success(ctx.baseBranch(), null));
+            }
+            @Override
+            public StepDecision step(AgentRunContext ctx, String aiResponse, int round) {
+                throw new AssertionError("text step should not be called in NATIVE mode");
+            }
+            @Override
+            public LoopOutcome onBudgetExhausted(AgentRunContext ctx) {
+                return LoopOutcome.fail(ctx.baseBranch());
+            }
+        };
+
+        loop.run(ctx, "go", strategy);
+
+        // The model only learns about the wrap-up round through this second request:
+        // the skipped result, the assistant turn it answers, and the instruction as
+        // the next user turn.
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<AiMessage>> historyCaptor = ArgumentCaptor.forClass(List.class);
+        ArgumentCaptor<String> messageCaptor = ArgumentCaptor.forClass(String.class);
+        verify(aiClient, times(2)).chatWithTools(historyCaptor.capture(), messageCaptor.capture(),
+                anyList(), anyString(), isNull(), anyInt());
+
+        // The wrap-up instruction is the request's user message — that is how the model
+        // learns that the budget is spent and that it has to answer now.
+        assertThat(messageCaptor.getAllValues().get(1)).contains("Context rounds exhausted");
+        List<AiMessage> round2History = historyCaptor.getAllValues().get(1);
+        assertThat(round2History).extracting(AiMessage::getRole)
+                .containsExactly("user", "assistant", "tool");
+        assertThat(round2History.get(1).getToolCalls()).extracting(ToolCall::id).containsExactly("call_aaa");
+        assertThat(round2History.get(2).getToolResult())
+                .isEqualTo("not executed — the repository-context budget is exhausted");
+
+        // The round is also written to the session log, wrap-up included, so a
+        // follow-up run replays the instruction that ended the refused exchange.
+        verify(sessionService).flushMessages(any(), eq(List.of(
+                new PendingMessage("user", "go"),
+                new PendingMessage("assistant", "reading",
+                        new PendingMessage.ToolPayload(List.of(call), null)),
+                new PendingMessage("tool", "[call_aaa] not executed — the repository-context budget is exhausted",
+                        new PendingMessage.ToolPayload(null, "call_aaa")),
+                new PendingMessage("user", "## Context rounds exhausted\n\nReturn your final answer now."))),
                 anyLong(), anyLong());
     }
 }

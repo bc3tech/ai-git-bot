@@ -20,7 +20,6 @@ import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.RestClient;
 
-import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -55,6 +54,18 @@ public class GitLabApiClient implements RepositoryApiClient {
     @Override
     public String formatPullRequestReference(Long prNumber) {
         return "!" + prNumber;
+    }
+
+    @Override
+    public boolean isPullRequestOpen(String owner, String repo, Long pullNumber) {
+        Map<String, Object> mr = gitlabRestClient.get()
+                .uri("/api/v4/projects/{projectPath}/merge_requests/{iid}",
+                        encodeProjectPath(owner, repo), pullNumber)
+                .retrieve()
+                .body(new ParameterizedTypeReference<>() {});
+        // The transitional "locked" state deliberately denies workflow writes;
+        // this does not mean the MR is closed. Only "opened" permits a write.
+        return mr != null && "opened".equals(mr.get("state"));
     }
 
     @Override
@@ -252,6 +263,30 @@ public class GitLabApiClient implements RepositoryApiClient {
         // This is a known limitation — reactions are best-effort and non-critical.
         log.debug("Skipping reaction '{}' on note #{} in {}/{}: GitLab requires MR IID which is not available",
                 reaction, commentId, owner, repo);
+    }
+
+    @Override
+    public void addPullRequestReaction(String owner, String repo, Long pullNumber, String reaction) {
+        log.info("Adding '{}' award emoji to MR !{} in {}/{}", reaction, pullNumber, owner, repo);
+        String projectPath = encodeProjectPath(owner, repo);
+        gitlabRestClient.post()
+                .uri("/api/v4/projects/{projectPath}/merge_requests/{iid}/award_emoji",
+                        projectPath, pullNumber)
+                .body(Map.of("name", reaction))
+                .retrieve()
+                .toBodilessEntity();
+    }
+
+    @Override
+    public void addIssueReaction(String owner, String repo, Long issueNumber, String reaction) {
+        log.info("Adding '{}' award emoji to issue #{} in {}/{}", reaction, issueNumber, owner, repo);
+        String projectPath = encodeProjectPath(owner, repo);
+        gitlabRestClient.post()
+                .uri("/api/v4/projects/{projectPath}/issues/{iid}/award_emoji",
+                        projectPath, issueNumber)
+                .body(Map.of("name", reaction))
+                .retrieve()
+                .toBodilessEntity();
     }
 
     @Override
@@ -481,42 +516,6 @@ public class GitLabApiClient implements RepositoryApiClient {
     }
 
 
-
-    @Override
-    public void createOrUpdateFile(String owner, String repo, String path, String content,
-                                   String message, String branch, String sha) {
-        log.info("Creating/updating file {} on branch '{}' in {}/{}", path, branch, owner, repo);
-        String projectPath = encodeProjectPath(owner, repo);
-        String base64Content = Base64.getEncoder().encodeToString(content.getBytes());
-
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("branch", branch);
-        body.put("content", base64Content);
-        body.put("commit_message", message);
-        body.put("encoding", "base64");
-        if (sha != null) {
-            body.put("last_commit_id", sha);
-        }
-
-        if (sha != null) {
-            // Update existing file
-            gitlabRestClient.put()
-                    .uri("/api/v4/projects/{projectPath}/repository/files/{filePath}",
-                            projectPath, path)
-                    .body(body)
-                    .retrieve()
-                    .toBodilessEntity();
-        } else {
-            // Create new file
-            gitlabRestClient.post()
-                    .uri("/api/v4/projects/{projectPath}/repository/files/{filePath}",
-                            projectPath, path)
-                    .body(body)
-                    .retrieve()
-                    .toBodilessEntity();
-        }
-        log.info("File {} committed successfully", path);
-    }
 
     @Override
     public Long createPullRequest(String owner, String repo, String title, String body,

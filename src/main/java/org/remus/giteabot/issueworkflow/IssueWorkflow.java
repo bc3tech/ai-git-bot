@@ -6,8 +6,7 @@ import org.remus.giteabot.prworkflow.WorkflowDescriptor;
  * Strategy contract for one pluggable workflow that runs when a bot is
  * assigned to an issue ({@link #onIssueAssigned}) and when it receives
  * follow-up comments on that issue ({@link #onIssueComment}). This is the
- * issue-side counterpart of {@code org.remus.giteabot.prworkflow.PrWorkflow}
- * and replaces the deprecated {@code Bot.botType} (CODING/WRITER) dispatch.
+ * issue-side counterpart of {@code org.remus.giteabot.prworkflow.PrWorkflow}.
  *
  * <p>Implementations are registered automatically through Spring DI and
  * discovered by {@link IssueWorkflowRegistry}. The two built-in

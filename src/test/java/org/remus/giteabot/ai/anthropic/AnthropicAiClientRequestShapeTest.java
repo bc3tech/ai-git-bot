@@ -231,6 +231,22 @@ class AnthropicAiClientRequestShapeTest {
         assertNull(request.getOutputConfig(), "output_config must be null when disabled");
     }
 
+    @Test
+    void sendChatRequest_neverSendsAnEmptyMessageForAToolOnlyTurn() {
+        // A native session replayed in legacy mode (the integration was switched, or the
+        // provider advertises no native tools): the turn that only called tools has no text
+        // of its own, and Anthropic rejects an empty message.
+        client.sendChatRequest("You are a chat assistant.", "claude-sonnet-4-20250514",
+                1024, toolOnlyHistory());
+
+        AnthropicRequest request = capturedRequest();
+
+        assertTrue(request.getMessages().stream().noneMatch(m -> m.getContent() == null
+                        || m.getContent().toString().isBlank()),
+                "every legacy message must carry text");
+        assertEquals("[called cat]", request.getMessages().getFirst().getContent());
+    }
+
     // ---------------------------------------------------------- helpers
 
     private static ToolDescriptor tool(String name) {
@@ -271,5 +287,20 @@ class AnthropicAiClientRequestShapeTest {
             }
         }
         return blocks;
+    }
+
+    /** A replayed native round: an assistant turn whose only content is the tool call. */
+    private static List<AiMessage> toolOnlyHistory() {
+        return List.of(
+                AiMessage.builder()
+                        .role("assistant")
+                        .toolCalls(List.of(new ToolCall("call-1", "cat",
+                                new ObjectMapper().createObjectNode())))
+                        .build(),
+                AiMessage.builder()
+                        .role("tool")
+                        .toolCallId("call-1")
+                        .toolResult("result 1")
+                        .build());
     }
 }

@@ -532,6 +532,7 @@
             const mcpSelectedToolsBaseUrl = /*[[@{/bots/mcp-configurations/}]]*/ '/bots/mcp-configurations/';
             const botToolsBaseUrl = /*[[@{/bots/bot-tools/}]]*/ '/bots/bot-tools/';
             const workflowConfigurationBaseUrl = /*[[@{/system-settings/workflow-configurations/}]]*/ '/system-settings/workflow-configurations/';
+            const issueWorkflowConfigurationBaseUrl = /*[[@{/system-settings/issue-workflow-configurations/}]]*/ '/system-settings/issue-workflow-configurations/';
             const tServer = /*[[#{label.server}]]*/ 'Server';
             const tTool = /*[[#{label.tool}]]*/ 'Tool';
             const tTitle = /*[[#{label.title}]]*/ 'Title';
@@ -776,8 +777,9 @@
                 workflowConfigurationSelect.addEventListener('change', updateWorkflowConfigurationDetailButtonState);
                 updateWorkflowConfigurationDetailButtonState();
 
-                // The issue-assigned selector shares the details modal and the
-                // (kind-agnostic) selected-workflows endpoint.
+                // The issue-assigned selector shares the details modal, but its
+                // configurations live under the ISSUE-kind endpoint, so it needs its
+                // own base URL (the PR one answers 404 for an issue configuration).
                 const issueWorkflowConfigurationSelect = document.getElementById('issueWorkflowConfigurationId');
                 const issueWorkflowConfigurationDetailsBtn = document.getElementById('issueWorkflowConfigurationDetailsBtn');
 
@@ -793,7 +795,7 @@
                     if (!selectedIssueWorkflowConfigId) {
                         return;
                     }
-                    fetch(workflowConfigurationBaseUrl + encodeURIComponent(selectedIssueWorkflowConfigId) + '/selected-workflows')
+                    fetch(issueWorkflowConfigurationBaseUrl + encodeURIComponent(selectedIssueWorkflowConfigId) + '/selected-workflows')
                         .then(function(response) {
                             if (!response.ok) {
                                 throw new Error(i18nWorkflowDetailsLoadFailed);

@@ -13,7 +13,6 @@ import org.remus.giteabot.repository.model.ReviewComment;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.web.client.RestClient;
 
-import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 
@@ -167,6 +166,27 @@ public class GitHubApiClient implements RepositoryApiClient {
     }
 
     @Override
+    public void addPullRequestReaction(String owner, String repo, Long pullNumber, String reaction) {
+        log.info("Adding '{}' reaction to PR #{} in {}/{}", reaction, pullNumber, owner, repo);
+        postIssueResourceReaction(owner, repo, pullNumber, reaction);
+    }
+
+    @Override
+    public void addIssueReaction(String owner, String repo, Long issueNumber, String reaction) {
+        log.info("Adding '{}' reaction to issue #{} in {}/{}", reaction, issueNumber, owner, repo);
+        postIssueResourceReaction(owner, repo, issueNumber, reaction);
+    }
+
+    private void postIssueResourceReaction(String owner, String repo, Long issueNumber, String reaction) {
+        restClient.post()
+                .uri("/repos/{owner}/{repo}/issues/{issue_number}/reactions",
+                        owner, repo, issueNumber)
+                .body(new ReactionRequest(reaction))
+                .retrieve()
+                .toBodilessEntity();
+    }
+
+    @Override
     public void postInlineReviewComment(String owner, String repo, Long pullNumber,
                                         String filePath, int line, String body) {
         log.info("Posting inline review comment on PR #{} in {}/{} at {}:{}",
@@ -301,31 +321,6 @@ public class GitHubApiClient implements RepositoryApiClient {
         return content != null ? content : "";
     }
 
-
-    @Override
-    public void createOrUpdateFile(String owner, String repo, String path, String content,
-                                   String message, String branch, String sha) {
-        log.info("Creating/updating file {} on branch '{}' in {}/{}", path, branch, owner, repo);
-        String base64Content = Base64.getEncoder().encodeToString(content.getBytes());
-
-        var body = new java.util.LinkedHashMap<String, Object>();
-        body.put("message", message);
-        body.put("content", base64Content);
-        body.put("branch", branch);
-        if (sha != null) {
-            body.put("sha", sha);
-        }
-
-        restClient.put()
-                .uri(uriBuilder -> uriBuilder
-                        .path("/repos/{owner}/{repo}/contents/")
-                        .path(path)
-                        .build(owner, repo))
-                .body(body)
-                .retrieve()
-                .toBodilessEntity();
-        log.info("File {} committed successfully", path);
-    }
 
 
     @Override

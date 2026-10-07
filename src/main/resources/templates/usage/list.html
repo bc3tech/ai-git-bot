@@ -79,7 +79,7 @@
                                 <table class="table table-hover align-middle mb-0">
                                     <thead class="table-group-divider">
                                     <tr>
-                                        <th th:each="col : ${ {'timestamp', 'aiIntegrationName', 'sessionId', 'inputTokens', 'outputTokens', 'cacheCreationInputTokens', 'cacheReadInputTokens'} }">
+                                        <th th:each="col : ${ {'timestamp', 'aiIntegrationName', 'sessionId', 'round', 'inputTokens', 'outputTokens', 'cacheCreationInputTokens', 'cacheReadInputTokens'} }">
                                             <a class="sort-link"
                                                th:href="@{/usage(from=${from}, to=${to}, usagePage=1, usageSize=${usageSize},
                                                           usageSort=${col},
@@ -100,6 +100,7 @@
                                         <td th:text="${#temporals.format(entry.timestamp, 'yyyy-MM-dd HH:mm:ss')}">2024-01-01</td>
                                         <td th:text="${entry.aiIntegrationName}">integration</td>
                                         <td><code th:text="${entry.sessionId != null ? entry.sessionId : '—'}">session</code></td>
+                                        <td th:text="${entry.round != null ? entry.round : '—'}">—</td>
                                         <td th:text="${entry.inputTokens}">0</td>
                                         <td th:text="${entry.outputTokens}">0</td>
                                         <td th:text="${entry.cacheCreationInputTokens}">0</td>

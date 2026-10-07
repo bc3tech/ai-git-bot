@@ -18,7 +18,6 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -92,7 +91,7 @@ class BotControllerTest {
     }
 
     @Test
-    void newForm_exposesIssueWorkflowConfigurations_andNoBotTypes() {
+    void newForm_exposesIssueWorkflowConfigurations() {
         WorkflowConfigurationService workflowConfigurationService =
                 mock(WorkflowConfigurationService.class);
         org.remus.giteabot.prworkflow.config.WorkflowConfiguration issueDefault =
@@ -118,9 +117,8 @@ class BotControllerTest {
         String view = controller.newForm(model);
 
         assertEquals("bots/form", view);
-        // The deprecated bot-type selector is gone; the issue-assigned
-        // workflow selector is fed (and pre-selected with the ISSUE default).
-        assertNull(model.getAttribute("botTypes"));
+        // The issue-assigned workflow selector is fed (and pre-selected with
+        // the ISSUE default).
         org.junit.jupiter.api.Assertions.assertNotNull(
                 model.getAttribute("issueWorkflowConfigurations"));
         Bot formBot = (Bot) model.getAttribute("bot");

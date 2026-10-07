@@ -66,4 +66,15 @@ class ReadmeSyncSummaryRendererTest {
         assertTrue(failed.contains("❌"), failed);
         assertFalse(failed.contains("Skipped"), failed);
     }
+
+    @Test
+    void failedDiff_keepsMarkdownContextFencesInsideTheCodeBlock() {
+        String diff = "diff --git a/README.md b/README.md\n"
+                + "@@ -1,3 +1,3 @@\n ```sh\n-old\n+new\n ```\n";
+
+        String md = ReadmeSyncSummaryRenderer.renderFailed(42, "PR is closed", diff);
+
+        assertTrue(md.contains("\n````diff\n" + diff), md);
+        assertTrue(md.endsWith("\n````\n"), md);
+    }
 }

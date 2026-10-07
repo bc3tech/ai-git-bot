@@ -8,6 +8,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.remus.giteabot.agent.session.AgentSession;
 import org.remus.giteabot.agent.session.AgentSessionService;
 import org.remus.giteabot.agent.session.PendingMessage;
+import org.remus.giteabot.ai.AiAuditContext;
 import org.remus.giteabot.ai.AiClient;
 import org.remus.giteabot.ai.AiMessage;
 import org.remus.giteabot.ai.ChatTurn;
@@ -154,6 +155,37 @@ class AgentLoopTest {
                 new PendingMessage("user", "kickoff"),
                 new PendingMessage("assistant", "first-ai"),
                 new PendingMessage("user", "follow-up-prompt"))), anyLong(), anyLong());
+    }
+
+    @Test
+    void run_publishesAgentLoopRoundDuringEachCall_andClearsItAfter() {
+        AgentLoop loop = new AgentLoop(aiClient, sessionService,
+                new AgentBudget(5, 3, 3, 8000,
+                        8_000, 120_000,
+                        200_000, 0.7));
+        java.util.List<Integer> roundsDuringCalls = new java.util.ArrayList<>();
+        when(aiClient.chatWithTools(anyList(), anyString(), eq(List.of()), anyString(), isNull(), anyInt()))
+                .thenAnswer(inv -> {
+                    roundsDuringCalls.add(AiAuditContext.getRound());
+                    return ChatTurn.text("ai-" + roundsDuringCalls.size());
+                });
+
+        AtomicInteger calls = new AtomicInteger();
+        AgentStrategy strategy = new AgentStrategy() {
+            @Override public String systemPrompt() { return "sys"; }
+            @Override public StepDecision step(AgentRunContext c, String r, int round) {
+                if (calls.incrementAndGet() == 1) return new StepDecision.Continue("follow-up");
+                return new StepDecision.Finish(LoopOutcome.success(c.baseBranch(), null));
+            }
+            @Override public LoopOutcome onBudgetExhausted(AgentRunContext c) { return LoopOutcome.fail(c.baseBranch()); }
+        };
+
+        loop.run(ctx, "kickoff", strategy);
+
+        // The audit recorder reads the round from the thread-local while the call is
+        // in flight; it must be gone once the loop stops calling the provider.
+        assertThat(roundsDuringCalls).containsExactly(1, 2);
+        assertThat(AiAuditContext.getRound()).isNull();
     }
 
     @Test

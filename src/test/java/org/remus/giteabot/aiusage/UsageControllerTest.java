@@ -177,6 +177,28 @@ class UsageControllerTest {
     }
 
     @Test
+    void usage_rendersAgentLoopRoundColumn() throws Exception {
+        AiUsageLog entry = new AiUsageLog();
+        entry.setId(3L);
+        entry.setTimestamp(Instant.parse("2026-06-01T10:15:30Z"));
+        entry.setAiIntegrationName("my-openai");
+        entry.setSessionId("owner/repo#42");
+        entry.setRound(4);
+        entry.setInputTokens(120);
+        entry.setOutputTokens(35);
+
+        when(aiUsageService.findUsage(any(), any(), anyInt(), anyInt(), anyString(), anyBoolean()))
+                .thenReturn(new PageImpl<>(List.of(entry), PageRequest.of(0, 20), 1));
+        when(aiUsageService.findErrors(any(), any(), anyInt(), anyInt(), anyString(), anyBoolean()))
+                .thenReturn(new PageImpl<>(List.of(), PageRequest.of(0, 20), 0));
+
+        mockMvc.perform(get("/usage").with(user("admin").roles("ADMIN")))
+                .andExpect(status().isOk())
+                .andExpect(content().string(containsString("Round")))
+                .andExpect(content().string(containsString(">4</td>")));
+    }
+
+    @Test
     void clearUsage_clearsEntriesAndRedirects() throws Exception {
         mockMvc.perform(post("/usage/clear").with(csrf()).with(user("admin").roles("ADMIN")))
                 .andExpect(status().is3xxRedirection())

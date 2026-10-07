@@ -1,9 +1,12 @@
 package org.remus.giteabot.prworkflow.readmesync;
 
 import org.remus.giteabot.prworkflow.e2e.SuiteLifecycleMode;
+import org.remus.giteabot.repository.ArtifactCommentRenderer;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Collection;
 import java.util.List;
+import java.util.regex.Pattern;
 
 /**
  * Renders the Markdown PR comments posted by the {@link ReadmeSyncWorkflow} /
@@ -33,6 +36,29 @@ public final class ReadmeSyncSummaryRenderer {
     public static String renderFailed(long prNumber, String reason) {
         return HEADER + "\n\n"
                 + "❌ README sync could not be completed for **PR #" + prNumber + "**: " + reason + "\n";
+    }
+
+    /** Adds a reviewable diff preview, using the existing inline-text size budget. */
+    public static String renderFailed(long prNumber, String reason, String diff) {
+        String failure = renderFailed(prNumber, reason);
+        if (diff == null || diff.isBlank()) {
+            return failure;
+        }
+        byte[] bytes = diff.getBytes(StandardCharsets.UTF_8);
+        boolean truncated = bytes.length > ArtifactCommentRenderer.INLINE_TEXT_MAX_BYTES;
+        String preview = diff;
+        if (truncated) {
+            preview = new String(bytes, 0, ArtifactCommentRenderer.INLINE_TEXT_MAX_BYTES, StandardCharsets.UTF_8);
+            // Keep whole lines, including their UTF-8 characters, when cutting the preview.
+            preview = preview.substring(0, preview.lastIndexOf('\n') + 1);
+        }
+        // Diff context lines retain Markdown fences, whose leading space still permits closure.
+        int longestFence = Pattern.compile("`+").matcher(preview).results()
+                .mapToInt(match -> match.end() - match.start()).max().orElse(0);
+        String fence = "`".repeat(Math.max(3, longestFence + 1));
+        return failure + "\nGenerated documentation diff (publication did not complete successfully; "
+                + "check the run log before applying):\n\n" + fence + "diff\n" + preview + "\n" + fence + "\n"
+                + (truncated ? "\n**Diff truncated — not a complete patch; do not apply it as one.**\n" : "");
     }
 
     /**

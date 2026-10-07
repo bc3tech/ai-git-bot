@@ -117,14 +117,18 @@ public class CodeReviewService {
                 sessionService.addMessage(session, "user", userSummary);
                 sessionService.addMessage(session, "assistant", review);
             } else {
-                // PR was updated: use conversation context with new diff
+                // PR was updated: use conversation history with the current diff and enriched context
                 String updateMessage = buildPrUpdateMessage(prTitle, diff);
                 List<AiMessage> history = sessionService.toAiMessages(session);
+                // Fresh enrichment is request-only context; keep file snapshots out of stored history.
+                String modelInput = additionalContext.isBlank()
+                        ? updateMessage
+                        : updateMessage + "\n\n**Additional Context:**\n" + additionalContext;
 
-                log.debug("LLM request [chat/update] for PR #{}: history size={}, updateMessage length={}, systemPrompt length={}",
-                        prNumber, history.size(), updateMessage.length(),
+                log.debug("LLM request [chat/update] for PR #{}: history size={}, modelInput length={}, systemPrompt length={}",
+                        prNumber, history.size(), modelInput.length(),
                         systemPrompt != null ? systemPrompt.length() : 0);
-                review = aiClient.chat(history, updateMessage, systemPrompt, null);
+                review = aiClient.chat(history, modelInput, systemPrompt, null);
                 log.debug("LLM response [chat/update] for PR #{}: length={}, preview='{}'",
                         prNumber, review != null ? review.length() : 0,
                         review != null ? review.substring(0, Math.min(review.length(), 500)) : "null");

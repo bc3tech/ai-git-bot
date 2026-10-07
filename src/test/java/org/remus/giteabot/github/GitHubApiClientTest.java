@@ -80,6 +80,38 @@ class GitHubApiClientTest {
     }
 
     @Test
+    void addPullRequestReaction_postsEyesToIssueReactionEndpoint() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitHubApiClient client = new GitHubApiClient(builder.build(), CREDS);
+
+        server.expect(requestTo("https://api.github.com/repos/owner/repo/issues/42/reactions"))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(jsonPath("$.content").value("eyes"))
+                .andRespond(withSuccess());
+
+        client.addPullRequestReaction("owner", "repo", 42L, "eyes");
+
+        server.verify();
+    }
+
+    @Test
+    void addIssueReaction_postsEyesToIssueReactionEndpoint() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitHubApiClient client = new GitHubApiClient(builder.build(), CREDS);
+
+        server.expect(requestTo("https://api.github.com/repos/owner/repo/issues/12/reactions"))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(jsonPath("$.content").value("eyes"))
+                .andRespond(withSuccess());
+
+        client.addIssueReaction("owner", "repo", 12L, "eyes");
+
+        server.verify();
+    }
+
+    @Test
     void postReview_requestChanges_submitsSingleReviewWithBodyAndEvent() {
         RestClient.Builder builder = RestClient.builder().baseUrl("https://api.github.com");
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();

@@ -184,8 +184,49 @@ class CodeReviewServiceTest {
 
         codeReviewService.reviewPullRequest(payload, null);
 
-        verify(aiClient).chat(anyList(), anyString(), eq(TEST_PROMPT), isNull());
+        ArgumentCaptor<String> modelInput = ArgumentCaptor.forClass(String.class);
+        verify(aiClient).chat(anyList(), modelInput.capture(), eq(TEST_PROMPT), isNull());
+        assertTrue(modelInput.getValue().contains("new diff content"));
+        assertFalse(modelInput.getValue().contains("**Additional Context:**"));
+        verify(sessionService).addMessage(session, "user", modelInput.getValue());
         verify(aiClient, never()).submitReviewPrompt(anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void reviewPullRequest_existingSessionIncludesFreshContextButStoresOnlyUpdate() {
+        WebhookPayload payload = createTestPayload();
+        payload.setAction("synchronize");
+        ReviewSession session = new ReviewSession("testowner", "testrepo", 1L, null);
+        session.addMessage("user", "Previous question");
+        session.addMessage("assistant", "Previous answer");
+        List<AiMessage> history = List.of(
+                AiMessage.builder().role("user").content("Previous question").build(),
+                AiMessage.builder().role("assistant").content("Previous answer").build());
+        String diff = "diff --git a/src/Foo.java b/src/Foo.java\n+int x = 1;";
+        String latestFileContent = "class Foo { int x = 1; int unchangedField = 2; }";
+
+        when(sessionService.getOrCreateSession("testowner", "testrepo", 1L, SESSION_PROMPT_KEY)).thenReturn(session);
+        when(sessionService.addMessage(any(), anyString(), anyString())).thenReturn(session);
+        when(sessionService.toAiMessages(session)).thenReturn(history);
+        when(repositoryClient.getPullRequestDiff("testowner", "testrepo", 1L)).thenReturn(diff);
+        when(repositoryClient.getFileContent("testowner", "testrepo", "src/Foo.java", "feature-branch"))
+                .thenReturn(latestFileContent);
+        when(aiClient.chat(anyList(), anyString(), eq(TEST_PROMPT), isNull())).thenReturn("Updated review");
+
+        assertTrue(codeReviewService.reviewPullRequest(payload, null));
+
+        ArgumentCaptor<String> modelInput = ArgumentCaptor.forClass(String.class);
+        verify(aiClient).chat(eq(history), modelInput.capture(), eq(TEST_PROMPT), isNull());
+        assertTrue(modelInput.getValue().contains(diff));
+        assertTrue(modelInput.getValue().contains("**Additional Context:**"));
+        assertTrue(modelInput.getValue().contains(latestFileContent));
+
+        ArgumentCaptor<String> storedMessage = ArgumentCaptor.forClass(String.class);
+        verify(sessionService).addMessage(eq(session), eq("user"), storedMessage.capture());
+        assertTrue(storedMessage.getValue().contains(diff));
+        assertFalse(storedMessage.getValue().contains("**Additional Context:**"));
+        assertFalse(storedMessage.getValue().contains(latestFileContent));
+        verify(sessionService).addMessage(session, "assistant", "Updated review");
     }
 
     @Test

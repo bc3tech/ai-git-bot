@@ -158,9 +158,12 @@ public class AnthropicAiClient extends AbstractAiClient {
         if ("tool".equals(m.getRole())) {
             content = m.getToolResult() != null ? m.getToolResult() : content;
         }
+        // A turn whose only content was its calls renders as no text at all, and
+        // Anthropic rejects an empty message. Reachable whenever a native session is
+        // replayed in legacy mode (integration switched, or no native tools there).
         return AnthropicRequest.Message.builder()
                 .role(role)
-                .content(content == null ? "" : content)
+                .content(content == null || content.isBlank() ? m.toolCallSummary() : content)
                 .build();
     }
 

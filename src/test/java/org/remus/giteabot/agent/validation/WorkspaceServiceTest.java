@@ -347,6 +347,70 @@ class WorkspaceServiceTest {
     }
 
     @Test
+    void authorizationHeader_sendsTokenAsBasicHeaderWithoutCredentialStore() throws IOException {
+        WorkspaceSetup setup = workspaceService.createWorkspaceSetup();
+        String remote = "https://dev.azure.com/org/project/_git/repo";
+        setup.setAuthentication(remote,
+                RepositoryCredentials.of("https://dev.azure.com", "https://dev.azure.com", "pat"), true);
+
+        try {
+            workspaceService.createAuthenticationFiles(remote, setup.repositoryCredentials(), setup);
+
+            assertThat(setup.credentialsFile()).isNull();
+            assertThat(workspaceService.gitConfigArgs(setup)).isEmpty();
+            assertThat(workspaceService.authorizationHeaderEnvironment(setup)).containsExactlyInAnyOrderEntriesOf(
+                    java.util.Map.of(
+                            "GIT_CONFIG_COUNT", "1",
+                            "GIT_CONFIG_KEY_0", "http." + remote + ".extraheader",
+                            "GIT_CONFIG_VALUE_0", "Authorization: Basic "
+                                    + java.util.Base64.getEncoder().encodeToString(":pat".getBytes())));
+        } finally {
+            workspaceService.cleanupWorkspace(setup);
+        }
+    }
+
+    @Test
+    void prepareWorkspace_sendsBasicHeaderWhenProviderOptsIn() throws IOException {
+        java.util.List<String> authorizationHeaders = new java.util.concurrent.CopyOnWriteArrayList<>();
+        com.sun.net.httpserver.HttpServer server = com.sun.net.httpserver.HttpServer.create(
+                new java.net.InetSocketAddress(java.net.InetAddress.getLoopbackAddress(), 0), 0);
+        server.createContext("/", exchange -> {
+            authorizationHeaders.add(String.valueOf(exchange.getRequestHeaders().getFirst("Authorization")));
+            exchange.sendResponseHeaders(404, -1);
+            exchange.close();
+        });
+        server.start();
+        try {
+            String remote = "http://127.0.0.1:" + server.getAddress().getPort() + "/org/project/_git/repo";
+            when(repositoryClient.getRepositoryRemote("any", "any")).thenReturn(remote);
+            when(repositoryClient.getCredentials()).thenReturn(RepositoryCredentials.of("", remote, "pat"));
+            when(repositoryClient.usesGitAuthorizationHeader()).thenReturn(true);
+
+            WorkspaceResult result = workspaceService.prepareWorkspace(
+                    repositoryClient, "any", "any", "main", null);
+
+            assertThat(result.success()).isFalse();
+            assertThat(authorizationHeaders).isNotEmpty().allMatch(header -> header.equals(
+                    "Basic " + java.util.Base64.getEncoder().encodeToString(":pat".getBytes())));
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void authorizationHeader_notUsedByDefault() throws IOException {
+        WorkspaceSetup setup = workspaceService.createWorkspaceSetup();
+        setup.setAuthentication("https://git.example.com/owner/repo.git",
+                RepositoryCredentials.of("https://git.example.com", "https://git.example.com", "token"), false);
+
+        try {
+            assertThat(workspaceService.authorizationHeaderEnvironment(setup)).isEmpty();
+        } finally {
+            workspaceService.cleanupWorkspace(setup);
+        }
+    }
+
+    @Test
     void gitConfigArgs_usesExternalCredentialStore() throws IOException {
         WorkspaceSetup setup = workspaceService.createWorkspaceSetup();
         Path workspace = setup.workspaceDir();
@@ -394,7 +458,7 @@ class WorkspaceServiceTest {
         runGit(workspace, "remote", "add", "origin", remote.toAbsolutePath().toString());
         runGit(workspace, "push", "-u", "origin", branch);
         setup.setAuthentication(remote.toString(),
-                RepositoryCredentials.of("", remote.toString(), ""));
+                RepositoryCredentials.of("", remote.toString(), ""), false);
         workspaceService.registerWorkspace(setup);
 
         Path hook = workspace.resolve(".git/hooks/pre-commit");

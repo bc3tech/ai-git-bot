@@ -156,9 +156,22 @@ cannot bypass it:
 
 Validation tools come from `agent.validation.available-tools` (see
 [Agent Documentation](AGENT.md)). They are listed in the tool-selection screen
-with kind **VALIDATION** and obey the same whitelist semantics. The Default
-configuration enables all of them; restrict them per bot to avoid the agent
-trying to run the wrong build tool.
+with kind **VALIDATION** and obey the same whitelist semantics. Like every
+built-in tool added after V12 they are **not** seeded into the Default
+configuration (see [The Default configuration](#the-default-configuration) above), so an
+admin enables the ones the bot's repositories actually need — a bot whose projects
+use Maven does not want the agent trying `gradle` or `cargo`.
+
+The list also ships **`execute`**, which runs a validation script committed
+inside the repository instead of an external binary — the escape hatch for
+documentation-only, CI/CD and infrastructure repositories without a
+conventional build command. It takes the script's repository-relative path as
+its single argument and treats exit code `0` as success; the path is resolved
+against the checkout, so nothing outside the repository can be configured. It only
+runs the script as committed — a script the current run has edited is refused, so
+the agent cannot rewrite its own checker. Existing installations have to opt in to
+`execute` by hand: it is not part of the Default configuration. See
+[Coding Agent → Custom validation scripts](CODING_AGENT.md#custom-validation-scripts-execute).
 
 ### Backwards compatibility
 
