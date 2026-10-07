@@ -3,7 +3,10 @@ package org.remus.giteabot.repository;
 import org.remus.giteabot.repository.model.RepositoryCredentials;
 import org.remus.giteabot.repository.model.PullRequestHead;
 import org.remus.giteabot.repository.model.Review;
+import org.remus.giteabot.repository.model.ReviewAnchorComment;
 import org.remus.giteabot.repository.model.ReviewComment;
+import org.remus.giteabot.repository.model.ReviewPublicationResult;
+import org.remus.giteabot.repository.model.ReviewSnapshot;
 
 import java.net.URI;
 import java.util.List;
@@ -117,6 +120,31 @@ public interface RepositoryApiClient {
     default void postReview(String owner, String repo, Long pullNumber, String body, PostReviewAction action) {
         postReviewComment(owner, repo, pullNumber, body);
         postReviewAction(owner, repo, pullNumber, action);
+    }
+
+    /**
+     * Captures the exact revision and diff a generated review is based on. Providers that can
+     * bind inline comments to a commit return an inline-capable snapshot whose diff and head
+     * commit are known to belong together; the default is a summary-only snapshot.
+     *
+     * @throws IllegalStateException when a consistent snapshot cannot be acquired
+     */
+    default ReviewSnapshot getReviewSnapshot(String owner, String repo, Long pullNumber) {
+        return ReviewSnapshot.summaryOnly(getPullRequestDiff(owner, repo, pullNumber));
+    }
+
+    /**
+     * Publishes a generated review whose findings are anchored to file lines of
+     * {@code snapshot}. Implementations bind every comment to the snapshot's revision, never
+     * resend after an uncertain outcome, and report per-component delivery. Providers without
+     * revision-bound inline support return {@link ReviewPublicationResult#unsupported()} without
+     * writing anything.
+     */
+    default ReviewPublicationResult publishInlineReview(String owner, String repo, Long pullNumber,
+                                                        ReviewSnapshot snapshot, String body,
+                                                        List<ReviewAnchorComment> comments,
+                                                        PostReviewAction action) {
+        return ReviewPublicationResult.unsupported();
     }
 
     /**
