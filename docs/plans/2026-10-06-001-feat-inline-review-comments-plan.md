@@ -1,7 +1,7 @@
 ---
 title: "feat: Publish AI findings as native inline reviews"
 type: feat
-status: active
+status: completed
 date: 2026-10-06
 origin: docs/brainstorms/2026-10-06-inline-review-comments-requirements.md
 deepened: 2026-10-06
@@ -293,7 +293,7 @@ flowchart TB
     U7 --> U8
 ```
 
-- [ ] **Unit 0: Latest-wins review execution and cancellation**
+- [x] **Unit 0: Latest-wins review execution and cancellation**
 
 **Goal:** Make new review requests supersede either older review type, select
 agentic for same-update dual enablement, and prevent cancelled work from publishing.
@@ -382,7 +382,7 @@ selection; use deterministic latches/fakes for concurrency tests, not sleeps.
 publication writes. Unrecallable in-flight writes remain explicit exceptions,
 and existing non-review workflows are unaffected.
 
-- [ ] **Unit 1: Snapshot, findings, and diff-location contracts**
+- [x] **Unit 1: Snapshot, findings, and diff-location contracts**
 
 **Goal:** Establish provider-neutral data that can express reviewed revisions,
 old/new paths and coordinates, and meaningful findings without guessing.
@@ -431,7 +431,7 @@ without changing file-statistics semantics.
 **Verification:** Every eligible anchor is derivable from a consistent reviewed
 diff; both sides remain expressible throughout the provider boundary.
 
-- [ ] **Unit 2: Shared review-output normalization**
+- [x] **Unit 2: Shared review-output normalization**
 
 **Goal:** Recover useful structured findings from both workflows while retaining
 meaningful feedback from malformed or legacy output.
@@ -481,7 +481,7 @@ a new dependency or copying incompatible mapper imports.
 **Verification:** Native and legacy generation can feed the same document,
 with a safe explicit text fallback and no presentation-driven severity changes.
 
-- [ ] **Unit 3: Native Gitea and revision-bound GitHub publication**
+- [x] **Unit 3: Native Gitea and revision-bound GitHub publication**
 
 **Goal:** Use native reviews to publish old/new-side findings with correct
 commit identity and observable delivery outcomes.
@@ -552,7 +552,7 @@ the generated-review publication path.
 read-back verifies submitted anchors, with no implicit all-or-nothing assumption.
 Gitea's accepted residual race is documented and detected mismatches are errors.
 
-- [ ] **Unit 4: GitLab snapshots and conservative Bitbucket capability**
+- [x] **Unit 4: GitLab snapshots and conservative Bitbucket capability**
 
 **Goal:** Publish revision-bound GitLab discussions and honor the strict
 Bitbucket fallback chosen by the user.
@@ -598,7 +598,7 @@ comment/decision operations, with established HTTP test fixtures.
 **Verification:** GitLab discussions match the reviewed version. Bitbucket
 does not advertise or simulate guarantees absent from its documented API.
 
-- [ ] **Unit 5: Shared publication, fallback, and delivery accounting**
+- [x] **Unit 5: Shared publication, fallback, and delivery accounting**
 
 **Goal:** Produce truthful summaries and formal-action outcomes without losing
 feedback or repeating confirmed inline comments.
@@ -667,7 +667,7 @@ new path requires explicit outcomes.
 publication succeeds. If every delivery attempt fails, the run exposes failure
 rather than claiming completion; uncertainty remains visible.
 
-- [ ] **Unit 6: Standard reviews, chunks, sessions, and existing actions**
+- [x] **Unit 6: Standard reviews, chunks, sessions, and existing actions**
 
 **Goal:** Route initial and updated standard reviews through the shared output
 and publication flow without breaking conversational follow-ups.
@@ -726,7 +726,7 @@ and publication flow without breaking conversational follow-ups.
 **Verification:** Initial/update standard reviews share publication behavior
 without changing exclusion, action, or conversational policies.
 
-- [ ] **Unit 7: Agentic final output, classification, and events**
+- [x] **Unit 7: Agentic final output, classification, and events**
 
 **Goal:** Normalize final agent reviews in native and legacy modes, independent
 of whether formal decisions are enabled.
@@ -788,7 +788,7 @@ of whether formal decisions are enabled.
 **Verification:** Both tool transports preserve final findings; severity,
 events, completion gates, and follow-up behavior remain independent of placement.
 
-- [ ] **Unit 8: Provider parity and user documentation**
+- [x] **Unit 8: Provider parity and user documentation**
 
 **Goal:** Demonstrate end-to-end coverage and describe the unconditional behavior
 and its honest platform limitations.
