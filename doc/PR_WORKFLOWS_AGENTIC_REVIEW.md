@@ -20,13 +20,19 @@ context-aware feedback and are willing to spend more time and tokens per review.
   forming an opinion.
 - Focuses on the files that matter first, so it handles large PRs without
   drowning in noise.
-- Posts a single Markdown review comment with its findings.
+- Posts one review: a concise summary plus native inline comments on the file
+  and line each finding is about. Placement, provider support, and limitations
+  are the same as for [PR Review](PR_WORKFLOWS_REVIEW.md#inline-review-comments).
 - Optionally submits a formal review decision (approve / request changes) — see
   below.
 
 The bot is **read-only**: this workflow never commits, pushes, creates branches,
-or changes your code. Its only outputs are the review comment and, when you
-enable it, the formal review decision.
+or changes your code. Its only outputs are the review (summary and inline
+comments) and, when you enable it, the formal review decision.
+
+If a new update arrives while a review is running, the running review is
+cancelled and the newest one wins. When both this workflow and plain PR Review
+react to the same update, this workflow's review takes precedence.
 
 ## Settings
 
@@ -56,8 +62,10 @@ count to the configured thresholds:
 - An unset threshold is ignored entirely, so you can enforce only the severities
   that matter to you (for example, only `BLOCKER`).
 
-If the model fails to emit a clean classification, the bot falls back to posting
-a plain review comment so the findings are never lost.
+The decision is submitted together with the inline review, so the approval or
+change request and its comments arrive as one review where the provider allows
+it. If the model fails to emit a clean classification, the bot still posts the
+review (without a decision) so the findings are never lost.
 
 ## The review prompt
 
