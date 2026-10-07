@@ -13,7 +13,7 @@
 
     <groupId>org.remus</groupId>
     <artifactId>ai-git-bot</artifactId>
-    <version>1.28.0-SNAPSHOT</version>
+    <version>1.28.0-SNAPSHOT-bc3</version>
     <name>AI Git Bot</name>
     <description>The self-hosted AI workflow automation platform for Git repositories.</description>
     <url>https://github.com/tmseidel/ai-git-bot</url>
@@ -262,6 +262,11 @@
                         <goals>
                             <goal>build-info</goal>
                         </goals>
+                        <configuration>
+                            <additionalProperties>
+                                <suffix>bc3</suffix>
+                            </additionalProperties>
+                        </configuration>
                     </execution>
                 </executions>
                 <configuration>
