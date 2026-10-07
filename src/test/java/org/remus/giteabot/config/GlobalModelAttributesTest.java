@@ -35,4 +35,23 @@ class GlobalModelAttributesTest {
         assertTrue(new GlobalModelAttributes(provider).appVersion().contains("1."));
 
     }
+
+    @Test
+    void buildId_combinesContainerIdAndSuffix() {
+        Properties entries = new Properties();
+        entries.put("version", "1.28.0-SNAPSHOT-bc3");
+        entries.put("suffix", "bc3");
+        ObjectProvider<BuildProperties> provider = mock(ObjectProvider.class);
+        when(provider.stream()).thenAnswer(inv -> java.util.stream.Stream.of(new BuildProperties(entries)));
+
+        assertEquals("3sadds987as7-bc3", new GlobalModelAttributes(provider, "3sadds987as7").buildId());
+    }
+
+    @Test
+    void buildId_withoutContainerIdOrBuildProperties_fallsBackToLocal() {
+        ObjectProvider<BuildProperties> provider = mock(ObjectProvider.class);
+        when(provider.stream()).thenAnswer(inv -> java.util.stream.Stream.empty());
+
+        assertEquals("local", new GlobalModelAttributes(provider, " ").buildId());
+    }
 }

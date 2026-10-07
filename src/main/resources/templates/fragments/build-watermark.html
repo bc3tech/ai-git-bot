@@ -1,0 +1,9 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:th="http://www.thymeleaf.org">
+<body>
+<footer th:fragment="buildWatermark" class="text-center text-body-secondary small py-3 opacity-50"
+        th:title="${appVersion}">
+    <span th:text="#{app.name} + ' - build ' + ${buildId ?: 'local'}">AI Git Bot - build local</span>
+</footer>
+</body>
+</html>
