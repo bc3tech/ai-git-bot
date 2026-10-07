@@ -1,7 +1,9 @@
 package org.remus.giteabot.bitbucket;
 
 import org.junit.jupiter.api.Test;
+import org.remus.giteabot.repository.PostReviewAction;
 import org.remus.giteabot.repository.RepositoryApiClient;
+import org.remus.giteabot.repository.model.ReviewPublicationResult;
 import org.remus.giteabot.repository.model.RepositoryCredentials;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
@@ -88,5 +90,25 @@ class BitbucketApiClientTest {
         assertEquals(1, comments.size());
         assertEquals(301, ((Number) comments.getFirst().get("id")).intValue());
         assertInstanceOf(Map.class, comments.getFirst().get("content"));
+    }
+
+    @Test
+    void getReviewSnapshot_isSummaryOnlyAndInlinePublicationIsUnsupportedWithoutWrites() {
+        RestClient.Builder builder = RestClient.builder().baseUrl("https://api.bitbucket.org/2.0");
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        BitbucketApiClient client = new BitbucketApiClient(builder.build(), creds());
+        server.expect(requestTo(
+                        "https://api.bitbucket.org/2.0/repositories/workspace/repo/pullrequests/7/diff"))
+                .andExpect(method(HttpMethod.GET))
+                .andRespond(withSuccess("diff --git a/a b/a\n", MediaType.TEXT_PLAIN));
+
+        var snapshot = client.getReviewSnapshot("workspace", "repo", 7L);
+        ReviewPublicationResult result = client.publishInlineReview("workspace", "repo", 7L,
+                snapshot, "Summary", List.of(), PostReviewAction.NONE);
+
+        server.verify();
+        assertEquals("diff --git a/a b/a\n", snapshot.diff());
+        assertFalse(snapshot.inlineSupported());
+        assertEquals(ReviewPublicationResult.Status.UNSUPPORTED, result.status());
     }
 }

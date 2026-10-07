@@ -7,11 +7,17 @@ import org.remus.giteabot.repository.PostReviewAction;
 import org.remus.giteabot.repository.RepositoryApiClient;
 import org.remus.giteabot.repository.WorkflowDispatchRequest;
 import org.remus.giteabot.repository.WorkflowRunStatus;
+import org.remus.giteabot.repository.model.DiffSide;
 import org.remus.giteabot.repository.model.RepositoryCredentials;
+import org.remus.giteabot.repository.model.ReviewAnchorComment;
+import org.remus.giteabot.repository.model.ReviewPublicationResult;
+import org.remus.giteabot.repository.model.ReviewSnapshot;
 import org.remus.giteabot.repository.model.Review;
 import org.remus.giteabot.repository.model.ReviewComment;
 import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.RestClient;
+import org.springframework.web.client.RestClientException;
 
 import java.util.List;
 import java.util.Map;
@@ -54,6 +60,78 @@ public class GitHubApiClient implements RepositoryApiClient {
                 .header("Accept", "application/vnd.github.v3.diff")
                 .retrieve()
                 .body(String.class);
+    }
+
+    @Override
+    public ReviewSnapshot getReviewSnapshot(String owner, String repo, Long pullNumber) {
+        String diff = null;
+        for (int attempt = 0; attempt < 2; attempt++) {
+            Map<String, Object> before = getPullRequestDetails(owner, repo, pullNumber);
+            String headSha = nestedString(before, "head", "sha");
+            String baseSha = nestedString(before, "base", "sha");
+            diff = restClient.get()
+                    .uri("/repos/{owner}/{repo}/pulls/{pull_number}", owner, repo, pullNumber)
+                    .header("Accept", "application/vnd.github.v3.diff")
+                    .retrieve()
+                    .body(String.class);
+            if (headSha == null) {
+                break;
+            }
+            Map<String, Object> after = getPullRequestDetails(owner, repo, pullNumber);
+            if (headSha.equals(nestedString(after, "head", "sha"))) {
+                return new ReviewSnapshot(headSha, baseSha, null, diff, true);
+            }
+        }
+        log.warn("GitHub PR #{} in {}/{} has no stable head; review will be summary-only", pullNumber, owner, repo);
+        return ReviewSnapshot.summaryOnly(diff);
+    }
+
+    @Override
+    public ReviewPublicationResult publishInlineReview(String owner, String repo, Long pullNumber,
+                                                       ReviewSnapshot snapshot, String body,
+                                                       List<ReviewAnchorComment> comments,
+                                                       PostReviewAction action) {
+        List<ReviewAnchorComment> requested = comments == null ? List.of() : List.copyOf(comments);
+        List<GitHubInlineComment> inlineComments = requested.stream()
+                .map(comment -> new GitHubInlineComment(comment.path(), comment.body(), comment.line(),
+                        comment.side() == DiffSide.NEW ? "RIGHT" : "LEFT"))
+                .toList();
+        GitHubInlineReviewRequest request = new GitHubInlineReviewRequest(snapshot.headSha(), body,
+                reviewEvent(action), inlineComments);
+        try {
+            Map<String, Object> response = restClient.post()
+                    .uri("/repos/{owner}/{repo}/pulls/{pull_number}/reviews", owner, repo, pullNumber)
+                    .body(request)
+                    .retrieve()
+                    .body(new ParameterizedTypeReference<>() {});
+            Object reviewId = response == null ? null : response.get("id");
+            log.info("GitHub inline review published on PR #{} in {}/{} (review id: {})",
+                    pullNumber, owner, repo, reviewId);
+            List<ReviewPublicationResult.CommentOutcome> outcomes = requested.stream()
+                    .map(comment -> new ReviewPublicationResult.CommentOutcome(
+                            comment, ReviewPublicationResult.Delivery.CONFIRMED, null))
+                    .toList();
+            return new ReviewPublicationResult(ReviewPublicationResult.Status.PUBLISHED,
+                    ReviewPublicationResult.Delivery.CONFIRMED, outcomes, null);
+        } catch (HttpStatusCodeException e) {
+            if (e.getStatusCode().is4xxClientError()) {
+                return ReviewPublicationResult.notWritten(ReviewPublicationResult.Status.REJECTED, requested,
+                        "GitHub rejected the inline review: " + e.getStatusText());
+            }
+            return ReviewPublicationResult.unknown(requested,
+                    "GitHub returned an error while publishing the inline review: " + e.getStatusText());
+        } catch (RestClientException e) {
+            return ReviewPublicationResult.unknown(requested,
+                    "Could not determine whether GitHub published the inline review: " + e.getMessage());
+        }
+    }
+
+    private static String nestedString(Map<String, Object> data, String parent, String field) {
+        if (data == null || !(data.get(parent) instanceof Map<?, ?> nested)) {
+            return null;
+        }
+        Object value = nested.get(field);
+        return value instanceof String string ? string : null;
     }
 
     @Override
@@ -587,6 +665,9 @@ public class GitHubApiClient implements RepositoryApiClient {
     // ---- Request DTOs ----
 
     record ReviewRequest(String body, String event) {}
+    record GitHubInlineReviewRequest(String commit_id, String body, String event,
+                                    List<GitHubInlineComment> comments) {}
+    record GitHubInlineComment(String path, String body, int line, String side) {}
     record CommentRequest(String body) {}
     record ReactionRequest(String content) {}
     record InlineReviewRequest(String body, String event, List<InlineReviewComment> comments) {}
