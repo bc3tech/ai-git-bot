@@ -194,10 +194,12 @@ public class CodeReviewService {
 
         log.info("Handling bot command in comment #{} for PR #{} in {}/{}", commentId, prNumber, owner, repo);
 
+        boolean reactionAdded = false;
         try {
             // Add eyes reaction to acknowledge the comment
             try {
                 repositoryClient.addReaction(owner, repo, commentId, "eyes");
+                reactionAdded = true;
             } catch (Exception e) {
                 log.warn("Failed to add reaction to comment #{}: {}", commentId, e.getMessage());
             }
@@ -253,6 +255,22 @@ public class CodeReviewService {
 
             log.info("Bot command handled for comment #{} on PR #{} in {}/{}", commentId, prNumber, owner, repo);
         } catch (Exception e) {
+            if (reactionAdded) {
+                try {
+                    repositoryClient.removeReaction(owner, repo, commentId, "eyes");
+                } catch (Exception cleanupException) {
+                    log.warn("Failed to remove reaction from failed bot command comment #{}: {}",
+                            commentId, cleanupException.getMessage());
+                }
+            }
+            try {
+                repositoryClient.postPullRequestComment(owner, repo, prNumber,
+                        "⚠️ I couldn't complete the AI review because an error occurred while processing this request. "
+                                + "Please try again later.");
+            } catch (Exception commentException) {
+                log.warn("Failed to post AI review failure comment on PR #{} in {}/{}: {}",
+                        prNumber, owner, repo, commentException.getMessage());
+            }
             log.error("Failed to handle bot command for comment #{} on PR #{} in {}/{}: {}",
                     commentId, prNumber, owner, repo, e.getMessage(), e);
             if (e instanceof RuntimeException runtimeException) {

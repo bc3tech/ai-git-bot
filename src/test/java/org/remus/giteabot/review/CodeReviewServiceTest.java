@@ -288,6 +288,33 @@ class CodeReviewServiceTest {
     }
 
     @Test
+    void handleBotCommand_aiFailureRemovesAcknowledgementAndPostsFailureComment() {
+        WebhookPayload payload = createCommentPayload("@ai_bot explain this");
+        ReviewSession session = new ReviewSession("testowner", "testrepo", 1L, null);
+        session.addMessage("user", "Initial context");
+        session.addMessage("assistant", "Initial review");
+        IllegalStateException aiFailure = new IllegalStateException("AI endpoint unavailable");
+
+        when(sessionService.getOrCreateSession("testowner", "testrepo", 1L, SESSION_PROMPT_KEY))
+                .thenReturn(session);
+        when(sessionService.toAiMessages(session)).thenReturn(List.of(
+                AiMessage.builder().role("user").content("Initial context").build(),
+                AiMessage.builder().role("assistant").content("Initial review").build()
+        ));
+        when(repositoryClient.getPullRequestDiff(any(), any(), anyLong())).thenReturn("");
+        doThrow(aiFailure).when(aiClient).chat(anyList(), anyString(), eq(TEST_PROMPT), isNull());
+
+        IllegalStateException thrown = assertThrows(IllegalStateException.class,
+                () -> codeReviewService.handleBotCommand(payload, null));
+
+        assertEquals(aiFailure, thrown);
+        org.mockito.InOrder order = org.mockito.Mockito.inOrder(repositoryClient);
+        order.verify(repositoryClient).removeReaction("testowner", "testrepo", 42L, "eyes");
+        order.verify(repositoryClient).postPullRequestComment(eq("testowner"), eq("testrepo"), eq(1L),
+                contains("couldn't complete the AI review"));
+    }
+
+    @Test
     void handleBotCommand_existingSessionIncludesLatestDiffButStoresOriginalComment() {
         String comment = "@ai_bot explain the updated implementation";
         String latestDiff = "diff --git a/Foo.java b/Foo.java\n+int current = 2;";
@@ -384,8 +411,9 @@ class CodeReviewServiceTest {
         assertThrows(IllegalStateException.class, () ->codeReviewService.handleBotCommand(payload, null));
 
         verify(aiClient, never()).chat(anyList(), anyString(), anyString(), isNull());
-        verify(repositoryClient, never()).postPullRequestComment(
-                anyString(), anyString(), anyLong(), anyString());
+        verify(repositoryClient).removeReaction("testowner", "testrepo", 42L, "eyes");
+        verify(repositoryClient).postPullRequestComment(eq("testowner"), eq("testrepo"), eq(1L),
+                contains("couldn't complete the AI review"));
     }
 
     @Test

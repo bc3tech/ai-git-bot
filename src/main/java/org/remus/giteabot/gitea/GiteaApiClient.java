@@ -21,6 +21,7 @@ import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
@@ -472,6 +473,16 @@ public class GiteaApiClient implements RepositoryApiClient {
     public void addReaction(String owner, String repo, Long commentId, String reaction) {
         log.info("Adding '{}' reaction to comment #{} in {}/{}", reaction, commentId, owner, repo);
         giteaRestClient.post()
+                .uri("/api/v1/repos/{owner}/{repo}/issues/comments/{id}/reactions", owner, repo, commentId)
+                .body(new ReactionRequest(reaction))
+                .retrieve()
+                .toBodilessEntity();
+    }
+
+    @Override
+    public void removeReaction(String owner, String repo, Long commentId, String reaction) {
+        log.info("Removing '{}' reaction from comment #{} in {}/{}", reaction, commentId, owner, repo);
+        giteaRestClient.method(HttpMethod.DELETE)
                 .uri("/api/v1/repos/{owner}/{repo}/issues/comments/{id}/reactions", owner, repo, commentId)
                 .body(new ReactionRequest(reaction))
                 .retrieve()

@@ -202,6 +202,13 @@ public interface RepositoryApiClient {
     void addReaction(String owner, String repo, Long commentId, String reaction);
 
     /**
+     * Removes a reaction from a comment. Providers without support may keep the default no-op.
+     */
+    default void removeReaction(String owner, String repo, Long commentId, String reaction) {
+        // no-op by default; override where the provider supports it
+    }
+
+    /**
      * Adds a reaction to a pull request itself, rather than to a comment.
      * Default implementation is a no-op for providers without support.
      */
