@@ -31,6 +31,13 @@ public class GiteaReviewComment implements ReviewComment {
     @JsonProperty("new_line_num")
     private Integer newLineNum;
 
+    /** New-side file line as reported by Gitea's API ({@code PullReviewComment.position}). */
+    private Integer position;
+
+    /** Old-side file line as reported by Gitea's API ({@code PullReviewComment.original_position}). */
+    @JsonProperty("original_position")
+    private Integer originalPosition;
+
     private GiteaReview.GiteaUser user;
 
     @Override
