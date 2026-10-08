@@ -3,7 +3,7 @@ date: 2026-10-08
 type: feat
 depth: deep
 origin: docs/brainstorms/2026-10-08-grounded-re-reviews-requirements.md
-status: draft
+status: completed
 ---
 
 # feat: Grounded re-reviews
