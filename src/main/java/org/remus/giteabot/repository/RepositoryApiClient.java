@@ -7,11 +7,14 @@ import org.remus.giteabot.repository.model.ReviewAnchorComment;
 import org.remus.giteabot.repository.model.ReviewComment;
 import org.remus.giteabot.repository.model.ReviewPublicationResult;
 import org.remus.giteabot.repository.model.ReviewSnapshot;
+import org.remus.giteabot.repository.model.CommentScan;
+import org.remus.giteabot.repository.model.ThreadCapabilities;
 
 import java.net.URI;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Provider-agnostic interface for repository operations (pull requests, reviews,
@@ -107,6 +110,12 @@ public interface RepositoryApiClient {
 
     void postReviewComment(String owner, String repo, Long pullNumber, String body);
 
+    /** Posts a review summary and returns its provider remote ID when available. */
+    default Optional<String> postReviewCommentReturningId(String owner, String repo, Long pullNumber, String body) {
+        postReviewComment(owner, repo, pullNumber, body);
+        return Optional.empty();
+    }
+
     default void postReviewAction(String owner, String repo, Long pullNumber, PostReviewAction action) {
         // Most providers do not support post-review state changes.
     }
@@ -118,8 +127,15 @@ public interface RepositoryApiClient {
      * is a distinct operation.
      */
     default void postReview(String owner, String repo, Long pullNumber, String body, PostReviewAction action) {
+        postReviewReturningId(owner, repo, pullNumber, body, action);
+    }
+
+    /** Submits a review and returns the provider review/comment ID when available. */
+    default Optional<String> postReviewReturningId(String owner, String repo, Long pullNumber,
+                                                   String body, PostReviewAction action) {
         postReviewComment(owner, repo, pullNumber, body);
         postReviewAction(owner, repo, pullNumber, action);
+        return Optional.empty();
     }
 
     /**
@@ -154,6 +170,55 @@ public interface RepositoryApiClient {
      * while GitLab requires a merge-request-specific endpoint.
      */
     void postPullRequestComment(String owner, String repo, Long pullNumber, String body);
+
+    /** Posts a PR-level comment and returns its provider remote ID when available. */
+    default Optional<String> postPullRequestCommentReturningId(String owner, String repo,
+                                                               Long pullNumber, String body) {
+        postPullRequestComment(owner, repo, pullNumber, body);
+        return Optional.empty();
+    }
+
+    /**
+     * Returns thread support by provider: GitHub/GitLab/Bitbucket support replies; Gitea currently
+     * reports no write actions. GitHub and GitLab support resolve; Bitbucket resolve is disabled
+     * until verified. Comment editing is enabled for GitHub, GitLab, and Bitbucket.
+     */
+    default ThreadCapabilities threadCapabilities() {
+        return ThreadCapabilities.unsupported();
+    }
+
+    /** Lists comments in all review threads, including whether every page was read. */
+    default CommentScan<ReviewComment> listReviewThreadComments(String owner, String repo, Long pullNumber) {
+        return new CommentScan<>(List.of(), false);
+    }
+
+    /**
+     * Lists every PR comment surface used for marker reconciliation. A false {@code complete} value
+     * means absence cannot be concluded from the partial result.
+     */
+    default CommentScan<Map<String, Object>> listPullRequestComments(String owner, String repo, Long pullNumber) {
+        return new CommentScan<>(List.of(), false);
+    }
+
+    default Optional<String> replyToReviewThread(String owner, String repo, Long pullNumber,
+                                                 String threadId, String body) {
+        throw new UnsupportedOperationException("Replies in review threads are not supported");
+    }
+
+    default void editReviewComment(String owner, String repo, Long pullNumber,
+                                   String commentId, String body) {
+        throw new UnsupportedOperationException("Editing review comments is not supported");
+    }
+
+    default void resolveReviewThread(String owner, String repo, Long pullNumber, String threadId) {
+        throw new UnsupportedOperationException("Resolving review threads is not supported");
+    }
+
+    /** Returns a browser URL for the comment when the provider exposes one. */
+    default Optional<String> pullRequestCommentLink(String owner, String repo, Long pullNumber,
+                                                     String remoteId) {
+        return Optional.empty();
+    }
 
     /**
      * Attaches an artifact (test screenshot, trace, log file, …) to a pull

@@ -73,7 +73,7 @@ class GitHubApiClientTest {
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
         GitHubApiClient client = new GitHubApiClient(builder.build(), CREDS);
 
-        server.expect(requestTo("https://api.github.com/repos/owner/repo/issues/42/comments?per_page=50"))
+        server.expect(requestTo("https://api.github.com/repos/owner/repo/issues/42/comments?per_page=100&page=1"))
                 .andExpect(method(HttpMethod.GET))
                 .andRespond(withSuccess("[{\"id\":101,\"body\":\"First comment\"}]", MediaType.APPLICATION_JSON));
 
@@ -272,4 +272,166 @@ class GitHubApiClientTest {
         assertEquals(ReviewPublicationResult.Status.UNKNOWN, result.status());
         assertFalse(result.nothingWritten());
     }
+
+    @Test
+    void replyToReviewThread_postsReplyAndReturnsRemoteId() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitHubApiClient client = new GitHubApiClient(builder.build(), CREDS);
+        server.expect(requestTo(CREDS.baseUrl() + "/repos/owner/repo/pulls/7/comments"))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(jsonPath("$.in_reply_to").value(123))
+                .andExpect(jsonPath("$.body").value("reply"))
+                .andRespond(withSuccess("{\"id\":456}", MediaType.APPLICATION_JSON));
+        assertEquals(java.util.Optional.of("456"), client.replyToReviewThread("owner", "repo", 7L, "123", "reply"));
+        server.verify();
+    }
+
+    @Test
+    void graphQlEndpoint_usesEnterpriseApiPath() {
+        assertEquals("https://ghe.example/api/graphql",
+                GitHubApiClient.graphQlEndpoint("https://ghe.example/api/v3"));
+        assertEquals("https://api.github.com/graphql",
+                GitHubApiClient.graphQlEndpoint("https://api.github.com"));
+    }
+
+    @Test
+    void resolveReviewThread_forbiddenGraphQlDowngradesCapability() {
+        var restBuilder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        var restServer = MockRestServiceServer.bindTo(restBuilder).build();
+        var graphBuilder = RestClient.builder().baseUrl("https://api.github.com/graphql");
+        var graphServer = MockRestServiceServer.bindTo(graphBuilder).build();
+        GitHubApiClient client = new GitHubApiClient(restBuilder.build(), CREDS, graphBuilder.build());
+        graphServer.expect(requestTo("https://api.github.com/graphql"))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(jsonPath("$.query").value(org.hamcrest.Matchers.containsString("reviewThreads")))
+                .andRespond(withSuccess("{\"data\":{\"repository\":{\"pullRequest\":{\"reviewThreads\":{\"nodes\":[{\"id\":\"PRRT_node\",\"comments\":{\"nodes\":[{\"databaseId\":123}]}}],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}}}}}}",
+                        MediaType.APPLICATION_JSON));
+        graphServer.expect(requestTo("https://api.github.com/graphql"))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(jsonPath("$.query").value(org.hamcrest.Matchers.containsString("resolveReviewThread")))
+                .andRespond(withSuccess("{\"errors\":[{\"message\":\"Resource not accessible by integration\"}]}",
+                        MediaType.APPLICATION_JSON));
+        assertDoesNotThrow(() -> client.resolveReviewThread("owner", "repo", 7L, "123"));
+        assertFalse(client.threadCapabilities().canResolveThread());
+        graphServer.verify();
+        restServer.verify();
+    }
+
+    @Test
+    void listReviewThreadComments_pagesThroughAllComments() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitHubApiClient client = new GitHubApiClient(builder.build(), CREDS);
+        String fullPage = "[" + String.join(",", java.util.Collections.nCopies(100,
+                "{\"id\":1,\"body\":\"comment\",\"user\":{\"login\":\"alice\"}}")) + "]";
+        server.expect(requestTo(CREDS.baseUrl() + "/repos/owner/repo/pulls/7/comments?per_page=100&page=1"))
+                .andRespond(withSuccess(fullPage, MediaType.APPLICATION_JSON));
+        server.expect(requestTo(CREDS.baseUrl() + "/repos/owner/repo/pulls/7/comments?per_page=100&page=2"))
+                .andRespond(withSuccess("[]", MediaType.APPLICATION_JSON));
+        var scan = client.listReviewThreadComments("owner", "repo", 7L);
+        assertTrue(scan.complete());
+        assertEquals(100, scan.comments().size());
+        server.verify();
+    }
+
+    @Test
+    void listReviewThreadComments_pageFailureIsIncomplete() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitHubApiClient client = new GitHubApiClient(builder.build(), CREDS);
+        String fullPage = "[" + String.join(",", java.util.Collections.nCopies(100,
+                "{\"id\":1,\"body\":\"comment\"}")) + "]";
+        server.expect(requestTo(CREDS.baseUrl() + "/repos/owner/repo/pulls/7/comments?per_page=100&page=1"))
+                .andRespond(withSuccess(fullPage, MediaType.APPLICATION_JSON));
+        server.expect(requestTo(CREDS.baseUrl() + "/repos/owner/repo/pulls/7/comments?per_page=100&page=2"))
+                .andRespond(withStatus(HttpStatus.INTERNAL_SERVER_ERROR));
+        var scan = client.listReviewThreadComments("owner", "repo", 7L);
+        assertFalse(scan.complete());
+        assertEquals(100, scan.comments().size());
+        server.verify();
+    }
+
+    @Test
+    void postPullRequestCommentReturningId_readsProviderId() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitHubApiClient client = new GitHubApiClient(builder.build(), CREDS);
+        server.expect(requestTo(CREDS.baseUrl() + "/repos/owner/repo/issues/7/comments"))
+                .andExpect(method(HttpMethod.POST))
+                .andRespond(withSuccess("{\"id\":987}", MediaType.APPLICATION_JSON));
+        assertEquals(java.util.Optional.of("987"),
+                client.postPullRequestCommentReturningId("owner", "repo", 7L, "summary"));
+        server.verify();
+    }
+
+
+    @Test
+    void resolveReviewThread_successLooksUpAndResolvesGraphQlNode() {
+        var restBuilder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer.bindTo(restBuilder).build();
+        var graphBuilder = RestClient.builder().baseUrl("https://api.github.com/graphql");
+        var graphServer = MockRestServiceServer.bindTo(graphBuilder).build();
+        GitHubApiClient client = new GitHubApiClient(restBuilder.build(), CREDS, graphBuilder.build());
+        graphServer.expect(requestTo("https://api.github.com/graphql"))
+                .andRespond(withSuccess("{\"data\":{\"repository\":{\"pullRequest\":{\"reviewThreads\":{\"nodes\":[{\"id\":\"PRRT_thread\",\"comments\":{\"nodes\":[{\"databaseId\":123}]}}],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}}}}}}",
+                        MediaType.APPLICATION_JSON));
+        graphServer.expect(requestTo("https://api.github.com/graphql"))
+                .andExpect(jsonPath("$.variables.threadId").value("PRRT_thread"))
+                .andRespond(withSuccess("{\"data\":{\"resolveReviewThread\":{\"thread\":{\"isResolved\":true}}}}",
+                        MediaType.APPLICATION_JSON));
+        client.resolveReviewThread("owner", "repo", 7L, "123");
+        assertTrue(client.threadCapabilities().canResolveThread());
+        graphServer.verify();
+    }
+
+    @Test
+    void listReviewThreadComments_mapsReplyIdentityAndTimestamp() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitHubApiClient client = new GitHubApiClient(builder.build(), CREDS);
+        server.expect(requestTo(CREDS.baseUrl() + "/repos/owner/repo/pulls/7/comments?per_page=100&page=1"))
+                .andRespond(withSuccess("[{\"id\":55,\"in_reply_to_id\":44,\"created_at\":\"2026-10-08T10:00:00Z\",\"user\":{\"login\":\"alice\"}}]",
+                        MediaType.APPLICATION_JSON));
+        var comment = client.listReviewThreadComments("owner", "repo", 7L).comments().getFirst();
+        assertEquals("44", comment.getThreadId());
+        assertEquals("44", comment.getParentId());
+        assertEquals("2026-10-08T10:00:00Z", comment.getCreatedAt());
+        assertEquals("alice", comment.getUserLogin());
+        server.verify();
+    }
+
+
+    @Test
+    void resolveReviewThread_enterpriseUsesApiGraphQlEndpoint() {
+        var enterprise = RepositoryCredentials.of(
+                "https://ghe.example/api/v3", "https://ghe.example", "token");
+        RestClient.Builder builder = RestClient.builder().baseUrl(enterprise.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitHubApiClient client = new GitHubApiClient(builder.build(), enterprise);
+        String endpoint = "https://ghe.example/api/graphql";
+        server.expect(requestTo(endpoint))
+                .andRespond(withSuccess("{\"data\":{\"repository\":{\"pullRequest\":{\"reviewThreads\":{\"nodes\":[{\"id\":\"PRRT_thread\",\"comments\":{\"nodes\":[{\"databaseId\":123}]}}],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}}}}}}",
+                        MediaType.APPLICATION_JSON));
+        server.expect(requestTo(endpoint))
+                .andRespond(withSuccess("{\"data\":{\"resolveReviewThread\":{\"thread\":{\"isResolved\":true}}}}",
+                        MediaType.APPLICATION_JSON));
+        client.resolveReviewThread("owner", "repo", 7L, "123");
+        server.verify();
+    }
+
+
+    @Test
+    void postReviewCommentReturningId_returnsReviewId() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitHubApiClient client = new GitHubApiClient(builder.build(), CREDS);
+        server.expect(requestTo(CREDS.baseUrl() + "/repos/owner/repo/pulls/7/reviews"))
+                .andExpect(method(HttpMethod.POST))
+                .andRespond(withSuccess("{\"id\":789}", MediaType.APPLICATION_JSON));
+        assertEquals(java.util.Optional.of("789"),
+                client.postReviewCommentReturningId("owner", "repo", 7L, "review body"));
+        server.verify();
+    }
+
 }

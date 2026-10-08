@@ -375,7 +375,7 @@ GroundingResult {
     - Integration: migration applies on H2 test profile.
   - **Verification:** H2 boots with V58; service and GC tests green.
 
-- [ ] **U4. Provider thread capabilities and comment identity**
+- [x] **U4. Provider thread capabilities and comment identity**
   - **Goal:** Read thread identity/replies; reply, edit, resolve where supported; return remote IDs for summary
     posts; linked fallback otherwise. (R10, R10a, R10b; KTD8, KTD16)
   - **Requirements:** R10, R10a, R10b

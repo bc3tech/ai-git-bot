@@ -34,11 +34,27 @@ public class GiteaReviewComment implements ReviewComment {
     /** New-side file line as reported by Gitea's API ({@code PullReviewComment.position}). */
     private Integer position;
 
+    @JsonProperty("pull_request_review_id")
+    private Long reviewId;
+
+    @JsonProperty("created_at")
+    private String createdAt;
+
     /** Old-side file line as reported by Gitea's API ({@code PullReviewComment.original_position}). */
     @JsonProperty("original_position")
     private Integer originalPosition;
 
     private GiteaReview.GiteaUser user;
+
+    @Override
+    public String getThreadId() {
+        return reviewId == null ? null : reviewId.toString();
+    }
+
+    @Override
+    public String getCreatedAt() {
+        return createdAt;
+    }
 
     @Override
     public String getUserLogin() {

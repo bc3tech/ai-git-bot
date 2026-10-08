@@ -165,7 +165,7 @@ class GitLabApiClientTest {
         GitLabApiClient client = new GitLabApiClient(builder.build(), CREDS);
 
         server.expect(requestTo(
-                        "https://gitlab.example.com/api/v4/projects/owner%2Frepo/issues/42/notes?per_page=50"))
+                        "https://gitlab.example.com/api/v4/projects/owner%2Frepo/issues/42/notes?per_page=100&page=1"))
                 .andExpect(method(HttpMethod.GET))
                 .andRespond(withSuccess("[{\"id\":201,\"body\":\"First note\"}]", MediaType.APPLICATION_JSON));
 
@@ -370,4 +370,92 @@ class GitLabApiClientTest {
         assertEquals(ReviewPublicationResult.Status.UNKNOWN, result.status());
         assertFalse(result.nothingWritten());
     }
+
+    @Test
+    void replyToReviewThread_postsIntoDiscussionAndReturnsId() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitLabApiClient client = new GitLabApiClient(builder.build(), CREDS);
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v4/projects/owner%2Frepo/merge_requests/7/discussions/thread-1/notes"))
+                .andExpect(method(HttpMethod.POST)).andExpect(jsonPath("$.body").value("reply"))
+                .andRespond(withSuccess("{\"id\":12}", MediaType.APPLICATION_JSON));
+        assertEquals(java.util.Optional.of("12"),
+                client.replyToReviewThread("owner", "repo", 7L, "thread-1", "reply"));
+        server.verify();
+    }
+
+    @Test
+    void resolveReviewThread_sendsResolvedBody() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitLabApiClient client = new GitLabApiClient(builder.build(), CREDS);
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v4/projects/owner%2Frepo/merge_requests/7/discussions/thread-1"))
+                .andExpect(method(HttpMethod.PUT)).andExpect(jsonPath("$.resolved").value(true))
+                .andRespond(withSuccess());
+        client.resolveReviewThread("owner", "repo", 7L, "thread-1");
+        server.verify();
+    }
+
+    @Test
+    void listReviewThreadComments_preservesDiscussionIdentity() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitLabApiClient client = new GitLabApiClient(builder.build(), CREDS);
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v4/projects/owner%2Frepo/merge_requests/7/discussions?per_page=100&page=1"))
+                .andRespond(withSuccess("[{\"id\":\"thread-1\",\"notes\":[{\"id\":12,\"body\":\"note\",\"created_at\":\"2026-10-08T10:00:00Z\",\"author\":{\"username\":\"alice\"},\"resolved\":false}]}]",
+                        MediaType.APPLICATION_JSON));
+        var scan = client.listReviewThreadComments("owner", "repo", 7L);
+        assertTrue(scan.complete());
+        assertEquals("thread-1", scan.comments().getFirst().getThreadId());
+        assertEquals("2026-10-08T10:00:00Z", scan.comments().getFirst().getCreatedAt());
+        server.verify();
+    }
+
+
+    @Test
+    void listReviewThreadComments_pageFailureIsIncomplete() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitLabApiClient client = new GitLabApiClient(builder.build(), CREDS);
+        String fullPage = "[" + String.join(",", java.util.Collections.nCopies(100, "{\"id\":\"thread\",\"notes\":[]}")) + "]";
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v4/projects/owner%2Frepo/merge_requests/7/discussions?per_page=100&page=1"))
+                .andRespond(withSuccess(fullPage, MediaType.APPLICATION_JSON));
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v4/projects/owner%2Frepo/merge_requests/7/discussions?per_page=100&page=2"))
+                .andRespond(withStatus(HttpStatus.INTERNAL_SERVER_ERROR));
+        var scan = client.listReviewThreadComments("owner", "repo", 7L);
+        assertFalse(scan.complete());
+        server.verify();
+    }
+
+    @Test
+    void postPullRequestCommentReturningId_returnsNoteId() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitLabApiClient client = new GitLabApiClient(builder.build(), CREDS);
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v4/projects/owner%2Frepo/merge_requests/7/notes"))
+                .andRespond(withSuccess("{\"id\":91}", MediaType.APPLICATION_JSON));
+        assertEquals(java.util.Optional.of("91"),
+                client.postPullRequestCommentReturningId("owner", "repo", 7L, "summary"));
+        server.verify();
+    }
+
+
+    @Test
+    void listPullRequestComments_readsAllPagesAndDiscussionSurface() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitLabApiClient client = new GitLabApiClient(builder.build(), CREDS);
+        String fullPage = "[" + String.join(",", java.util.Collections.nCopies(100, "{\"id\":1,\"body\":\"note\"}")) + "]";
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v4/projects/owner%2Frepo/merge_requests/7/notes?per_page=100&page=1"))
+                .andRespond(withSuccess(fullPage, MediaType.APPLICATION_JSON));
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v4/projects/owner%2Frepo/merge_requests/7/notes?per_page=100&page=2"))
+                .andRespond(withSuccess("[]", MediaType.APPLICATION_JSON));
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v4/projects/owner%2Frepo/merge_requests/7/discussions?per_page=100&page=1"))
+                .andRespond(withSuccess("[]", MediaType.APPLICATION_JSON));
+        var scan = client.listPullRequestComments("owner", "repo", 7L);
+        assertTrue(scan.complete());
+        assertEquals(100, scan.comments().size());
+        server.verify();
+    }
+
 }

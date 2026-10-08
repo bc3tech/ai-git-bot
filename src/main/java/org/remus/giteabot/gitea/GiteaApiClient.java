@@ -11,6 +11,8 @@ import org.remus.giteabot.repository.SshEndpoint;
 import org.remus.giteabot.repository.WorkflowDispatchRequest;
 import org.remus.giteabot.repository.WorkflowRunStatus;
 import org.remus.giteabot.repository.model.RepositoryCredentials;
+import org.remus.giteabot.repository.model.CommentScan;
+import org.remus.giteabot.repository.model.ThreadCapabilities;
 import org.remus.giteabot.repository.model.PullRequestHead;
 import org.remus.giteabot.repository.model.Review;
 import org.remus.giteabot.repository.model.ReviewAnchorComment;
@@ -26,10 +28,13 @@ import org.springframework.http.MediaType;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.RestClient;
+import org.springframework.web.client.RestClientException;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Objects;
 
 /**
@@ -259,13 +264,16 @@ public class GiteaApiClient implements RepositoryApiClient {
 
     @Override
     public void postReviewComment(String owner, String repo, Long pullNumber, String body) {
-        log.info("Posting review comment on PR #{} in {}/{}", pullNumber, owner, repo);
-        giteaRestClient.post()
+        postReviewCommentReturningId(owner, repo, pullNumber, body);
+    }
+
+    @Override
+    public Optional<String> postReviewCommentReturningId(String owner, String repo, Long pullNumber, String body) {
+        Map<String, Object> response = giteaRestClient.post()
                 .uri("/api/v1/repos/{owner}/{repo}/pulls/{index}/reviews", owner, repo, pullNumber)
                 .body(new ReviewRequest(body, "COMMENT"))
-                .retrieve()
-                .toBodilessEntity();
-        log.info("Review comment posted successfully");
+                .retrieve().body(new ParameterizedTypeReference<>() {});
+        return remoteId(response);
     }
 
     @Override
@@ -287,14 +295,18 @@ public class GiteaApiClient implements RepositoryApiClient {
 
     @Override
     public void postReview(String owner, String repo, Long pullNumber, String body, PostReviewAction action) {
+        postReviewReturningId(owner, repo, pullNumber, body, action);
+    }
+
+    @Override
+    public Optional<String> postReviewReturningId(String owner, String repo, Long pullNumber,
+                                                  String body, PostReviewAction action) {
         String event = reviewEvent(action);
-        log.info("Posting {} review on PR #{} in {}/{}", event, pullNumber, owner, repo);
-        giteaRestClient.post()
+        Map<String, Object> response = giteaRestClient.post()
                 .uri("/api/v1/repos/{owner}/{repo}/pulls/{index}/reviews", owner, repo, pullNumber)
                 .body(new ReviewRequest(body, event))
-                .retrieve()
-                .toBodilessEntity();
-        log.info("Review posted successfully");
+                .retrieve().body(new ParameterizedTypeReference<>() {});
+        return remoteId(response);
     }
 
     @Override
@@ -324,13 +336,16 @@ public class GiteaApiClient implements RepositoryApiClient {
 
     @Override
     public void postPullRequestComment(String owner, String repo, Long pullNumber, String body) {
-        log.info("Posting comment on PR #{} in {}/{}", pullNumber, owner, repo);
-        giteaRestClient.post()
+        postPullRequestCommentReturningId(owner, repo, pullNumber, body);
+    }
+
+    @Override
+    public Optional<String> postPullRequestCommentReturningId(String owner, String repo, Long pullNumber, String body) {
+        Map<String, Object> response = giteaRestClient.post()
                 .uri("/api/v1/repos/{owner}/{repo}/issues/{index}/comments", owner, repo, pullNumber)
                 .body(new CommentRequest(body))
-                .retrieve()
-                .toBodilessEntity();
-        log.info("Comment posted successfully");
+                .retrieve().body(new ParameterizedTypeReference<>() {});
+        return remoteId(response);
     }
 
     /**
@@ -428,16 +443,88 @@ public class GiteaApiClient implements RepositoryApiClient {
 
     @Override
     public List<Map<String, Object>> getIssueComments(String owner, String repo, Long issueNumber) {
-        log.info("Fetching comments for issue #{} in {}/{}", issueNumber, owner, repo);
-        List<Map<String, Object>> comments = giteaRestClient.get()
-                .uri(uriBuilder -> uriBuilder
-                        .path("/api/v1/repos/{owner}/{repo}/issues/{index}/comments")
-                        .queryParam("limit", 50)
-                        .build(owner, repo, issueNumber))
-                .retrieve()
-                .body(new ParameterizedTypeReference<>() {});
-        return comments != null ? comments : List.of();
+        return fetchPages(page -> giteaRestClient.get()
+                .uri(uriBuilder -> uriBuilder.path("/api/v1/repos/{owner}/{repo}/issues/{index}/comments")
+                        .queryParam("limit", 50).queryParam("page", page).build(owner, repo, issueNumber))
+                .retrieve().body(new ParameterizedTypeReference<List<Map<String, Object>>>() {}), 50).items();
     }
+
+    @Override
+    public ThreadCapabilities threadCapabilities() {
+        return ThreadCapabilities.unsupported();
+    }
+
+    @Override
+    public CommentScan<ReviewComment> listReviewThreadComments(String owner, String repo, Long pullNumber) {
+        PageScan<GiteaReview> reviews = fetchPages(page -> giteaRestClient.get()
+                .uri(uriBuilder -> uriBuilder.path("/api/v1/repos/{owner}/{repo}/pulls/{index}/reviews")
+                        .queryParam("limit", 50).queryParam("page", page).build(owner, repo, pullNumber))
+                .retrieve().body(new ParameterizedTypeReference<List<GiteaReview>>() {}), 50);
+        List<ReviewComment> comments = new ArrayList<>();
+        boolean complete = reviews.complete();
+        for (GiteaReview review : reviews.items()) {
+            if (review.getId() == null) { complete = false; continue; }
+            PageScan<GiteaReviewComment> scan = fetchPages(page -> giteaRestClient.get()
+                    .uri(uriBuilder -> uriBuilder.path("/api/v1/repos/{owner}/{repo}/pulls/{index}/reviews/{id}/comments")
+                            .queryParam("limit", 50).queryParam("page", page)
+                            .build(owner, repo, pullNumber, review.getId()))
+                    .retrieve().body(new ParameterizedTypeReference<List<GiteaReviewComment>>() {}), 50);
+            comments.addAll(scan.items());
+            complete &= scan.complete();
+        }
+        return new CommentScan<>(comments, complete);
+    }
+
+    @Override
+    public CommentScan<Map<String, Object>> listPullRequestComments(String owner, String repo, Long pullNumber) {
+        PageScan<Map<String, Object>> issue = fetchPages(page -> giteaRestClient.get()
+                .uri(uriBuilder -> uriBuilder.path("/api/v1/repos/{owner}/{repo}/issues/{index}/comments")
+                        .queryParam("limit", 50).queryParam("page", page).build(owner, repo, pullNumber))
+                .retrieve().body(new ParameterizedTypeReference<List<Map<String, Object>>>() {}), 50);
+        CommentScan<ReviewComment> reviews = listReviewThreadComments(owner, repo, pullNumber);
+        List<Map<String, Object>> all = new ArrayList<>(issue.items());
+        for (ReviewComment comment : reviews.comments()) {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("id", comment.getId()); item.put("body", comment.getBody());
+            item.put("created_at", comment.getCreatedAt()); item.put("review_id", comment.getThreadId());
+            item.put("user", Map.of("login", comment.getUserLogin() == null ? "" : comment.getUserLogin()));
+            all.add(item);
+        }
+        PageScan<GiteaReview> allReviews = fetchPages(page -> giteaRestClient.get()
+                .uri(uriBuilder -> uriBuilder.path("/api/v1/repos/{owner}/{repo}/pulls/{index}/reviews")
+                        .queryParam("limit", 50).queryParam("page", page).build(owner, repo, pullNumber))
+                .retrieve().body(new ParameterizedTypeReference<List<GiteaReview>>() {}), 50);
+        for (GiteaReview review : allReviews.items()) {
+            if (review.getBody() != null && !review.getBody().isBlank()) {
+                Map<String, Object> item = new LinkedHashMap<>();
+                item.put("id", review.getId()); item.put("body", review.getBody());
+                item.put("submitted_at", review.getSubmittedAt()); item.put("user", Map.of("login", review.getUserLogin() == null ? "" : review.getUserLogin()));
+                all.add(item);
+            }
+        }
+        return new CommentScan<>(all, issue.complete() && reviews.complete() && allReviews.complete());
+    }
+
+    private static <T> PageScan<T> fetchPages(java.util.function.Function<Integer, List<T>> fetch, int pageSize) {
+        List<T> items = new ArrayList<>();
+        for (int page = 1; ; page++) {
+            try {
+                List<T> next = fetch.apply(page);
+                if (next == null) return new PageScan<>(items, false);
+                items.addAll(next);
+                if (next.size() < pageSize) return new PageScan<>(items, true);
+            } catch (RestClientException e) {
+                return new PageScan<>(items, false);
+            }
+        }
+    }
+
+    private static Optional<String> remoteId(Map<String, Object> response) {
+        Object id = response == null ? null : response.get("id");
+        return id == null ? Optional.empty() : Optional.of(String.valueOf(id));
+    }
+
+    private record PageScan<T>(List<T> items, boolean complete) { }
 
     @Override
     public void assignIssue(String owner, String repo, Long issueNumber, String assignee) {
@@ -521,6 +608,13 @@ public class GiteaApiClient implements RepositoryApiClient {
                 .retrieve()
                 .toBodilessEntity();
         log.info("Inline review comment posted successfully");
+    }
+
+
+    @Override
+    public Optional<String> pullRequestCommentLink(String owner, String repo, Long pullNumber, String remoteId) {
+        return Optional.of(credentials.cloneUrl().replaceAll("/+$", "") + "/pulls/" + pullNumber
+                + "#issuecomment-" + remoteId);
     }
 
     @Override

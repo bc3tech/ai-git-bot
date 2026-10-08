@@ -99,7 +99,7 @@ class GiteaApiClientTest {
         RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
         GiteaApiClient client = new GiteaApiClient(builder.build(), CREDS);
-        server.expect(requestTo(CREDS.baseUrl() + "/api/v1/user/keys?page=1&limit=50"))
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v1/user/keys?limit=50&page=1"))
                 .andRespond(withSuccess("[{\"id\":1,\"title\":\"unrelated\"}]", MediaType.APPLICATION_JSON));
         server.expect(requestTo(CREDS.baseUrl() + "/api/v1/user/keys?page=2&limit=50"))
                 .andRespond(withSuccess("[{\"id\":42,\"title\":\"unique-title\"}]", MediaType.APPLICATION_JSON));
@@ -115,7 +115,7 @@ class GiteaApiClientTest {
         RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
         GiteaApiClient client = new GiteaApiClient(builder.build(), CREDS);
-        server.expect(requestTo(CREDS.baseUrl() + "/api/v1/user/keys?page=1&limit=50"))
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v1/user/keys?limit=50&page=1"))
                 .andRespond(withSuccess(response, MediaType.APPLICATION_JSON));
         assertThrows(IllegalStateException.class, client::getSshKeyIds);
         server.verify();
@@ -313,7 +313,7 @@ class GiteaApiClientTest {
         GiteaApiClient client = new GiteaApiClient(builder.build(), CREDS);
 
         server.expect(requestTo(
-                        "https://gitea.example.com/api/v1/repos/owner/repo/issues/42/comments?limit=50"))
+                        "https://gitea.example.com/api/v1/repos/owner/repo/issues/42/comments?limit=50&page=1"))
                 .andExpect(method(HttpMethod.GET))
                 .andRespond(withSuccess("[{\"id\":401,\"body\":\"First comment\"}]", MediaType.APPLICATION_JSON));
 
@@ -446,4 +446,52 @@ class GiteaApiClientTest {
 
         server.verify();
     }
+
+    @Test
+    void giteaReviewThreadWritesAreConservativelyUnsupported() {
+        GiteaApiClient client = new GiteaApiClient(null, CREDS);
+        assertFalse(client.threadCapabilities().canReplyInThread());
+        assertFalse(client.threadCapabilities().canEditComment());
+        assertFalse(client.threadCapabilities().canResolveThread());
+        assertThrows(UnsupportedOperationException.class,
+                () -> client.replyToReviewThread("owner", "repo", 7L, "52", "reply"));
+    }
+
+    @Test
+    void listReviewThreadComments_readsReviewCommentIdentity() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GiteaApiClient client = new GiteaApiClient(builder.build(), CREDS);
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v1/repos/owner/repo/pulls/7/reviews?limit=50&page=1"))
+                .andRespond(withSuccess("[{\"id\":52}]", MediaType.APPLICATION_JSON));
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v1/repos/owner/repo/pulls/7/reviews/52/comments?limit=50&page=1"))
+                .andRespond(withSuccess("[{\"id\":3491,\"body\":\"note\",\"pull_request_review_id\":52,\"created_at\":\"2026-10-08T10:00:00Z\",\"user\":{\"login\":\"alice\"}}]",
+                        MediaType.APPLICATION_JSON));
+        var scan = client.listReviewThreadComments("owner", "repo", 7L);
+        assertTrue(scan.complete());
+        assertEquals("52", scan.comments().getFirst().getThreadId());
+        assertEquals("alice", scan.comments().getFirst().getUserLogin());
+        server.verify();
+    }
+
+
+    @Test
+    void listPullRequestComments_readsEveryPageAndReviewSurface() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GiteaApiClient client = new GiteaApiClient(builder.build(), CREDS);
+        String fullPage = "[" + String.join(",", java.util.Collections.nCopies(50, "{\"id\":1,\"body\":\"comment\"}")) + "]";
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v1/repos/owner/repo/issues/7/comments?limit=50&page=1"))
+                .andRespond(withSuccess(fullPage, MediaType.APPLICATION_JSON));
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v1/repos/owner/repo/issues/7/comments?limit=50&page=2"))
+                .andRespond(withSuccess("[]", MediaType.APPLICATION_JSON));
+        String reviewsUrl = CREDS.baseUrl() + "/api/v1/repos/owner/repo/pulls/7/reviews?limit=50&page=1";
+        server.expect(requestTo(reviewsUrl)).andRespond(withSuccess("[]", MediaType.APPLICATION_JSON));
+        server.expect(requestTo(reviewsUrl)).andRespond(withSuccess("[]", MediaType.APPLICATION_JSON));
+        var scan = client.listPullRequestComments("owner", "repo", 7L);
+        assertTrue(scan.complete());
+        assertEquals(50, scan.comments().size());
+        server.verify();
+    }
+
 }

@@ -10,6 +10,8 @@ import org.remus.giteabot.repository.RepositoryApiClient;
 import org.remus.giteabot.repository.WorkflowDispatchRequest;
 import org.remus.giteabot.repository.WorkflowRunStatus;
 import org.remus.giteabot.repository.model.DiffSide;
+import org.remus.giteabot.repository.model.CommentScan;
+import org.remus.giteabot.repository.model.ThreadCapabilities;
 import org.remus.giteabot.repository.model.RepositoryCredentials;
 import org.remus.giteabot.repository.model.ReviewAnchorComment;
 import org.remus.giteabot.repository.model.ReviewPublicationResult;
@@ -26,8 +28,10 @@ import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Optional;
 import java.util.Map;
 import java.util.stream.Collectors;
 
@@ -329,9 +333,20 @@ public class GitLabApiClient implements RepositoryApiClient {
 
     @Override
     public void postReviewComment(String owner, String repo, Long pullNumber, String body) {
-        log.info("Posting note on MR !{} in {}/{}", pullNumber, owner, repo);
-        postPullRequestComment(owner, repo, pullNumber, body);
-        log.info("Note posted successfully");
+        postReviewCommentReturningId(owner, repo, pullNumber, body);
+    }
+
+    @Override
+    public Optional<String> postReviewCommentReturningId(String owner, String repo, Long pullNumber, String body) {
+        return postPullRequestCommentReturningId(owner, repo, pullNumber, body);
+    }
+
+    @Override
+    public Optional<String> postReviewReturningId(String owner, String repo, Long pullNumber,
+                                                  String body, PostReviewAction action) {
+        Optional<String> id = postPullRequestCommentReturningId(owner, repo, pullNumber, body);
+        postReviewAction(owner, repo, pullNumber, action);
+        return id;
     }
 
     @Override
@@ -358,13 +373,17 @@ public class GitLabApiClient implements RepositoryApiClient {
 
     @Override
     public void postPullRequestComment(String owner, String repo, Long pullNumber, String body) {
-        log.info("Posting merge request note on MR !{} in {}/{}", pullNumber, owner, repo);
+        postPullRequestCommentReturningId(owner, repo, pullNumber, body);
+    }
+
+    @Override
+    public Optional<String> postPullRequestCommentReturningId(String owner, String repo, Long pullNumber, String body) {
         String projectPath = encodeProjectPath(owner, repo);
-        gitlabRestClient.post()
+        Map<String, Object> response = gitlabRestClient.post()
                 .uri("/api/v4/projects/{projectPath}/merge_requests/{iid}/notes", projectPath, pullNumber)
                 .body(Map.of("body", body))
-                .retrieve()
-                .toBodilessEntity();
+                .retrieve().body(new ParameterizedTypeReference<>() {});
+        return remoteId(response);
     }
 
     /**
@@ -471,17 +490,113 @@ public class GitLabApiClient implements RepositoryApiClient {
 
     @Override
     public List<Map<String, Object>> getIssueComments(String owner, String repo, Long issueNumber) {
-        log.info("Fetching notes for issue #{} in {}/{}", issueNumber, owner, repo);
         String projectPath = encodeProjectPath(owner, repo);
-        List<Map<String, Object>> notes = gitlabRestClient.get()
-                .uri(uriBuilder -> uriBuilder
-                        .path("/api/v4/projects/{projectPath}/issues/{iid}/notes")
-                        .queryParam("per_page", 50)
-                        .build(projectPath, issueNumber))
-                .retrieve()
-                .body(new ParameterizedTypeReference<>() {});
-        return notes != null ? notes : List.of();
+        return fetchPages(page -> gitlabRestClient.get()
+                .uri(uriBuilder -> uriBuilder.path("/api/v4/projects/{projectPath}/issues/{iid}/notes")
+                        .queryParam("per_page", 100).queryParam("page", page).build(projectPath, issueNumber))
+                .retrieve().body(new ParameterizedTypeReference<List<Map<String, Object>>>() {})).items();
     }
+
+    @Override
+    public ThreadCapabilities threadCapabilities() {
+        return new ThreadCapabilities(true, true, true);
+    }
+
+    @Override
+    public Optional<String> replyToReviewThread(String owner, String repo, Long pullNumber,
+                                                String threadId, String body) {
+        String projectPath = encodeProjectPath(owner, repo);
+        Map<String, Object> response = gitlabRestClient.post()
+                .uri("/api/v4/projects/{projectPath}/merge_requests/{iid}/discussions/{discussionId}/notes",
+                        projectPath, pullNumber, threadId)
+                .body(Map.of("body", body)).retrieve().body(new ParameterizedTypeReference<>() {});
+        return remoteId(response);
+    }
+
+    @Override
+    public void editReviewComment(String owner, String repo, Long pullNumber, String commentId, String body) {
+        String projectPath = encodeProjectPath(owner, repo);
+        String threadId = listReviewThreadComments(owner, repo, pullNumber).comments().stream()
+                .filter(comment -> commentId.equals(String.valueOf(comment.getId())))
+                .map(ReviewComment::getThreadId).findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("GitLab discussion for note was not found"));
+        gitlabRestClient.put()
+                .uri("/api/v4/projects/{projectPath}/merge_requests/{iid}/discussions/{discussionId}/notes/{noteId}",
+                        projectPath, pullNumber, threadId, commentId)
+                .body(Map.of("body", body)).retrieve().toBodilessEntity();
+    }
+
+    @Override
+    public void resolveReviewThread(String owner, String repo, Long pullNumber, String threadId) {
+        String projectPath = encodeProjectPath(owner, repo);
+        gitlabRestClient.put()
+                .uri("/api/v4/projects/{projectPath}/merge_requests/{iid}/discussions/{discussionId}",
+                        projectPath, pullNumber, threadId)
+                .body(Map.of("resolved", true)).retrieve().toBodilessEntity();
+    }
+
+    @Override
+    public CommentScan<ReviewComment> listReviewThreadComments(String owner, String repo, Long pullNumber) {
+        String projectPath = encodeProjectPath(owner, repo);
+        PageScan<GitLabReview> scan = fetchPages(page -> gitlabRestClient.get()
+                .uri(uriBuilder -> uriBuilder.path("/api/v4/projects/{projectPath}/merge_requests/{iid}/discussions")
+                        .queryParam("per_page", 100).queryParam("page", page).build(projectPath, pullNumber))
+                .retrieve().body(new ParameterizedTypeReference<List<GitLabReview>>() {}));
+        List<ReviewComment> comments = new ArrayList<>();
+        for (GitLabReview discussion : scan.items()) {
+            if (discussion.getNotes() == null) continue;
+            Long rootNoteId = discussion.getNotes().isEmpty() ? null : discussion.getNotes().getFirst().getId();
+            for (GitLabReview.GitLabNote note : discussion.getNotes()) {
+                GitLabReviewComment comment = new GitLabReviewComment();
+                comment.setId(note.getId()); comment.setBody(note.getBody()); comment.setCreatedAt(note.getCreatedAt());
+                comment.setAuthor(note.getAuthor()); comment.setThreadId(discussion.getDiscussionId());
+                comment.setParentId(rootNoteId != null && !rootNoteId.equals(note.getId()) ? rootNoteId.toString() : null);
+                comment.setResolved(note.getResolved());
+                comments.add(comment);
+            }
+        }
+        return new CommentScan<>(comments, scan.complete());
+    }
+
+    @Override
+    public CommentScan<Map<String, Object>> listPullRequestComments(String owner, String repo, Long pullNumber) {
+        String projectPath = encodeProjectPath(owner, repo);
+        PageScan<Map<String, Object>> issue = fetchPages(page -> gitlabRestClient.get()
+                .uri(uriBuilder -> uriBuilder.path("/api/v4/projects/{projectPath}/merge_requests/{iid}/notes")
+                        .queryParam("per_page", 100).queryParam("page", page).build(projectPath, pullNumber))
+                .retrieve().body(new ParameterizedTypeReference<List<Map<String, Object>>>() {}));
+        CommentScan<ReviewComment> discussions = listReviewThreadComments(owner, repo, pullNumber);
+        List<Map<String, Object>> all = new ArrayList<>(issue.items());
+        for (ReviewComment comment : discussions.comments()) {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("id", comment.getId()); item.put("body", comment.getBody());
+            item.put("created_at", comment.getCreatedAt()); item.put("discussion_id", comment.getThreadId());
+            item.put("resolved", comment.getResolved()); item.put("author", Map.of("username", comment.getUserLogin() == null ? "" : comment.getUserLogin()));
+            all.add(item);
+        }
+        return new CommentScan<>(all, issue.complete() && discussions.complete());
+    }
+
+    private static <T> PageScan<T> fetchPages(java.util.function.Function<Integer, List<T>> fetch) {
+        List<T> items = new ArrayList<>();
+        for (int page = 1; ; page++) {
+            try {
+                List<T> next = fetch.apply(page);
+                if (next == null) return new PageScan<>(items, false);
+                items.addAll(next);
+                if (next.size() < 100) return new PageScan<>(items, true);
+            } catch (RestClientException e) {
+                return new PageScan<>(items, false);
+            }
+        }
+    }
+
+    private static Optional<String> remoteId(Map<String, Object> response) {
+        Object id = response == null ? null : response.get("id");
+        return id == null ? Optional.empty() : Optional.of(String.valueOf(id));
+    }
+
+    private record PageScan<T>(List<T> items, boolean complete) { }
 
     @Override
     public void addReaction(String owner, String repo, Long commentId, String reaction) {
@@ -558,6 +673,13 @@ public class GitLabApiClient implements RepositoryApiClient {
                 .retrieve()
                 .toBodilessEntity();
         log.info("Inline note posted successfully");
+    }
+
+
+    @Override
+    public Optional<String> pullRequestCommentLink(String owner, String repo, Long pullNumber, String remoteId) {
+        return Optional.of(credentials.cloneUrl().replaceAll("/+$", "") + "/-/merge_requests/"
+                + pullNumber + "#note_" + remoteId);
     }
 
     @Override
