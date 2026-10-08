@@ -15,7 +15,13 @@ RUN apk add --no-cache maven && \
 
 # Build the application (source changes don't bust the dependency cache)
 COPY src ./src
-RUN mvn clean package -DskipTests -o
+COPY prompts ./prompts
+# The build fingerprint is a hash of everything that goes into the image's application, so
+# the same source always yields the same id no matter how often the container is recreated.
+# GIT_COMMIT is optional (.git is not in the build context): --build-arg GIT_COMMIT=$(git rev-parse HEAD)
+ARG GIT_COMMIT=unknown
+RUN BUILD_FINGERPRINT=$(find pom.xml src prompts -type f -exec sha256sum {} + | LC_ALL=C sort -k2 | sha256sum | cut -c1-12) && \
+    mvn clean package -DskipTests -o -Dbuild.fingerprint="$BUILD_FINGERPRINT" -Dbuild.commit="$GIT_COMMIT"
 
 # --- Runtime image ---
 #
