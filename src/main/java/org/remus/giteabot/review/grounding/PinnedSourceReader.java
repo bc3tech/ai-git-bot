@@ -65,6 +65,11 @@ public final class PinnedSourceReader {
 
     /** Indicates that a file could not be read from the requested immutable revision. */
     public static final class RevisionUnavailableException extends RuntimeException {
+        public boolean fileNotFound() {
+            return getCause() instanceof org.springframework.web.client.RestClientResponseException response
+                    && response.getStatusCode().value() == 404;
+        }
+
         public RevisionUnavailableException(String path, String sha, Throwable cause) {
             super("Could not read " + path + " at commit " + sha, cause);
         }

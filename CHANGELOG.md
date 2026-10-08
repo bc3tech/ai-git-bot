@@ -17,6 +17,9 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 - Added a lease-protected unchanged-revision guard to standard and agentic reviews, using the head SHA, effective diff base, successful non-degraded revision state, and complete comment scans. Only explicit review requests may skip; automatic triggers always review. Skips post a short revision reply and clear the bot's eyes reactions. GitHub snapshots now obtain the merge-base through the compare API. Revision-state persistence is supplied by the grounded review-path integration.
 
 - Added the shared finding-grounding and thread-action services: deterministic evidence checks, AI keep/drop/hold reconciliation, unchanged-finding suppression, dispute replies and withdrawals, and lease-fenced write-ahead publication with recoverable finding markers. Standard and agentic workflow integration follows separately.
+  - Isolated pinned-source read failures per finding: unverifiable new findings are dropped and audited; unavailable prior evidence remains unchanged with a degraded-run warning. Confirmed missing files follow the existing quote-gone withdrawal path.
+  - Suppressed stale-snapshot summary fallbacks and discarded their pending findings, while retaining same-head rejection fallbacks. Lease-release failures now log a warning and rely on expiry without replacing review outcomes.
+  - Made retention deletion atomic with a locked close-marker recheck so concurrent reopens retain review state. Added regression coverage for rollback, reopen races, and UNKNOWN provider states.
 
 - Added the prior-findings digest service for grounded re-reviews. It reconciles stored findings only after complete provider scans and associates non-bot replies by thread, finding marker/link, then uniquely quoted code. History is explicitly labeled as non-current code; review-path integration follows separately.
 

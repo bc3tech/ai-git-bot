@@ -370,7 +370,10 @@ public class AgentReviewService {
                 try {
                     if (heartbeat != null) heartbeat.close();
                 } finally {
-                    if (lease != null) leases.release(lease);
+                    if (lease != null) {
+                        try { leases.release(lease); }
+                        catch (RuntimeException e) { log.warn("Could not release agentic PR review lease; relying on expiry: {}", e.getMessage()); }
+                    }
                 }
             }
         }

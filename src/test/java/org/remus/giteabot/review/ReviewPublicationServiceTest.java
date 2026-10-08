@@ -115,9 +115,9 @@ class ReviewPublicationServiceTest {
     }
 
     @Test
-    void rejectedOrStaleInlineReviewFallsBackToFullReviewWithAction() {
+    void rejectedInlineReviewFallsBackToFullReviewWithAction() {
         when(client.publishInlineReview(any(), any(), any(), any(), anyString(), anyList(), any()))
-                .thenAnswer(inv -> ReviewPublicationResult.notWritten(Status.STALE_SNAPSHOT, inv.getArgument(5), "moved"));
+                .thenAnswer(inv -> ReviewPublicationResult.notWritten(Status.REJECTED, inv.getArgument(5), "invalid position"));
 
         ReviewPublicationService.Outcome outcome = publish(doc("S", onAdded), PostReviewAction.APPROVE, ReviewFence.NONE);
 
@@ -125,6 +125,19 @@ class ReviewPublicationServiceTest {
                 "[H]\nS\n\n### Findings\n\n- **MEDIUM** · bug `src/A.java:2` — Use a constant.\n\n[F]"),
                 eq(PostReviewAction.APPROVE));
         assertThat(outcome.fallbackUsed()).isTrue();
+    }
+
+    @Test
+    void staleInlineReviewDoesNotPostFallbackOrSubmitAction() {
+        when(client.publishInlineReview(any(), any(), any(), any(), anyString(), anyList(), any()))
+                .thenAnswer(inv -> ReviewPublicationResult.notWritten(Status.STALE_SNAPSHOT, inv.getArgument(5), "moved"));
+        ReviewPublicationService.Outcome outcome = publish(doc("S", onAdded), PostReviewAction.APPROVE, ReviewFence.NONE);
+        assertThat(outcome.delivered()).isFalse();
+        assertThat(outcome.fallbackUsed()).isFalse();
+        assertThat(outcome.action()).isEqualTo(Delivery.FAILED);
+        verify(client, never()).postReview(any(), any(), any(), any(), any());
+        verify(client, never()).postReviewComment(any(), any(), any(), any());
+        verify(client, never()).postPullRequestComment(any(), any(), any(), any());
     }
 
     @Test

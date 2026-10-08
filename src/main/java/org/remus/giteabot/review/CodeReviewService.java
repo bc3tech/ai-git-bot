@@ -261,7 +261,8 @@ public class CodeReviewService {
             throw e;
         } finally {
             heartbeat.shutdownNow();
-            leases.release(lease);
+            try { leases.release(lease); }
+            catch (RuntimeException e) { log.warn("Could not release PR review lease; relying on expiry: {}", e.getMessage()); }
         }
     }
 

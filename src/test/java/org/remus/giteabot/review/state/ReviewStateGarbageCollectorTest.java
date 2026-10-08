@@ -3,6 +3,8 @@ package org.remus.giteabot.review.state;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.remus.giteabot.admin.Bot;
@@ -16,6 +18,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -29,7 +32,7 @@ import static org.mockito.Mockito.when;
 class ReviewStateGarbageCollectorTest {
 
     @Mock private ReviewRevisionRepository revisionRepository;
-    @Mock private ReviewFindingRepository findingRepository;
+    @Mock private ReviewStateService stateService;
     @Mock private BotRepository botRepository;
     @Mock private GiteaClientFactory clientFactory;
     @Mock private RepositoryApiClient apiClient;
@@ -41,7 +44,7 @@ class ReviewStateGarbageCollectorTest {
 
     @BeforeEach
     void setUp() {
-        collector = new ReviewStateGarbageCollector(revisionRepository, findingRepository, botRepository,
+        collector = new ReviewStateGarbageCollector(revisionRepository, stateService, botRepository,
                 clientFactory, Duration.ofDays(30));
         now = Instant.parse("2026-10-08T12:00:00Z");
         collector.setNowSupplierForTest(() -> now);
@@ -64,13 +67,12 @@ class ReviewStateGarbageCollectorTest {
     void deletesStateOnlyWhenProviderConfirmsPrClosed() {
         when(apiClient.getPullRequestDetails("owner", "repo", 42L))
                 .thenReturn(Map.of("state", "closed", "merged", true));
-        when(findingRepository.deleteForPullRequest(2L, "owner", "repo", 42L)).thenReturn(3);
-        when(revisionRepository.deleteForPullRequest(2L, "owner", "repo", 42L)).thenReturn(1);
+        when(stateService.deleteClosedPullRequestState(2L, "owner", "repo", 42L, now.minus(Duration.ofDays(30))))
+                .thenReturn(4);
 
         assertThat(collector.collectOnce()).isEqualTo(4);
 
-        verify(findingRepository).deleteForPullRequest(2L, "owner", "repo", 42L);
-        verify(revisionRepository).deleteForPullRequest(2L, "owner", "repo", 42L);
+        verify(stateService).deleteClosedPullRequestState(2L, "owner", "repo", 42L, now.minus(Duration.ofDays(30)));
     }
 
     @Test
@@ -81,7 +83,7 @@ class ReviewStateGarbageCollectorTest {
         assertThat(collector.collectOnce()).isZero();
 
         verify(revisionRepository).clearPrClosed(2L, "owner", "repo", 42L);
-        verify(findingRepository, never()).deleteForPullRequest(any(), any(), any(), any());
+        verify(stateService, never()).deleteClosedPullRequestState(any(), any(), any(), any(), any());
         verify(revisionRepository, never()).deleteForPullRequest(any(), any(), any(), any());
     }
 
@@ -91,9 +93,23 @@ class ReviewStateGarbageCollectorTest {
 
         assertThat(collector.collectOnce()).isZero();
 
-        verify(findingRepository, never()).deleteForPullRequest(any(), any(), any(), any());
+        verify(stateService, never()).deleteClosedPullRequestState(any(), any(), any(), any(), any());
         verify(revisionRepository, never()).deleteForPullRequest(any(), any(), any(), any());
         verify(revisionRepository, never()).clearPrClosed(any(), any(), any(), any());
+    }
+
+    @ParameterizedTest
+    @MethodSource("unknownProviderStates")
+    void unknownProviderStateRetainsRowsAndCloseMarker(Map<String, Object> details) {
+        when(apiClient.getPullRequestDetails("owner", "repo", 42L)).thenReturn(details);
+        assertThat(collector.collectOnce()).isZero();
+        verify(stateService, never()).deleteClosedPullRequestState(any(), any(), any(), any(), any());
+        verify(revisionRepository, never()).deleteForPullRequest(any(), any(), any(), any());
+        verify(revisionRepository, never()).clearPrClosed(any(), any(), any(), any());
+    }
+
+    private static Stream<Map<String, Object>> unknownProviderStates() {
+        return Stream.of(null, Map.of("state", "unrecognized"));
     }
 
     @Test

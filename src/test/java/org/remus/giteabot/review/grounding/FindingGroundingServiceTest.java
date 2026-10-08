@@ -247,8 +247,48 @@ class FindingGroundingServiceTest {
     void failedPinnedReadDoesNotWithdrawPrior() {
         ReviewFindingRecord prior = stored();
         when(api.getFileContent(anyString(), anyString(), anyString(), anyString())).thenThrow(new IllegalStateException("offline"));
-        assertThatThrownBy(() -> run(List.of(), digest(prior, true), List.of(prior), evidence(DIFF)))
-                .isInstanceOf(PinnedSourceReader.RevisionUnavailableException.class);
+        GroundingResult result = run(List.of(), digest(prior, true), List.of(prior), evidence(DIFF));
+        assertThat(result.threadActions()).isEmpty();
+        assertThat(result.degraded()).isTrue();
+        verify(audit).recordGroundingWarning(eq(event), eq("QUOTE"), anyString(), eq(HEAD), eq(BASE));
+    }
+
+    @Test
+    void unreadableCandidateDoesNotPreventOtherFindingsFromBeingProcessed() {
+        ReviewDocument.Finding unreadable = new ReviewDocument.Finding("bad", "Issue", "Missing.java", DiffSide.NEW, 2,
+                "HIGH", "bug", QUOTE, List.of());
+        when(api.getFileContent("o", "r", "Missing.java", HEAD)).thenThrow(new IllegalStateException("offline"));
+        GroundingResult result = run(List.of(unreadable, finding("other", "HIGH", QUOTE)), empty(), List.of(), evidence(DIFF));
+        assertThat(result.publish()).hasSize(1);
+        assertThat(result.degraded()).isTrue();
+        assertThat(result.dispositions()).singleElement().satisfies(d -> {
+            assertThat(d.type()).isEqualTo(AuditEventType.FINDING_DROPPED);
+            assertThat(d.reason()).isEqualTo("Pinned source unavailable");
+        });
+    }
+
+    @Test
+    void missingPriorFileWithdrawsButOtherFindingsStillPublish() {
+        ReviewFindingRecord prior = stored();
+        prior.setPath("Missing.java");
+        when(api.getFileContent("o", "r", "Missing.java", HEAD)).thenThrow(
+                org.springframework.web.client.HttpClientErrorException.create(
+                        org.springframework.http.HttpStatus.NOT_FOUND, "Not found", null, null, null));
+        GroundingResult result = run(List.of(finding("other", "HIGH", QUOTE)), digest(prior, true), List.of(prior), evidence(DIFF));
+        assertThat(result.publish()).hasSize(1);
+        assertThat(result.threadActions()).singleElement().satisfies(a -> assertThat(a.reason()).startsWith("quote gone:"));
+    }
+
+    @Test
+    void unavailablePriorIsNotSupersededAndOtherFindingsStillPublish() {
+        ReviewFindingRecord prior = stored();
+        prior.setPath("Missing.java");
+        when(api.getFileContent("o", "r", "Missing.java", HEAD)).thenThrow(new IllegalStateException("offline"));
+        GroundingResult result = run(List.of(finding("other", "HIGH", QUOTE)), digest(prior, true), List.of(prior), evidence(DIFF));
+        assertThat(result.publish()).hasSize(1);
+        assertThat(result.threadActions()).isEmpty();
+        assertThat(result.supersedes()).isEmpty();
+        assertThat(result.degraded()).isTrue();
     }
 
     @Test
@@ -354,11 +394,12 @@ class FindingGroundingServiceTest {
     }
 
     @Test
-    void unavailablePinnedNewEvidenceAbortsRatherThanDiffFallback() {
+    void unavailablePinnedNewEvidenceDropsRatherThanDiffFallback() {
         when(api.getFileContent(anyString(), anyString(), anyString(), anyString())).thenThrow(new IllegalStateException("offline"));
-        assertThatThrownBy(() -> fresh(finding("bug", "BLOCKER", QUOTE)))
-                .isInstanceOf(PinnedSourceReader.RevisionUnavailableException.class);
-        verifyNoInteractions(check);
+        GroundingResult result = fresh(finding("bug", "BLOCKER", QUOTE));
+        assertThat(result.publish()).isEmpty();
+        assertThat(result.degraded()).isTrue();
+        assertThat(candidates).isEmpty();
     }
 
     private GroundingResult fresh(ReviewDocument.Finding finding) { return run(List.of(finding), empty(), List.of(), evidence(DIFF)); }

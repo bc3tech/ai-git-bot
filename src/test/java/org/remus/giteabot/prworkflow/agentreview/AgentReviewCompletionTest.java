@@ -452,16 +452,16 @@ class AgentReviewCompletionTest {
     }
 
     @Test
-    void pinnedReadFailureStopsReviewInsteadOfFallingBackToBranch() {
+    void pinnedReadFailureDropsFindingWithoutFallingBackToBranch() {
         when(repositoryClient.getFileContent("owner", "repo", "Example.java", HEAD))
                 .thenThrow(new IllegalStateException("revision unavailable"));
         when(aiClient.chatWithTools(anyList(), any(), anyList(), anyString(), isNull(), anyInt()))
                 .thenReturn(ChatTurn.text(envelope("newCall();", "BLOCKER")));
-        assertThat(review(true)).isEqualTo(AgentReviewService.ReviewResult.FAILED);
-        verify(repositoryClient, never()).postReviewReturningId(any(), any(), any(), any(), any());
+        assertThat(review(true)).isEqualTo(AgentReviewService.ReviewResult.POSTED);
+        verify(repositoryClient).postReviewReturningId(any(), any(), any(),
+                argThat(body -> !body.contains("Broken.")), eq(PostReviewAction.NONE));
         verify(repositoryClient, never()).getFileContent(any(), any(), any(), eq("feature"));
-        verify(repositoryClient).postPullRequestComment(any(), any(), any(), argThat(body -> body.contains("Could not read")));
-        verify(state, never()).upsertRevision(any(), any());
+        verify(state).upsertRevision(argThat(ReviewRevisionRecord::isDegraded), eq(LEASE));
         verify(leases).release(LEASE);
     }
 
@@ -474,6 +474,16 @@ class AgentReviewCompletionTest {
                 .thenReturn(ChatTurn.text("{\"summary\":\"Done\",\"findings\":[]}"));
         assertThat(review(false)).isEqualTo(AgentReviewService.ReviewResult.POSTED);
         verify(state).upsertRevision(argThat(ReviewRevisionRecord::isDegraded), eq(LEASE));
+    }
+
+    @Test
+    void leaseReleaseFailureDoesNotReplaceSuccessfulReview() {
+        when(aiClient.chatWithTools(anyList(), any(), anyList(), anyString(), isNull(), anyInt()))
+                .thenReturn(ChatTurn.text(envelope("fabricatedCall();", "BLOCKER")));
+        doThrow(new IllegalStateException("database unavailable")).when(leases).release(LEASE);
+        assertThat(review(true)).isEqualTo(AgentReviewService.ReviewResult.POSTED);
+        verify(state).upsertRevision(any(), eq(LEASE));
+        verify(leases).release(LEASE);
     }
 
     private AgentReviewService.ReviewResult review(boolean formal) {

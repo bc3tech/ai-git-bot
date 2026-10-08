@@ -7,15 +7,19 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.TestPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Instant;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.doThrow;
 
 @SpringBootTest
 @ActiveProfiles("test")
@@ -29,7 +33,8 @@ class ReviewStateServiceTest {
     @Autowired private ReviewStateService stateService;
     @Autowired private ReviewRunLeaseService leaseService;
     @Autowired private ReviewFindingRepository findingRepository;
-    @Autowired private ReviewRevisionRepository revisionRepository;
+    @MockitoSpyBean private ReviewRevisionRepository revisionRepository;
+    @Autowired private TransactionTemplate transactions;
     @Autowired private ReviewRunLeaseRepository leaseRepository;
 
     @BeforeEach
@@ -167,6 +172,78 @@ class ReviewStateServiceTest {
         finding.setBody("Possible issue");
         finding.setHeadSha("head-1");
         return finding;
+    }
+
+    @Test
+    void closedStateDeletesFindingsAndRevisionsTogether() {
+        seedClosedState();
+        assertThat(stateService.deleteClosedPullRequestState(1L, "owner", "repo", 7L,
+                Instant.parse("2026-10-08T00:00:00Z"))).isEqualTo(2);
+        assertThat(findingRepository.count()).isZero();
+        assertThat(revisionRepository.count()).isZero();
+    }
+
+    @Test
+    void revisionDeleteFailureRollsBackFindingDelete() {
+        seedClosedState();
+        doThrow(new IllegalStateException("database unavailable")).when(revisionRepository)
+                .deleteForPullRequest(1L, "owner", "repo", 7L);
+        assertThatThrownBy(() -> stateService.deleteClosedPullRequestState(1L, "owner", "repo", 7L,
+                Instant.parse("2026-10-08T00:00:00Z"))).hasMessage("database unavailable");
+        assertThat(findingRepository.count()).isEqualTo(1);
+        assertThat(revisionRepository.count()).isEqualTo(1);
+    }
+
+    @Test
+    void concurrentReopenWinsOverStaleCollectionCandidate() throws Exception {
+        seedClosedState();
+        CountDownLatch reopened = new CountDownLatch(1);
+        CountDownLatch commitReopen = new CountDownLatch(1);
+        CompletableFuture<Void> reopening = CompletableFuture.runAsync(() -> transactions.executeWithoutResult(status -> {
+            stateService.markPrReopened(1L, "owner", "repo", 7L);
+            reopened.countDown();
+            try {
+                if (!commitReopen.await(5, TimeUnit.SECONDS)) throw new IllegalStateException("reopen timeout");
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(e);
+            }
+        }));
+        try {
+            assertThat(reopened.await(5, TimeUnit.SECONDS)).isTrue();
+            CompletableFuture<Integer> deleting = CompletableFuture.supplyAsync(() ->
+                    stateService.deleteClosedPullRequestState(1L, "owner", "repo", 7L,
+                            Instant.parse("2026-10-08T00:00:00Z")));
+            commitReopen.countDown();
+            reopening.get(5, TimeUnit.SECONDS);
+            assertThat(deleting.get(5, TimeUnit.SECONDS)).isZero();
+            assertThat(findingRepository.count()).isEqualTo(1);
+            assertThat(revisionRepository.findAll().getFirst().getPrClosedAt()).isNull();
+        } finally {
+            commitReopen.countDown();
+            reopening.get(5, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    void refreshedCloseWindowRetainsState() {
+        seedClosedState();
+        stateService.markPrClosed(1L, "owner", "repo", 7L, Instant.parse("2026-10-09T00:00:00Z"));
+        assertThat(stateService.deleteClosedPullRequestState(1L, "owner", "repo", 7L,
+                Instant.parse("2026-10-08T00:00:00Z"))).isZero();
+        assertThat(findingRepository.count()).isEqualTo(1);
+        assertThat(revisionRepository.count()).isEqualTo(1);
+    }
+
+    private void seedClosedState() {
+        LeaseToken lease = leaseService.acquire(1L, "owner", "repo", 7L);
+        try {
+            stateService.recordPending(finding("review"), lease);
+            stateService.upsertRevision(revision("review", "head", "base", false), lease);
+            stateService.markPrClosed(1L, "owner", "repo", 7L, Instant.parse("2026-10-01T00:00:00Z"));
+        } finally {
+            leaseService.release(lease);
+        }
     }
 
     private ReviewRevisionRecord revision(String workflowKey, String head, String base, boolean degraded) {

@@ -75,6 +75,14 @@ class StandardGroundedReviewTest {
     }
 
     @Test
+    void leaseReleaseFailureDoesNotReplaceSuccessfulReview() {
+        doThrow(new IllegalStateException("database unavailable")).when(leases).release(lease);
+        assertThat(run(PostReviewAction.APPROVE).reviewed()).isTrue();
+        verify(state).upsertRevision(any(), eq(lease));
+        verify(leases).release(lease);
+    }
+
+    @Test
     void reconcilesAfterLeaseAndInjectsHistoryThenWritesRevisionAndActionBeforeRelease() {
         ReviewFindingRecord prior = new ReviewFindingRecord(); prior.setId(UUID.randomUUID());
         prior.setStatus(ReviewFindingStatus.GONE); prior.setBody("old claim"); prior.setHeadSha("old head");
@@ -124,12 +132,13 @@ class StandardGroundedReviewTest {
     }
 
     @Test
-    void unreadableSupportingCitationStopsWithoutPublication() {
+    void unreadableSupportingCitationDropsFindingAndDegradesReview() {
         when(ai.submitReviewPrompt(anyString(), isNull(), anyString())).thenReturn("""
                 {"summary":"Review","findings":[{"body":"citation issue","citations":[{"path":"Missing.java","quote":"verifyAccess();"}]}]}
                 """);
-        assertThatThrownBy(() -> run(null)).isInstanceOf(PinnedSourceReader.RevisionUnavailableException.class);
-        verify(api, never()).postReviewReturningId(any(), any(), any(), any(), any());
+        assertThat(run(null).reviewed()).isTrue();
+        verify(api).postReviewReturningId(any(), any(), any(), argThat(body -> !body.contains("citation issue")), any());
+        verify(state).upsertRevision(argThat(ReviewRevisionRecord::isDegraded), eq(lease));
         verify(leases).release(lease);
     }
 

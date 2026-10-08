@@ -121,6 +121,11 @@ public final class ReviewPublicationService {
         log.info("Inline review publication for PR #{} in {}/{}: {} ({} comment(s) requested)",
                 pr, owner, repo, result.status(), anchors.size());
 
+        if (result.status() == Status.STALE_SNAPSHOT) {
+            log.warn("Skipping stale review publication for PR #{} in {}/{} at head {}", pr, owner, repo, snapshot.headSha());
+            return new Outcome(result.status(), anchors.size(), 0, Delivery.FAILED,
+                    actionRequested ? Delivery.FAILED : null, false, result.detail());
+        }
         String fullBody = frame.apply(render(document.summary(), document.findings(), false));
         if (result.status() == Status.PENDING_CONFLICT) {
             fence.requireActive("before posting pending-review fallback");
@@ -230,6 +235,18 @@ public final class ReviewPublicationService {
             fenced.requireActive("before publishing grounded inline review");
             ReviewPublicationResult result = client.publishInlineReview(lease.owner(), lease.repo(), lease.prNumber(), snapshot,
                     frame.apply(render(safeSummary, summaryOnly, true)), anchors, requested);
+            if (result.status() == Status.STALE_SNAPSHOT) {
+                log.warn("Skipping stale grounded review publication for PR #{} in {}/{} at head {}",
+                        lease.prNumber(), lease.owner(), lease.repo(), snapshot.headSha());
+                audit.recordGroundingWarning(event, "PUBLICATION", "stale snapshot; findings not published",
+                        snapshot.headSha(), effectiveBaseSha(snapshot));
+                for (ReviewFindingRecord record : pending.values()) {
+                    fenced.requireActive("before discarding stale pending finding");
+                    state.discardPending(record.getId(), lease);
+                }
+                return new Outcome(result.status(), anchors.size(), 0, Delivery.FAILED,
+                        requested == PostReviewAction.NONE ? null : Delivery.FAILED, false, result.detail());
+            }
             List<ReviewDocument.Finding> resend = new ArrayList<>();
             int confirmed = 0;
             CommentScan<ReviewComment> scan = null;

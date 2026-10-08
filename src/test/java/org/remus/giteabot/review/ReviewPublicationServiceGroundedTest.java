@@ -133,6 +133,35 @@ class ReviewPublicationServiceGroundedTest {
     }
 
     @Test
+    void staleSnapshotDiscardsPendingFindingsWithoutPostingOrConfirming() {
+        when(api.publishInlineReview(any(), any(), any(), any(), any(), anyList(), any())).thenAnswer(inv ->
+                ReviewPublicationResult.notWritten(Status.STALE_SNAPSHOT, inv.getArgument(5), "head moved"));
+        ReviewPublicationService.Outcome result = publish(grounded(), SNAPSHOT);
+        assertThat(result.delivered()).isFalse();
+        assertThat(result.fallbackUsed()).isFalse();
+        assertThat(result.remoteIds()).isEmpty();
+        verify(state).discardPending(UUID.fromString(id), lease);
+        verify(state, never()).markPublished(any(), any(), any(), any());
+        verify(state, never()).markSuperseded(any(), any());
+        verify(api, never()).postReviewReturningId(any(), any(), any(), any(), any());
+        verify(api, never()).postReviewCommentReturningId(any(), any(), any(), any());
+        verify(api, never()).postPullRequestCommentReturningId(any(), any(), any(), any());
+        verify(audit).recordGroundingWarning(event, "PUBLICATION", "stale snapshot; findings not published",
+                SNAPSHOT.headSha(), SNAPSHOT.baseSha());
+    }
+
+    @Test
+    void rejectedOnSameHeadStillFallsBackAndConfirms() {
+        when(api.publishInlineReview(any(), any(), any(), any(), any(), anyList(), any())).thenAnswer(inv ->
+                ReviewPublicationResult.notWritten(Status.REJECTED, inv.getArgument(5), "invalid position"));
+        when(api.postReviewReturningId(any(), any(), any(), anyString(), any())).thenReturn(Optional.of("20"));
+        ReviewPublicationService.Outcome result = publish(grounded(), SNAPSHOT);
+        assertThat(result.delivered()).isTrue();
+        assertThat(result.fallbackUsed()).isTrue();
+        verify(state).markPublished(UUID.fromString(id), "20", null, lease);
+    }
+
+    @Test
     void pendingReviewConflictUsesTrackedLinkedFallback() {
         when(api.publishInlineReview(any(), any(), any(), any(), any(), anyList(), any())).thenAnswer(inv ->
                 ReviewPublicationResult.notWritten(Status.PENDING_CONFLICT, inv.getArgument(5), "pending"));

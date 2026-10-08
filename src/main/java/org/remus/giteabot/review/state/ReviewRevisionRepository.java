@@ -1,6 +1,8 @@
 package org.remus.giteabot.review.state;
 
+import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -21,6 +23,12 @@ public interface ReviewRevisionRepository extends JpaRepository<ReviewRevisionRe
             Long botId, String repoOwner, String repoName, Long prNumber);
 
     List<ReviewRevisionRecord> findByPrClosedAtBefore(Instant cutoff);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT r FROM ReviewRevisionRecord r WHERE r.botId = :botId AND r.repoOwner = :owner "
+            + "AND r.repoName = :repo AND r.prNumber = :pr")
+    List<ReviewRevisionRecord> lockForPullRequest(@Param("botId") Long botId, @Param("owner") String owner,
+                                                 @Param("repo") String repo, @Param("pr") Long prNumber);
 
     @Modifying
     @Transactional

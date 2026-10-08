@@ -19,11 +19,13 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 
 import static org.remus.giteabot.review.grounding.DoubleCheckService.*;
@@ -70,9 +72,19 @@ public class FindingGroundingService {
         if (!source.pinned()) notes.add("Findings could not be anchored to a pinned revision; diff-only evidence was checked.");
         DiffTextSource diff = new DiffTextSource(source.diff());
         List<Candidate> candidates = new ArrayList<>();
+        Set<UUID> unavailablePriors = new HashSet<>();
         for (ReviewDocument.Finding input : document.findings()) {
             ReviewDocument.Finding finding = copy(input, UUID.randomUUID().toString(), input.path(), false);
-            Verification verified = verify(finding, source, diff, false);
+            Verification verified;
+            try {
+                verified = verify(finding, source, diff, false);
+            } catch (PinnedSourceReader.RevisionUnavailableException e) {
+                disposition(dispositions, finding, AuditEventType.FINDING_DROPPED, "QUOTE", "Pinned source unavailable");
+                notes.add("Some finding evidence could not be read at the pinned revision.");
+                degraded = true;
+                audit.recordGroundingWarning(event, "QUOTE", e.getMessage(), source.headSha(), source.effectiveBaseSha());
+                continue;
+            }
             if (!verified.match().matched()) {
                 disposition(dispositions, finding, AuditEventType.FINDING_DROPPED, "QUOTE",
                         verified.match().failureReason().name());
@@ -99,7 +111,17 @@ public class FindingGroundingService {
                                 !Objects.equals(record.getContextHash(), verified.evidence().contextHash()),
                                 prior.hasNewDisputeText() ? prior.disputeText() : ""));
                     }
+                } catch (PinnedSourceReader.RevisionUnavailableException e) {
+                    if (e.fileNotFound()) {
+                        actions.add(new ThreadAction.Withdraw(prior, "quote gone: file not found at pinned revision"));
+                    } else {
+                        unavailablePriors.add(record.getId());
+                        notes.add("Prior finding evidence unavailable; prior left unchanged.");
+                        degraded = true;
+                        audit.recordGroundingWarning(event, "QUOTE", e.getMessage(), source.headSha(), source.effectiveBaseSha());
+                    }
                 } catch (IllegalArgumentException e) {
+                    unavailablePriors.add(record.getId());
                     notes.add("Prior finding evidence unavailable; prior left unchanged.");
                     degraded = true;
                 }
@@ -161,6 +183,7 @@ public class FindingGroundingService {
                 Map<String, DoubleCheckOutcome> checked = outcomes;
                 List<UUID> replaced = digest.findings().stream().map(PriorFindingsDigest.PriorFinding::finding)
                         .filter(prior -> prior.getStatus() == ReviewFindingStatus.PUBLISHED
+                                && !unavailablePriors.contains(prior.getId())
                                 && Objects.equals(renames.getOrDefault(prior.getPath(), prior.getPath()), current.path())
                                 && Objects.equals(prior.getSide(), current.side() == null ? null : current.side().name())
                                 && Objects.equals(prior.getCategory(), current.category())

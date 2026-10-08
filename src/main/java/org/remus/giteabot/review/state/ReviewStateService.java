@@ -166,6 +166,18 @@ public class ReviewStateService {
         return revisionRepository.clearPrClosed(botId, owner, repo, prNumber);
     }
 
+    /** Re-check retention under row locks so a reopen cannot interleave the two deletes. */
+    @Transactional
+    public int deleteClosedPullRequestState(Long botId, String owner, String repo, Long prNumber, Instant cutoff) {
+        List<ReviewRevisionRecord> revisions = revisionRepository.lockForPullRequest(botId, owner, repo, prNumber);
+        if (revisions.isEmpty() || revisions.stream().anyMatch(revision -> revision.getPrClosedAt() == null
+                || !revision.getPrClosedAt().isBefore(cutoff))) {
+            return 0;
+        }
+        int deleted = findingRepository.deleteForPullRequest(botId, owner, repo, prNumber);
+        return deleted + revisionRepository.deleteForPullRequest(botId, owner, repo, prNumber);
+    }
+
     private List<ReviewFindingRecord> findingsWithStatuses(Long botId, String owner, String repo,
                                                             Long prNumber, String workflowKey,
                                                             List<ReviewFindingStatus> statuses) {

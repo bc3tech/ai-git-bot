@@ -22,19 +22,19 @@ import java.util.function.Supplier;
 public class ReviewStateGarbageCollector {
 
     private final ReviewRevisionRepository revisionRepository;
-    private final ReviewFindingRepository findingRepository;
+    private final ReviewStateService stateService;
     private final BotRepository botRepository;
     private final GiteaClientFactory clientFactory;
     private final Duration retention;
     private Supplier<Instant> nowSupplier = Instant::now;
 
     public ReviewStateGarbageCollector(ReviewRevisionRepository revisionRepository,
-                                       ReviewFindingRepository findingRepository,
+                                       ReviewStateService stateService,
                                        BotRepository botRepository,
                                        GiteaClientFactory clientFactory,
                                        @Value("${review-state.retention-after-close:P30D}") Duration retention) {
         this.revisionRepository = revisionRepository;
-        this.findingRepository = findingRepository;
+        this.stateService = stateService;
         this.botRepository = botRepository;
         this.clientFactory = clientFactory;
         this.retention = retention;
@@ -78,8 +78,7 @@ public class ReviewStateGarbageCollector {
             if (state == PullRequestState.OPEN) {
                 revisionRepository.clearPrClosed(key.botId(), key.owner(), key.repo(), key.prNumber());
             } else if (state == PullRequestState.CLOSED) {
-                deleted += findingRepository.deleteForPullRequest(key.botId(), key.owner(), key.repo(), key.prNumber());
-                deleted += revisionRepository.deleteForPullRequest(key.botId(), key.owner(), key.repo(), key.prNumber());
+                deleted += stateService.deleteClosedPullRequestState(key.botId(), key.owner(), key.repo(), key.prNumber(), cutoff);
             }
         }
         return deleted;
