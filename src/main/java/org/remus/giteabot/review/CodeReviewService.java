@@ -179,7 +179,8 @@ public class CodeReviewService {
             throw e;
         } catch (Exception e) {
             log.error("Code review failed for PR #{} in {}/{}: {}", prNumber, owner, repo, e.getMessage(), e);
-            return ReviewRun.SKIPPED;
+            // Propagate so the workflow run is recorded as FAILED and the trigger can be told.
+            throw e instanceof RuntimeException re ? re : new IllegalStateException("Code review failed", e);
         }
     }
 

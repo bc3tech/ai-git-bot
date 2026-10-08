@@ -137,7 +137,7 @@ public final class ReviewPublicationService {
         Delivery summaryDelivery = result.review();
         fence.requireActive("before posting delivery-failure summary");
         try {
-            client.postPullRequestComment(owner, repo, pr, frame.apply(supplemental));
+            client.postReviewComment(owner, repo, pr, frame.apply(supplemental));
             summaryDelivery = Delivery.CONFIRMED;
         } catch (RuntimeException e) {
             log.error("Could not post the delivery-failure summary for PR #{} in {}/{}: {}",

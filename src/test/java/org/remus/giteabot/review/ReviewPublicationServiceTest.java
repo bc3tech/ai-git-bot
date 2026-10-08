@@ -148,7 +148,7 @@ class ReviewPublicationServiceTest {
                 PostReviewAction.NONE, ReviewFence.NONE);
 
         ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
-        verify(client).postPullRequestComment(eq("o"), eq("r"), eq(1L), body.capture());
+        verify(client).postReviewComment(eq("o"), eq("r"), eq(1L), body.capture());
         assertThat(body.getValue())
                 .contains("could not be confirmed", "Why remove this?")
                 .doesNotContain("Use a constant.", "Unrelated line.");
@@ -164,8 +164,9 @@ class ReviewPublicationServiceTest {
         publish(doc("Summary text", onAdded, reviewWide), PostReviewAction.NONE, ReviewFence.NONE);
 
         ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
-        verify(client).postPullRequestComment(any(), any(), any(), body.capture());
+        verify(client).postReviewComment(any(), any(), any(), body.capture());
         assertThat(body.getValue()).contains("Summary text", "Use a constant.", "Add tests.", "may not have been");
+        verify(client, never()).postPullRequestComment(any(), any(), any(), any());
     }
 
     @Test
@@ -182,6 +183,7 @@ class ReviewPublicationServiceTest {
         assertThatThrownBy(() -> publish(doc("S", onAdded), PostReviewAction.NONE, fence))
                 .hasMessage("superseded");
         verify(client, never()).postPullRequestComment(any(), any(), any(), any());
+        verify(client, never()).postReviewComment(any(), any(), any(), any());
         verify(client, never()).postReview(any(), any(), any(), any(), any());
     }
 

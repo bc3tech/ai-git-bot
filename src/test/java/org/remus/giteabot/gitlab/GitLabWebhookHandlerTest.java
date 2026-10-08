@@ -145,17 +145,13 @@ class GitLabWebhookHandlerTest {
     }
 
     @Test
-    void ownerReviewAgainNote_triggersFallbackReview() {
-        lenient().when(botWebhookService.isReviewAgainRequest(any(WebhookPayload.class), eq("@ai_bot"))).thenReturn(true);
-        lenient().when(botWebhookService.isReviewAgainRequestFromPullRequestAuthor(any(WebhookPayload.class), eq("@ai_bot")))
-                .thenReturn(true);
-
+    void reviewAgainNote_routesToBotCommandWhichRunsTheReview() {
         ResponseEntity<String> response = handler.handleWebhook(bot, "Note Hook",
                 notePayload("@ai_bot please review this again"));
 
-        assertEquals("review triggered", response.getBody());
-        verify(botWebhookService).reviewPullRequest(eq(bot), any(WebhookPayload.class));
-        verify(botWebhookService, never()).handleBotCommand(any(), any());
+        assertEquals("command received", response.getBody());
+        verify(botWebhookService).handleBotCommand(eq(bot), any(WebhookPayload.class));
+        verify(botWebhookService, never()).reviewPullRequest(any(), any());
     }
 
     @Test
@@ -179,19 +175,6 @@ class GitLabWebhookHandlerTest {
         assertEquals("root", translated.getComment().getUser().getLogin());
         assertEquals("root", translated.getPullRequest().getUser().getLogin());
         assertEquals("root", translated.getIssue().getUser().getLogin());
-    }
-
-    @Test
-    void nonOwnerReviewAgainNote_isIgnored() {
-        lenient().when(botWebhookService.isReviewAgainRequest(any(WebhookPayload.class), eq("@ai_bot"))).thenReturn(true);
-        lenient().when(botWebhookService.isReviewAgainRequestFromPullRequestAuthor(any(WebhookPayload.class), eq("@ai_bot")))
-                .thenReturn(false);
-
-        ResponseEntity<String> response = handler.handleWebhook(bot, "Note Hook",
-                notePayload("@ai_bot please review this again"));
-
-        assertEquals("ignored", response.getBody());
-        verify(botWebhookService, never()).reviewPullRequest(any(), any());
     }
 
     @Test

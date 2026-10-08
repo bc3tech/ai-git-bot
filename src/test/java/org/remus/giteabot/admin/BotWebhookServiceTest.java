@@ -287,7 +287,24 @@ class BotWebhookServiceTest {
         payload.setComment(comment);
 
         assertTrue(botWebhookService.isReviewAgainRequest(payload, "@ai_bot"));
-        assertTrue(botWebhookService.isReviewAgainRequestFromPullRequestAuthor(payload, "@ai_bot"));
+    }
+
+    @Test
+    void isReviewAgainRequest_matchesReviewSlashCommandOnly() {
+        assertTrue(botWebhookService.isReviewAgainRequest(commentWith("@ai_bot /review"), "@ai_bot"));
+        assertTrue(botWebhookService.isReviewAgainRequest(commentWith("@ai_bot /REVIEW please"), "@ai_bot"));
+        assertFalse(botWebhookService.isReviewAgainRequest(commentWith("@ai_bot /review-docs"), "@ai_bot"));
+        assertFalse(botWebhookService.isReviewAgainRequest(commentWith("@ai_bot what does this review cover?"),
+                "@ai_bot"));
+        assertFalse(botWebhookService.isReviewAgainRequest(commentWith("/review"), "@ai_bot"));
+    }
+
+    private static WebhookPayload commentWith(String body) {
+        WebhookPayload payload = new WebhookPayload();
+        WebhookPayload.Comment comment = new WebhookPayload.Comment();
+        comment.setBody(body);
+        payload.setComment(comment);
+        return payload;
     }
 
     // ---- handlePrComment routing tests ----
@@ -1243,6 +1260,67 @@ class BotWebhookServiceTest {
             verify(sessionService).getOrCreateSession(OWNER, REPO, PR_NUMBER, "system-prompt:1");
             verify(repositoryApiClient, never()).postIssueComment(any(), any(), any(),
                     org.mockito.ArgumentMatchers.contains("did not understand"));
+        }
+
+        @Test
+        void reviewCommand_runsTheSamePrReviewAsPrEvents() {
+            WebhookPayload payload = buildPrCommentPayload(OWNER, REPO, PR_NUMBER, COMMENT_ID,
+                    "@claude_bot /review");
+            payload.getPullRequest().setHead(null); // comment payloads carry no branch info
+            when(repositoryApiClient.getPullRequestDetails(OWNER, REPO, PR_NUMBER)).thenReturn(Map.of(
+                    "title", "Real title",
+                    "head", Map.of("ref", "feature", "sha", "abc"),
+                    "base", Map.of("ref", "main", "sha", "def")));
+            Bot bot = createBot("bot", "claude_bot");
+
+            botWebhookService.handlePrComment(bot, payload);
+
+            verify(prWorkflowOrchestrator).runAll(bot, payload);
+            verify(prWorkflowOrchestrator, never()).run(any(), any(), any(), anyMap());
+            verify(repositoryApiClient).addReaction(OWNER, REPO, COMMENT_ID, Reactions.EYES);
+            assertEquals("feature", payload.getPullRequest().getHead().getRef());
+            assertEquals("main", payload.getPullRequest().getBase().getRef());
+            assertEquals("Real title", payload.getPullRequest().getTitle());
+            verify(agentSessionService, never()).getSessionByIssue(any(), any(), any());
+        }
+
+        @Test
+        void reviewCommand_onBotCommandPath_runsTheReview() {
+            WebhookPayload payload = buildPrCommentPayload(OWNER, REPO, PR_NUMBER, COMMENT_ID,
+                    "@claude_bot please re-review");
+            Bot bot = createBot("bot", "claude_bot");
+
+            botWebhookService.handleBotCommand(bot, payload);
+
+            verify(prWorkflowOrchestrator).runAll(bot, payload);
+            verify(agentReviewSlashCommandHandler, never()).tryHandle(any(), any());
+        }
+
+        @Test
+        void reviewCommand_failedReview_withdrawsAcknowledgementAndPostsNotice() {
+            WebhookPayload payload = buildPrCommentPayload(OWNER, REPO, PR_NUMBER, COMMENT_ID,
+                    "@claude_bot /review");
+            org.remus.giteabot.prworkflow.PrWorkflowRun failed = new org.remus.giteabot.prworkflow.PrWorkflowRun();
+            failed.setWorkflowKey(ReviewWorkflow.KEY);
+            failed.setStatus(org.remus.giteabot.prworkflow.PrWorkflowRunStatus.FAILED);
+            Bot bot = createBot("bot", "claude_bot");
+            when(prWorkflowOrchestrator.runAll(bot, payload)).thenReturn(java.util.List.of(failed));
+
+            botWebhookService.handlePrComment(bot, payload);
+
+            verify(repositoryApiClient).removeReaction(OWNER, REPO, COMMENT_ID, Reactions.EYES);
+            verify(repositoryApiClient).postPullRequestComment(OWNER, REPO, PR_NUMBER,
+                    BotWebhookService.REVIEW_FAILED_NOTICE);
+        }
+
+        @Test
+        void conversationalMention_staysConversational() {
+            when(agentSessionService.getSessionByIssue(OWNER, REPO, PR_NUMBER)).thenReturn(Optional.empty());
+            when(agentSessionService.getSessionByPr(OWNER, REPO, PR_NUMBER)).thenReturn(Optional.empty());
+
+            botWebhookService.handlePrComment(createBot("bot", "claude_bot"), prCommentPayload);
+
+            verify(prWorkflowOrchestrator, never()).runAll(any(), any());
         }
     }
 
