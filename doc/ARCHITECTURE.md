@@ -163,6 +163,22 @@ Access control is checked before expensive work. Bots can allow everyone or
 restrict interactions to configured users, with PR-author handling for PR
 comment flows.
 
+## Prior-findings history
+
+`PriorFindingsService` builds review history from stored published findings and
+live provider comments, without reading conversation transcripts. It reconciles
+pending markers and deleted comments only when both provider scans are complete;
+incomplete scans leave stored state unchanged. Reconciliation is independent of
+source revision pinning, so unpinned runs can also recover pending publications.
+
+Non-bot replies associate first by thread, then by finding marker or remote
+comment link, then by a quoted line unique to one active finding. The digest
+labels prior code as history rather than current evidence, treats replies as
+claims to verify, and retains the first and latest replies when trimming prompt
+history. Timestamp ties and missing timestamps are conservatively new; the
+latest answered comment ID prevents repeating replies to the same dispute.
+This service is a grounding foundation; review workflows wire it in separately.
+
 ## Persistence and secrets
 
 The database stores durable configuration and run state rather than transient
