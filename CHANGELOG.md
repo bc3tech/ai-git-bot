@@ -8,6 +8,8 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ### Added
 
+- Agentic reviews now hold a heartbeat-renewed per-PR lease, explore a verified detached head-SHA workspace, include labeled prior findings, and ground evidence before publication. Formal decisions and finding hooks count only surviving findings; degraded reviews cannot approve. Explicit unchanged-revision skips run under the same lease; lease-wait timeouts post a failure and clear acknowledgements. Legacy file requests are pinned, and missing head revisions limit exploration to diff evidence.
+
 - Added a lease-protected unchanged-revision guard to standard and agentic reviews, using the head SHA, effective diff base, successful non-degraded revision state, and complete comment scans. Only explicit review requests may skip; automatic triggers always review. Skips post a short revision reply and clear the bot's eyes reactions. GitHub snapshots now obtain the merge-base through the compare API. Revision-state persistence is supplied by the grounded review-path integration.
 
 - Added the shared finding-grounding and thread-action services: deterministic evidence checks, AI keep/drop/hold reconciliation, unchanged-finding suppression, dispute replies and withdrawals, and lease-fenced write-ahead publication with recoverable finding markers. Standard and agentic workflow integration follows separately.

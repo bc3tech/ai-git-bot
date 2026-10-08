@@ -30,9 +30,16 @@ The bot is **read-only**: this workflow never commits, pushes, creates branches,
 or changes your code. Its only outputs are the review (summary and inline
 comments) and, when you enable it, the formal review decision.
 
-If a new update arrives while a review is running, the running review is
-cancelled and the newest one wins. When both this workflow and plain PR Review
-react to the same update, this workflow's review takes precedence.
+Review runs share a per-PR database lease with plain PR Review. A waiting run
+acquires the lease before reading the latest snapshot; heartbeat renewal keeps
+it held throughout exploration, grounding, publication, and revision-state
+persistence. Cancellation and lease loss prevent further writes. When both
+workflows react to the same update, agentic review takes precedence.
+
+The workspace uses a detached checkout of the snapshot's head SHA, and API file
+reads use that same SHA. A failed pinned checkout or read stops the review; the
+bot never substitutes a branch's newer content. If no head SHA is available,
+exploration is limited to the supplied diff, with summary-only publication.
 
 ## Settings
 
@@ -51,17 +58,18 @@ PR Review**.
 | `doubleCheckMinSeverity` | enum | `LOW` | Check new findings at or above `LOW`, `MEDIUM`, `HIGH`, or `BLOCKER`. |
 | `doubleCheckAiIntegrationId` | integer | `0` | Optional second AI integration ID; blank or `0` uses the review integration. |
 
-Double-check settings are exposed for the grounded-review pipeline; enforcement
-requires the grounding publication integration. Disputed or
+Each finding needs a verbatim code quote or review-wide citations. The bot
+verifies this evidence against the pinned revision before the AI double-check,
+then drops unsupported findings and suppresses unchanged duplicates. Disputed or
 context-changed prior findings are checked regardless of enablement or severity.
 An unknown integration ID falls back to the review integration with an audit warning.
 
 ### Formal review decision
 
-When `enableFormalReviewDecision` is on, the model classifies its findings as
-`BLOCKER`, `MEDIUM`, or `LOW` and emits a JSON object such as
-`{"blocker": 0, "medium": 1, "low": 2}`. The application then compares each
-count to the configured thresholds:
+When `enableFormalReviewDecision` is on, the model classifies each finding as
+`BLOCKER`, `MEDIUM`, or `LOW`. After grounding, the application counts only
+surviving findings and compares those counts to the configured thresholds.
+Trailing model-provided aggregate counts cannot drive the decision:
 
 - If **all configured thresholds** are satisfied, the bot submits `APPROVE`.
 - If **any configured threshold** is exceeded, the bot submits `REQUEST_CHANGES`.
@@ -72,8 +80,23 @@ count to the configured thresholds:
 
 The decision is submitted together with the inline review, so the approval or
 change request and its comments arrive as one review where the provider allows
-it. If the model fails to emit a clean classification, the bot still posts the
-review (without a decision) so the findings are never lost.
+it. A degraded review never approves: held findings, unavailable double-checks,
+unpinned evidence, or unparseable output leave the decision at `NONE` unless
+surviving findings independently require changes. Unparseable output produces
+only a short failure summary, never the model's unverified review text.
+
+Previous findings and human replies are supplied as labeled history, not current
+code. Grounded re-reviews may reply to disputes or withdraw obsolete findings,
+using linked PR comments where native thread operations are unavailable. Failed
+thread actions leave the revision degraded for retry. An explicit request skips
+only a pinned, unchanged, non-degraded revision with no new non-bot comments.
+The bot replies with the reviewed SHA and clears its eyes acknowledgement.
+
+`review-state.lease-ttl` defaults to `10m`; `review-state.lease-wait-max` defaults
+to `30m`. Waiting occurs in the async workflow worker. A timeout posts a failure
+comment and clears the acknowledgement. The double-check shares the application's
+`review.chunking.max-diff-chars-per-chunk` and `review.chunking.max-diff-chunks`
+budgets.
 
 ## The review prompt
 

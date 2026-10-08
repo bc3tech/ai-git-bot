@@ -135,6 +135,49 @@ class WorkspaceServiceTest {
     }
 
     @Test
+    void pinnedWorkspaceChecksOutOriginalShaAfterBranchMoves() throws Exception {
+        Path remote = createBareRepository("pinned", "original content");
+        String pinned = runGitCapture(remote, "rev-parse", "refs/heads/main");
+        Path source = tempDir.resolve("pinned-source");
+        Files.writeString(source.resolve("README.md"), "newer content");
+        runGit(source, "commit", "-am", "branch moved");
+        runGit(source, "push", "origin", "main");
+        workspaceService = new WorkspaceService(tempDir.resolve("workspaces").toString());
+        WorkspaceResult result = workspaceService.prepareWorkspaceAtRevision(
+                repositoryClient(remote.toString()), "any", "any", pinned, 42L);
+        assertThat(result.success()).isTrue();
+        try {
+            assertThat(runGitCapture(result.workspacePath(), "rev-parse", "HEAD")).isEqualTo(pinned);
+            assertThat(runGitCapture(result.workspacePath(), "rev-parse", "--abbrev-ref", "HEAD")).isEqualTo("HEAD");
+            assertThat(Files.readString(result.workspacePath().resolve("README.md"))).isEqualTo("original content");
+        } finally {
+            workspaceService.cleanupWorkspace(result.workspacePath());
+        }
+    }
+
+    @Test
+    void missingPinnedRevisionDoesNotFallBackToPrHead() throws Exception {
+        Path remote = createBareRepository("missing-pinned", "current content");
+        runGit(remote, "update-ref", "refs/pull/42/head", "refs/heads/main");
+        Path workspaces = tempDir.resolve("workspaces");
+        workspaceService = new WorkspaceService(workspaces.toString());
+        WorkspaceResult result = workspaceService.prepareWorkspaceAtRevision(
+                repositoryClient(remote.toString()), "any", "any", "a".repeat(40), 42L);
+        assertThat(result.success()).isFalse();
+        assertThat(result.error()).contains("pinned commit");
+        try (var children = Files.list(workspaces)) {
+            assertThat(children.count()).isZero();
+        }
+    }
+
+    @Test
+    void pinnedWorkspaceRejectsBranchReferencesBeforeAllocating() {
+        assertThat(workspaceService.prepareWorkspaceAtRevision(repositoryClient, "any", "any", "main", 42L).success())
+                .isFalse();
+        verify(repositoryClient, never()).getCredentials();
+    }
+
+    @Test
     void prepareWritablePullRequestWorkspace_pushesForkMainWithoutChangingTargetMain() throws Exception {
         Path targetRemote = createBareRepository("target", "target content");
         Path forkRemote = createBareRepository("fork", "fork content");

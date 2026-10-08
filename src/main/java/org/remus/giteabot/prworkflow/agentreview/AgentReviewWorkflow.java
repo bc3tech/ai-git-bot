@@ -10,7 +10,6 @@ import org.remus.giteabot.prworkflow.WorkflowParamField;
 import org.remus.giteabot.prworkflow.WorkflowParamsSchema;
 import org.remus.giteabot.prworkflow.WorkflowResult;
 import org.remus.giteabot.prworkflow.config.WorkflowSelectionService;
-import org.remus.giteabot.review.ReviewSkipService;
 import org.remus.giteabot.review.grounding.DoubleCheckSettings;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
@@ -46,13 +45,11 @@ public class AgentReviewWorkflow implements PrWorkflow {
             APPROVE, REQUEST_CHANGES, or NONE yourself; only provide the classification
             counts below.""";
 
-    private final ReviewSkipService skipService;
     private final AgentReviewServiceFactory serviceFactory;
     private final WorkflowSelectionService selectionService;
 
     public AgentReviewWorkflow(AgentReviewServiceFactory serviceFactory,
-                               @Lazy WorkflowSelectionService selectionService, ReviewSkipService skipService) {
-        this.skipService = skipService;
+                               @Lazy WorkflowSelectionService selectionService) {
         this.serviceFactory = serviceFactory;
         this.selectionService = selectionService;
     }
@@ -120,10 +117,6 @@ public class AgentReviewWorkflow implements PrWorkflow {
             return doClarification(context, clarification);
         }
 
-        if (skipService.trySkip(context, KEY)) {
-            return WorkflowResult.skipped("No changes since last review");
-        }
-
         Map<String, Object> params = resolveParams(bot);
         int maxToolRounds = intParam(params, AgentReviewParam.MAX_TOOL_ROUNDS, DEFAULT_MAX_TOOL_ROUNDS);
         boolean enableFormalDecision = boolParam(params, AgentReviewParam.ENABLE_FORMAL_REVIEW_DECISION, false);
@@ -136,12 +129,13 @@ public class AgentReviewWorkflow implements PrWorkflow {
 
         context.requireActive("before running agentic review");
 
-        AgentReviewService.ReviewResult reviewed = serviceFactory.create(bot)
+        AgentReviewService.ReviewResult reviewed = serviceFactory.create(bot, DoubleCheckSettings.fromParams(params))
                 .reviewPullRequest(payload, maxToolRounds, enableFormalDecision, decisionPrompt, thresholds,
-                        context.runId(), context.auditToolCallConsumer(), context::requireActive);
+                        context.runId(), context.auditToolCallConsumer(), context::requireActive, context.explicitRequest());
 
         WorkflowResult result = switch (reviewed) {
             case POSTED -> WorkflowResult.success("Agentic review posted");
+            case SKIPPED -> WorkflowResult.skipped("No changes since last review");
             case NO_DIFF -> WorkflowResult.skipped("No diff to review");
             case FAILED -> WorkflowResult.failed("Agentic review failed; no complete review was produced");
         };
@@ -161,6 +155,7 @@ public class AgentReviewWorkflow implements PrWorkflow {
 
         WorkflowResult result = switch (answered) {
             case POSTED -> WorkflowResult.success("Clarification posted");
+            case SKIPPED -> WorkflowResult.skipped("No changes since last review");
             case NO_DIFF -> WorkflowResult.skipped("No diff to answer clarification");
             case FAILED -> WorkflowResult.failed("No clarification produced");
         };

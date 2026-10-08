@@ -64,10 +64,10 @@ class ExplicitReviewSkipWorkflowTest {
             when(standard.runReview(any(), any(), any())).thenReturn(new CodeReviewService.ReviewRun(true, true));
             return new ReviewWorkflow(standardFactory, clients, selection, new ReviewChunkingProperties(), skip);
         }
-        when(agentFactory.create(any())).thenReturn(agent);
-        when(agent.reviewPullRequest(any(), anyInt(), anyBoolean(), anyString(), any(), any(), any(), any()))
+        when(agentFactory.create(any(), any())).thenReturn(agent);
+        when(agent.reviewPullRequest(any(), anyInt(), anyBoolean(), anyString(), any(), any(), any(), any(), anyBoolean()))
                 .thenReturn(AgentReviewService.ReviewResult.POSTED);
-        return new AgentReviewWorkflow(agentFactory, selection, skip);
+        return new AgentReviewWorkflow(agentFactory, selection);
     }
 
     @ParameterizedTest @ValueSource(strings = {"review", "agentic-review"})
@@ -85,7 +85,15 @@ class ExplicitReviewSkipWorkflowTest {
                 .thenReturn(new ReviewSnapshot("abcdef012345", "target", "base", "diff", true));
         when(api.listReviewThreadComments("owner", "repo", 7L)).thenReturn(new CommentScan<>(List.of(), true));
         when(api.listPullRequestComments("owner", "repo", 7L)).thenReturn(new CommentScan<>(List.of(), true));
-        assertThat(workflow(key).run(context).status()).isEqualTo(WorkflowResultStatus.SKIPPED);
+        PrWorkflow selected = workflow(key);
+        if (key.equals("agentic-review")) {
+            when(agent.reviewPullRequest(any(), anyInt(), anyBoolean(), anyString(), any(), any(), any(), any(), eq(true)))
+                    .thenReturn(AgentReviewService.ReviewResult.SKIPPED);
+            assertThat(selected.run(context).status()).isEqualTo(WorkflowResultStatus.SKIPPED);
+            verify(agent).reviewPullRequest(any(), anyInt(), anyBoolean(), anyString(), any(), any(), any(), any(), eq(true));
+            return;
+        }
+        assertThat(selected.run(context).status()).isEqualTo(WorkflowResultStatus.SKIPPED);
         verifyNoInteractions(standard, agent);
         verify(api).postPullRequestComment("owner", "repo", 7L, "No changes since last review at `abcdef0`.");
         verify(api).removeReaction("owner", "repo", 12L, "eyes");
@@ -98,6 +106,6 @@ class ExplicitReviewSkipWorkflowTest {
         verifyNoInteractions(state, leases);
         verify(api, never()).postPullRequestComment(any(), any(), any(), any());
         if (key.equals("review")) verify(standard).runReview(any(), any(), any());
-        else verify(agent).reviewPullRequest(any(), anyInt(), anyBoolean(), anyString(), any(), any(), any(), any());
+        else verify(agent).reviewPullRequest(any(), anyInt(), anyBoolean(), anyString(), any(), any(), any(), any(), anyBoolean());
     }
 }

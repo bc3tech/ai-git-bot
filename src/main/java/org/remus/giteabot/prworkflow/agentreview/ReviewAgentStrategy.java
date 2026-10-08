@@ -20,6 +20,7 @@ import org.remus.giteabot.ai.StopReason;
 import org.remus.giteabot.ai.ToolCall;
 import org.remus.giteabot.ai.ToolDescriptor;
 import org.remus.giteabot.mcp.McpToolCatalog;
+import org.remus.giteabot.review.ReviewFence;
 import tools.jackson.databind.JsonNode;
 
 import java.util.ArrayList;
@@ -60,6 +61,7 @@ public final class ReviewAgentStrategy implements AgentStrategy {
         String fetch(String owner, String repo, String ref, List<String> files);
     }
 
+    private final ReviewFence fence;
     private final String systemPrompt;
     private final AgentToolRouter toolRouter;
     private final ToolCatalog catalog;
@@ -83,6 +85,15 @@ public final class ReviewAgentStrategy implements AgentStrategy {
                                BranchSwitcher branchSwitcher,
                                FileFetcher fileFetcher,
                                int maxContextRounds) {
+        this(systemPrompt, toolRouter, catalog, mcpToolCatalog, allowedBuiltinTools, responseParser,
+                branchSwitcher, fileFetcher, maxContextRounds, ReviewFence.NONE);
+    }
+
+    public ReviewAgentStrategy(String systemPrompt, AgentToolRouter toolRouter, ToolCatalog catalog,
+                               McpToolCatalog mcpToolCatalog, Set<String> allowedBuiltinTools,
+                               AiResponseParser responseParser, BranchSwitcher branchSwitcher,
+                               FileFetcher fileFetcher, int maxContextRounds, ReviewFence fence) {
+        this.fence = fence;
         this.systemPrompt = systemPrompt;
         this.toolRouter = toolRouter;
         this.catalog = catalog;
@@ -112,6 +123,7 @@ public final class ReviewAgentStrategy implements AgentStrategy {
 
     @Override
     public StepDecision step(AgentRunContext ctx, ChatTurn turn, int round) {
+        fence.requireActive("before agentic review turn");
         StopReason expected = turn.hasToolCalls() ? StopReason.TOOL_USE : StopReason.END_TURN;
         if (turn.stopReason() != expected) {
             return incompleteTurn(ctx, turn.stopReason());
@@ -150,6 +162,7 @@ public final class ReviewAgentStrategy implements AgentStrategy {
 
     @Override
     public StepDecision step(AgentRunContext ctx, String aiResponse, int round) {
+        fence.requireActive("before legacy agentic review turn");
         ImplementationPlan plan = responseParser.parseAiResponse(aiResponse);
 
         // Collect legacy tool requests (requestTools/runTools) and explicit file requests.
@@ -179,7 +192,7 @@ public final class ReviewAgentStrategy implements AgentStrategy {
             return new StepDecision.Continue(
                     "Here is the requested repository context:\n" + context
                             + "\n\nContinue your review. When you have gathered enough context, reply with "
-                            + "the final review as plain Markdown (no JSON, no further tool requests).");
+                            + "the final review in the required JSON envelope (no further tool requests).");
         }
 
         if (wantsContext) {
@@ -213,7 +226,7 @@ public final class ReviewAgentStrategy implements AgentStrategy {
      * (plain-text) assistant response is the review.
      */
     private String finalReviewText(ImplementationPlan plan, String aiResponse) {
-        if (plan == null) {
+        if (plan == null || org.remus.giteabot.review.ReviewOutputParser.parse(aiResponse).document().structured()) {
             return aiResponse;
         }
         String nonJson = responseParser.extractNonJsonResponse(aiResponse);
@@ -265,6 +278,7 @@ public final class ReviewAgentStrategy implements AgentStrategy {
     private List<ToolResult> executeAll(AgentRunContext ctx, List<ImplementationPlan.ToolRequest> requests) {
         List<ToolResult> results = new ArrayList<>(requests.size());
         for (ImplementationPlan.ToolRequest req : requests) {
+            fence.requireActive("before agentic review tool " + req.getTool());
             results.add(toolRouter.execute(AgentToolRouter.Mode.REVIEW,
                     new ToolCallContext(ctx.owner(), ctx.repo(), ctx.issueNumber(),
                             ctx.workspaceDir(), req, ctx.diffSummary())));

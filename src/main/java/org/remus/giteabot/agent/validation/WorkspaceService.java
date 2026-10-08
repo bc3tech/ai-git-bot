@@ -87,6 +87,20 @@ public class WorkspaceService {
      */
     public WorkspaceResult prepareWorkspace(RepositoryApiClient repositoryClient,
                                             String owner, String repo, String branch, Long prNumber) {
+        return prepareWorkspace(repositoryClient, owner, repo, branch, prNumber, null);
+    }
+
+    /** Fetches an immutable PR revision, checks it out detached, and verifies HEAD before exposing files. */
+    public WorkspaceResult prepareWorkspaceAtRevision(RepositoryApiClient repositoryClient,
+                                                       String owner, String repo, String sha, Long prNumber) {
+        if (sha == null || !sha.matches("(?i)[0-9a-f]{40}|[0-9a-f]{64}")) {
+            return WorkspaceResult.failure("A full commit SHA is required for a pinned workspace");
+        }
+        return prepareWorkspace(repositoryClient, owner, repo, null, prNumber, sha);
+    }
+
+    private WorkspaceResult prepareWorkspace(RepositoryApiClient repositoryClient,
+                                             String owner, String repo, String branch, Long prNumber, String sha) {
         final String repositoryRemote;
         final RepositoryCredentials credentials;
         final boolean usesAuthorizationHeader;
@@ -110,17 +124,21 @@ public class WorkspaceService {
             log.info("Cloning repository to {} for workspace", workspaceDir);
 
             setup.setAuthentication(repositoryRemote, credentials, usesAuthorizationHeader);
-            CommandResult cloneResult = runRemoteCommand(setup, workspaceDir.getParent().toFile(), 60,
-                    "clone", "--depth", "1", "--branch", branch,
-                    repositoryRemote, workspaceDir.getFileName().toString());
+            CommandResult cloneResult = sha == null
+                    ? runRemoteCommand(setup, workspaceDir.getParent().toFile(), 60,
+                            "clone", "--depth", "1", "--branch", branch,
+                            repositoryRemote, workspaceDir.getFileName().toString())
+                    : runRemoteCommand(setup, workspaceDir.getParent().toFile(), 60,
+                            "clone", "--depth", "1", "--no-checkout",
+                            repositoryRemote, workspaceDir.getFileName().toString());
 
             if (cloneResult.success()) {
                 registerWorkspace(setup);
-                return WorkspaceResult.success(workspaceDir);
+                return sha == null ? WorkspaceResult.success(workspaceDir) : checkoutRevision(setup, sha, prNumber);
             }
 
             // Fork PR fallback: clone default branch → fetch PR head ref
-            if (prNumber != null) {
+            if (prNumber != null && sha == null) {
                 log.info("Branch clone failed, falling back to PR head ref for PR #{}: {}",
                         prNumber, cloneResult.output());
                 // Tear down the failed attempt before starting the retry.
@@ -186,6 +204,29 @@ public class WorkspaceService {
             cleanupWorkspace(setup);
             throw e;
         }
+    }
+
+    private WorkspaceResult checkoutRevision(WorkspaceSetup setup, String sha, Long prNumber) {
+        Path workspace = setup.workspaceDir();
+        CommandResult fetched = runRemoteCommand(setup, workspace.toFile(), 60,
+                "fetch", "--depth", "1", "origin", sha);
+        if (!fetched.success() && prNumber != null) {
+            fetched = runRemoteCommand(setup, workspace.toFile(), 60,
+                    "fetch", "--depth", "1", "origin", "refs/pull/" + prNumber + "/head");
+        }
+        if (fetched.success()) {
+            CommandResult checkout = runCommand(workspace.toFile(),
+                    new String[]{"git", "checkout", "--detach", sha}, 15);
+            if (checkout.success()) {
+                CommandResult head = runCommand(workspace.toFile(),
+                        new String[]{"git", "rev-parse", "HEAD"}, 15);
+                if (head.success() && sha.equalsIgnoreCase(head.output().trim())) {
+                    return WorkspaceResult.success(workspace);
+                }
+            }
+        }
+        cleanupWorkspace(setup);
+        return WorkspaceResult.failure("Failed to check out pinned commit " + sha);
     }
 
     /**

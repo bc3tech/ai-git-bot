@@ -21,11 +21,15 @@ import org.remus.giteabot.agent.validation.ToolExecutionService;
 import org.remus.giteabot.agent.validation.WorkspaceResult;
 import org.remus.giteabot.agent.validation.WorkspaceService;
 import org.remus.giteabot.ai.AiClient;
+import org.remus.giteabot.audit.ActorType;
+import org.remus.giteabot.audit.PrAuditEvent;
+import org.remus.giteabot.audit.PrAuditEventService;
 import org.remus.giteabot.config.AgentConfigProperties;
 import org.remus.giteabot.eventhook.EventHookEventType;
 import org.remus.giteabot.eventhook.EventHookPublisher;
 import org.remus.giteabot.gitea.model.WebhookPayload;
 import org.remus.giteabot.mcp.McpOrchestrationService;
+import org.remus.giteabot.mcp.McpToolCatalog;
 import org.remus.giteabot.prworkflow.WorkflowCancelledException;
 import org.remus.giteabot.repository.PostReviewAction;
 import org.remus.giteabot.repository.RepositoryApiClient;
@@ -35,12 +39,31 @@ import org.remus.giteabot.review.ReviewFence;
 import org.remus.giteabot.review.ReviewOutputInstructions;
 import org.remus.giteabot.review.ReviewOutputParser;
 import org.remus.giteabot.review.ReviewPublicationService;
+import org.remus.giteabot.review.ReviewSkipService;
+import org.remus.giteabot.review.grounding.DoubleCheckService.Budget;
+import org.remus.giteabot.review.grounding.DoubleCheckService.Evidence;
+import org.remus.giteabot.review.grounding.DoubleCheckSettings;
+import org.remus.giteabot.review.grounding.FindingGroundingService;
+import org.remus.giteabot.review.grounding.GroundingResult;
+import org.remus.giteabot.review.grounding.PinnedSourceReader;
+import org.remus.giteabot.review.grounding.PriorFindingsDigest;
+import org.remus.giteabot.review.grounding.PriorFindingsService;
+import org.remus.giteabot.review.grounding.ThreadActionExecutor;
+import org.remus.giteabot.review.state.ReviewRevisionRecord;
+import org.remus.giteabot.review.state.ReviewRunLeaseService.LeaseAcquisitionTimeoutException;
+import org.remus.giteabot.review.state.ReviewRunLeaseService.LeaseLostException;
+import org.remus.giteabot.review.state.ReviewRunLeaseService.LeaseToken;
+import org.remus.giteabot.review.state.ReviewRunLeaseService;
+import org.remus.giteabot.review.state.ReviewStateService;
 
 import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -114,7 +137,7 @@ public class AgentReviewService {
 
     /** Distinguishes a posted review or clarification from a no-op and a failed attempt. */
     public enum ReviewResult {
-        POSTED, NO_DIFF, FAILED
+        POSTED, NO_DIFF, FAILED, SKIPPED
     }
 
     private final AgentReviewContext context;
@@ -124,6 +147,17 @@ public class AgentReviewService {
     private final ToolCatalog toolCatalog;
     private final WorkspaceService workspaceService;
     private final AgentConfigProperties agentConfig;
+
+    private final ReviewRunLeaseService leases;
+    private final ReviewStateService state;
+    private final PriorFindingsService priors;
+    private final FindingGroundingService grounding;
+    private final ThreadActionExecutor threadActions;
+    private final ReviewSkipService skipService;
+    private final PrAuditEventService audits;
+    private final Duration leaseTtl;
+    private final DoubleCheckSettings doubleCheckSettings;
+    private final Budget doubleCheckBudget;
 
     private final RepositoryApiClient repositoryClient;
     private final AiClient aiClient;
@@ -140,7 +174,22 @@ public class AgentReviewService {
                               AgentConfigProperties agentConfig,
                               McpOrchestrationService mcpOrchestrationService,
                               Bot bot,
-                              EventHookPublisher eventHookPublisher) {
+                              EventHookPublisher eventHookPublisher,
+                              ReviewRunLeaseService leases, ReviewStateService state,
+                              PriorFindingsService priors, FindingGroundingService grounding,
+                              ThreadActionExecutor threadActions, ReviewSkipService skipService,
+                              PrAuditEventService audits, Duration leaseTtl,
+                              DoubleCheckSettings doubleCheckSettings, Budget doubleCheckBudget) {
+        this.leases = leases;
+        this.state = state;
+        this.priors = priors;
+        this.grounding = grounding;
+        this.threadActions = threadActions;
+        this.skipService = skipService;
+        this.audits = audits;
+        this.leaseTtl = leaseTtl;
+        this.doubleCheckSettings = doubleCheckSettings;
+        this.doubleCheckBudget = doubleCheckBudget;
         this.context = context;
         this.bot = bot;
         this.eventHookPublisher = eventHookPublisher;
@@ -197,114 +246,181 @@ public class AgentReviewService {
                                          Long runId,
                                          Consumer<AgentRunContext.ToolCallRecord> toolCallConsumer,
                                          ReviewFence fence) {
+        return reviewPullRequest(payload, maxToolRounds, enableFormalDecision, decisionPrompt, severityThresholds,
+                runId, toolCallConsumer, fence, false);
+    }
+
+    public ReviewResult reviewPullRequest(WebhookPayload payload, int maxToolRounds,
+                                         boolean enableFormalDecision, String decisionPrompt,
+                                         SeverityThresholds severityThresholds, Long runId,
+                                         Consumer<AgentRunContext.ToolCallRecord> toolCallConsumer,
+                                         ReviewFence fence, boolean explicitRequest) {
         String owner = payload.getRepository().getOwner().getLogin();
         String repo = payload.getRepository().getName();
         Long prNumber = payload.getPullRequest().getNumber();
         String prTitle = payload.getPullRequest().getTitle();
         String prBody = payload.getPullRequest().getBody();
-
-        log.info("Starting agentic review for PR #{} '{}' in {}/{} (formalDecision={})",
-                prNumber, prTitle, owner, repo, enableFormalDecision);
-
-        ReviewSnapshot snapshot = ReviewPublicationService.snapshot(repositoryClient, owner, repo, prNumber);
-        String diff = snapshot.diff();
-        if (diff == null || diff.isBlank()) {
-            log.warn("No diff found for PR #{} in {}/{} — skipping agentic review", prNumber, owner, repo);
-            return ReviewResult.NO_DIFF;
-        }
-
-        DiffSummary diffSummary = DiffSummary.parse(diff);
-        log.info("Parsed diff summary for PR #{}: {}", prNumber, diffSummary.statLine());
-
-        String headBranch = resolveHeadBranch(payload, owner, repo, prNumber);
-        if (headBranch == null) {
-            log.warn("Could not resolve PR head branch for PR #{} in {}/{} — skipping agentic review "
-                    + "(refusing to review the default branch)", prNumber, owner, repo);
-            return ReviewResult.FAILED;
-        }
-
+        PrAuditEvent event = PrAuditEvent.builder().botId(bot.getId()).repoOwner(owner).repoName(repo)
+                .prNumber(prNumber).runId(runId).actorType(ActorType.BOT.name()).actorId(context.botUsername())
+                .stepName(AgentReviewWorkflow.KEY).build();
+        LeaseToken lease = null;
+        AgentReviewLeaseHeartbeat heartbeat = null;
+        ReviewSnapshot snapshot = null;
+        ReviewFence runFence = fence;
         Path workspaceDir = null;
         try {
-            WorkspaceResult wsResult = workspaceService.prepareWorkspace(
-                    repositoryClient, owner, repo, headBranch, prNumber);
-            if (!wsResult.success()) {
-                log.warn("Failed to prepare workspace for agentic review of PR #{}: {}",
-                        prNumber, wsResult.error());
-                repositoryClient.postPullRequestComment(owner, repo, prNumber,
-                        "⚠️ **AI Agent (Review)**: Failed to prepare workspace: " + wsResult.error());
-                return ReviewResult.FAILED;
+            fence.requireActive("before acquiring agentic review lease");
+            lease = leases.acquire(bot.getId(), owner, repo, prNumber);
+            heartbeat = new AgentReviewLeaseHeartbeat(leases, lease, leaseTtl);
+            LeaseToken held = lease;
+            AgentReviewLeaseHeartbeat renewal = heartbeat;
+            runFence = location -> {
+                fence.requireActive(location);
+                renewal.assertHealthy();
+                leases.assertHeld(held);
+            };
+            runFence.requireActive("before reading agentic review snapshot");
+            snapshot = ReviewPublicationService.snapshot(repositoryClient, owner, repo, prNumber);
+            PriorFindingsDigest digest = priors.load(repositoryClient, lease, AgentReviewWorkflow.KEY, context.botUsername());
+            if (skipService.shouldSkip(repositoryClient, lease, AgentReviewWorkflow.KEY, context.botUsername(),
+                    snapshot, explicitRequest)) {
+                runFence.requireActive("before posting unchanged revision reply");
+                repositoryClient.postPullRequestComment(owner, repo, prNumber, "No changes since last review at `"
+                        + snapshot.headSha().substring(0, Math.min(7, snapshot.headSha().length())) + "`.");
+                clearAcknowledgement(payload, runFence);
+                return ReviewResult.SKIPPED;
             }
-            workspaceDir = wsResult.workspacePath();
-
+            if (snapshot.diff() == null || snapshot.diff().isBlank()) return ReviewResult.NO_DIFF;
+            DiffSummary diffSummary = DiffSummary.parse(snapshot.diff());
+            PinnedSourceReader head = snapshot.headSha() == null ? null
+                    : new PinnedSourceReader(repositoryClient, owner, repo, snapshot.headSha());
+            PinnedSourceReader base = snapshot.pinned()
+                    ? new PinnedSourceReader(repositoryClient, owner, repo, snapshot.effectiveBaseSha()) : null;
+            if (head != null) {
+                WorkspaceResult workspace = workspaceService.prepareWorkspaceAtRevision(
+                        repositoryClient, owner, repo, snapshot.headSha(), prNumber);
+                if (!workspace.success()) throw new IllegalStateException(workspace.error());
+                workspaceDir = workspace.workspacePath();
+            }
             String systemPrompt = resolveSystemPrompt(enableFormalDecision, decisionPrompt);
-            String userMessage = buildKickoffMessage(prTitle, prBody, diffSummary, enableFormalDecision);
-
+            String userMessage = buildKickoffMessage(prTitle, prBody, diffSummary, enableFormalDecision)
+                    + "\n\n" + digest.promptBlock();
+            if (head == null) userMessage += "\nNo pinned source revision is available. Review only this diff; do not infer full-file contents.\n\n"
+                    + snapshot.diff();
             AgentSession session = new AgentSession(owner, repo, prNumber, prTitle);
-
-            LoopOutcome outcome = runReviewLoop(session, owner, repo, prNumber,
-                    workspaceDir, headBranch, systemPrompt, userMessage, maxToolRounds, diffSummary,
-                    runId, toolCallConsumer);
-
-            if (!outcome.success()) {
-                log.warn("Agentic review for PR #{} failed; no review will be published", prNumber);
+            runFence.requireActive("before running agentic review loop");
+            LoopOutcome outcome = runReviewLoop(session, owner, repo, prNumber, workspaceDir, snapshot.headSha(),
+                    systemPrompt, userMessage, maxToolRounds, diffSummary, runId, toolCallConsumer, head, runFence);
+            if (!outcome.success() || !(outcome.payload() instanceof String review) || review.isBlank()) {
                 return ReviewResult.FAILED;
             }
-
-            String review = outcome.payload() instanceof String s ? s : null;
-            if (review == null || review.isBlank()) {
-                log.warn("Agentic review for PR #{} produced no review text", prNumber);
-                return ReviewResult.FAILED;
-            }
-
-            ParseResult parsed = enableFormalDecision
-                    ? parseFormalReviewResult(review, severityThresholds) : ParseResult.noDecision(review);
-
-            PostReviewAction action = parsed.action() != null ? parsed.action() : PostReviewAction.NONE;
-            ReviewOutputParser.Result output = ReviewOutputParser.parse(parsed.reviewText());
-            if (output.warning() != null) {
-                log.warn("Agentic review output for PR #{} was not a valid review envelope: {}",
-                        prNumber, output.warning());
-            }
+            String reviewText = enableFormalDecision ? parseFormalReviewResult(review, null).reviewText() : review;
+            ReviewOutputParser.Result output = ReviewOutputParser.parse(reviewText);
             ReviewDocument document = output.document();
-            try {
-                ReviewPublicationService.Outcome published = ReviewPublicationService.publish(repositoryClient,
-                        owner, repo, prNumber, snapshot, document, action, this::formatReview, fence);
-                log.info("Agentic review for PR #{} in {}/{}: inline {} ({}/{} confirmed), decision {} {}",
-                        prNumber, owner, repo, published.inlineStatus(), published.inlineConfirmed(),
-                        published.inlineRequested(), action, published.action());
-            } catch (WorkflowCancelledException e) {
-                throw e;
-            } catch (Exception e) {
-                if (action == PostReviewAction.NONE) {
-                    throw e;
-                }
-                // Fall back to a plain comment so the findings survive a failed formal submission.
-                log.warn("Failed to post formal review {} for PR #{} in {}/{}: {} — "
-                        + "falling back to a plain review comment",
-                        action, prNumber, owner, repo, e.getMessage());
-                fence.requireActive("before posting the plain review fallback");
-                repositoryClient.postReviewComment(owner, repo, prNumber, formatReview(
-                        ReviewPublicationService.render(document.summary(), document.findings(), false)));
-            }
-
-            publishFindingEvents(eventHookPublisher, bot, parsed, owner, repo, prNumber);
-            log.info("Agentic review completed for PR #{} in {}/{} (decision={})",
-                    prNumber, owner, repo, action);
+            GroundingResult grounded = grounding.ground(document, new Evidence(head, base, snapshot.diff()), digest,
+                    state.findingsForDedup(bot.getId(), owner, repo, prNumber, AgentReviewWorkflow.KEY),
+                    doubleCheckSettings, aiClient, doubleCheckBudget, event, runFence);
+            ParseResult decision = groundedDecision(document.summary(), grounded, enableFormalDecision, severityThresholds);
+            ReviewPublicationService.Outcome published = ReviewPublicationService.publish(repositoryClient, snapshot,
+                    document.summary(), grounded, decision.action(), this::formatReview, runFence,
+                    state, leases, lease, AgentReviewWorkflow.KEY, audits, event);
+            if (!published.delivered()) return ReviewResult.FAILED;
+            boolean threadFailures = !threadActions.execute(repositoryClient, lease, grounded.threadActions(),
+                    context.botUsername(), event, snapshot.headSha(), snapshot.effectiveBaseSha(), runFence).isEmpty();
+            runFence.requireActive("before recording reviewed agentic revision");
+            ReviewRevisionRecord revision = new ReviewRevisionRecord();
+            revision.setBotId(bot.getId());
+            revision.setRepoOwner(owner);
+            revision.setRepoName(repo);
+            revision.setPrNumber(prNumber);
+            revision.setWorkflowKey(AgentReviewWorkflow.KEY);
+            revision.setHeadSha(snapshot.headSha());
+            revision.setEffectiveBaseSha(snapshot.effectiveBaseSha());
+            revision.setReviewedAt(Instant.now());
+            revision.setDegraded(grounded.degraded() || threadFailures || !digest.commentsComplete());
+            revision.setLastSeenCommentAt(digest.commentCursor().timestamp());
+            revision.setLastSeenCommentId(digest.commentCursor().id());
+            state.upsertRevision(revision, lease);
+            publishFindingEvents(eventHookPublisher, bot, decision, owner, repo, prNumber);
             return ReviewResult.POSTED;
         } catch (WorkflowCancelledException e) {
             throw e;
+        } catch (LeaseLostException e) {
+            audits.recordGroundingWarning(event, "AGENT_REVIEW", "lease lost",
+                    snapshot == null ? null : snapshot.headSha(), snapshot == null ? null : snapshot.effectiveBaseSha());
+            return ReviewResult.FAILED;
         } catch (Exception e) {
             log.error("Agentic review failed for PR #{} in {}/{}: {}", prNumber, owner, repo, e.getMessage(), e);
-            postErrorComment(owner, repo, prNumber, "Agentic Review",
-                    "The review could not be completed because of an error. "
-                            + "This is usually a transient issue with the AI provider. "
-                            + "Please try again later.", e);
+            try {
+                runFence.requireActive("before posting agentic review failure");
+                postErrorComment(owner, repo, prNumber, "Agentic Review",
+                        "The review could not be completed because of an error. Please try again later.", e);
+                if (e instanceof LeaseAcquisitionTimeoutException) clearAcknowledgement(payload, fence);
+            } catch (LeaseLostException lost) {
+                audits.recordGroundingWarning(event, "AGENT_REVIEW", "lease lost",
+                        snapshot == null ? null : snapshot.headSha(), snapshot == null ? null : snapshot.effectiveBaseSha());
+            }
             return ReviewResult.FAILED;
         } finally {
-            if (workspaceDir != null) {
-                workspaceService.cleanupWorkspace(workspaceDir);
+            try {
+                if (workspaceDir != null) workspaceService.cleanupWorkspace(workspaceDir);
+            } finally {
+                try {
+                    if (heartbeat != null) heartbeat.close();
+                } finally {
+                    if (lease != null) leases.release(lease);
+                }
             }
         }
+    }
+
+    private void clearAcknowledgement(WebhookPayload payload, ReviewFence fence) {
+        String owner = payload.getRepository().getOwner().getLogin();
+        String repo = payload.getRepository().getName();
+        fence.requireActive("before clearing agentic review acknowledgement");
+        try {
+            repositoryClient.removePullRequestReaction(owner, repo, payload.getPullRequest().getNumber(), "eyes");
+        } catch (LeaseLostException | WorkflowCancelledException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            log.warn("Could not clear agentic review acknowledgement: {}", e.getMessage());
+        }
+        if (payload.getComment() != null && payload.getComment().getId() != null) {
+            fence.requireActive("before clearing agentic review comment acknowledgement");
+            try {
+                repositoryClient.removeReaction(owner, repo, payload.getComment().getId(), "eyes");
+            } catch (LeaseLostException | WorkflowCancelledException e) {
+                throw e;
+            } catch (RuntimeException e) {
+                log.warn("Could not clear agentic review comment acknowledgement: {}", e.getMessage());
+            }
+        }
+    }
+
+    static ParseResult groundedDecision(String summary, GroundingResult grounded, boolean enabled,
+                                        SeverityThresholds thresholds) {
+        int blocker = 0;
+        int medium = 0;
+        int low = 0;
+        List<Map<String, Object>> findings = new ArrayList<>();
+        for (ReviewDocument.Finding finding : grounded.publish()) {
+            switch (DoubleCheckSettings.Severity.parse(finding.severity())) {
+                case BLOCKER, HIGH -> blocker++;
+                case MEDIUM -> medium++;
+                case LOW -> low++;
+            }
+            Map<String, Object> data = new LinkedHashMap<>();
+            data.put("severity", finding.severity() == null ? "LOW" : finding.severity());
+            data.put("title", finding.body());
+            if (finding.category() != null) data.put("category", finding.category());
+            if (finding.path() != null) data.put("file", finding.path());
+            if (finding.line() != null) data.put("line", finding.line());
+            findings.add(data);
+        }
+        SeverityClassification classification = new SeverityClassification(blocker, medium, low);
+        PostReviewAction action = enabled ? evaluateAction(classification, thresholds) : PostReviewAction.NONE;
+        if (grounded.degraded() && action == PostReviewAction.APPROVE) action = PostReviewAction.NONE;
+        return new ParseResult(summary, action, classification, findings);
     }
 
     /**
@@ -646,11 +762,27 @@ public class AgentReviewService {
                                       String systemPrompt, String userMessage, int maxToolRounds,
                                       DiffSummary diffSummary, Long runId,
                                       Consumer<AgentRunContext.ToolCallRecord> toolCallConsumer) {
+        return runReviewLoop(session, owner, repo, prNumber, workspaceDir, headBranch, systemPrompt, userMessage,
+                maxToolRounds, diffSummary, runId, toolCallConsumer, null, ReviewFence.NONE);
+    }
+
+    private LoopOutcome runReviewLoop(AgentSession session, String owner, String repo, Long prNumber,
+                                      Path workspaceDir, String ref, String systemPrompt, String userMessage,
+                                      int maxToolRounds, DiffSummary diffSummary, Long runId,
+                                      Consumer<AgentRunContext.ToolCallRecord> toolCallConsumer,
+                                      PinnedSourceReader source, ReviewFence fence) {
+        Set<String> tools = workspaceDir == null
+                ? Set.of("pr-diff").stream().filter(context.allowedBuiltinTools()::contains)
+                    .collect(java.util.stream.Collectors.toSet()) : context.allowedBuiltinTools();
         ReviewAgentStrategy strategy = new ReviewAgentStrategy(
                 systemPrompt, toolRouter, toolCatalog,
-                context.mcpToolCatalog(), context.allowedBuiltinTools(),
-                responseParser, branchSwitcher, this::fetchFiles,
-                agentConfig.getBudget().getMaxContextRounds());
+                workspaceDir == null ? McpToolCatalog.empty() : context.mcpToolCatalog(), tools,
+                responseParser, branchSwitcher,
+                (o, r, requestedRef, paths) -> {
+                    fence.requireActive("before fetching agentic review files");
+                    if (source != null) return fetchPinnedFiles(source, paths);
+                    return workspaceDir == null ? "No pinned source available; use the diff only." : fetchFiles(o, r, requestedRef, paths);
+                }, agentConfig.getBudget().getMaxContextRounds(), fence);
 
         AgentConfigProperties.BudgetConfig budgetCfg = agentConfig.getBudget();
         int rounds = clamp(maxToolRounds, 1, 30);
@@ -661,7 +793,7 @@ public class AgentReviewService {
                 context.contextWindowTokens(), budgetCfg.getProactiveCompactionThreshold());
 
         AgentLoop loop = new AgentLoop(aiClient, sessionService, budget);
-        AgentRunContext ctx = new AgentRunContext(session, owner, repo, prNumber, workspaceDir, headBranch);
+        AgentRunContext ctx = new AgentRunContext(session, owner, repo, prNumber, workspaceDir, ref);
         ctx.setDiffSummary(diffSummary);
         ctx.setAuditToolCallConsumer(toolCallConsumer);
         return loop.run(ctx, userMessage, strategy);
@@ -751,6 +883,16 @@ public class AgentReviewService {
                     owner, repo, prNumber, e.getMessage());
         }
         return null;
+    }
+
+    private String fetchPinnedFiles(PinnedSourceReader source, List<String> paths) {
+        if (paths == null || paths.isEmpty()) return "";
+        StringBuilder text = new StringBuilder();
+        for (String path : paths) {
+            if (text.length() > agentConfig.getMaxFileContentChars()) break;
+            text.append("\n--- File: ").append(path).append(" ---\n").append(source.read(path)).append('\n');
+        }
+        return text.toString();
     }
 
     private String fetchFiles(String owner, String repo, String ref, List<String> filePaths) {

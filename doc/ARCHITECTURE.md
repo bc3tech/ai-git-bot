@@ -206,6 +206,25 @@ checks precede every provider mutation and state write; lease loss aborts and em
 a grounding warning. Workflow integration remains separate from these services.
 
 
+### Agentic review integration
+
+`AgentReviewService` holds the shared per-PR lease from before snapshot capture
+through revision persistence, renews it on a heartbeat, and releases it in
+`finally`. Its explicit-request skip guard runs inside that same lease. The
+workspace fetches and checks out the head SHA detached, verifies `HEAD`, and API
+file requests use a cached `PinnedSourceReader`. Missing head SHA limits the
+agent to diff tools rather than branch-based source reads.
+
+The kickoff includes `PriorFindingsDigest.promptBlock()`. The final structured
+output goes through grounding, lease-fenced publication, and prior thread actions.
+Only surviving findings determine the formal action and finding hook events;
+degraded output cannot approve. After confirmed summary delivery, the service
+updates `review_revision` with the snapshot, degradation status, and observed
+non-bot comment cursor. Failed prior thread actions mark the revision degraded.
+Lease loss aborts writes; a lease-wait timeout posts a failure and clears eyes
+reactions. Clarification conversations keep their existing behavior.
+
+
 ## Persistence and secrets
 
 The database stores durable configuration and run state rather than transient
