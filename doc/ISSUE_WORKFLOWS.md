@@ -50,20 +50,6 @@ clone / edit / select workflows), mirroring the PR section. Usually exactly
 one issue workflow is enabled per configuration; enabling several runs them
 sequentially in stable order.
 
-## Migration from bot types
-
-Upgrading keeps every existing bot's behavior:
-
-- Bots that were **Coding bots** are attached to **Issue: Coding Agent**
-  (their PR workflow configuration is untouched).
-- Bots that were **Writer bots** are attached to **Issue: Writer Agent**, and
-  their PR workflow configuration is replaced with the empty
-  **No PR workflows** configuration — this preserves their historic silence
-  on pull-request events, which used to be enforced by the bot-type check.
-
-The legacy `botType` field is deprecated and no longer read at runtime. It is
-retained for one release as migration safety and will be removed afterwards.
-
 ## Adding a new issue workflow
 
 New issue behaviors are ordinary Spring beans implementing the

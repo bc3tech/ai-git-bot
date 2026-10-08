@@ -20,8 +20,6 @@
             </a>
         </div>
 
-        <div th:if="${error}" class="alert alert-danger" th:text="${error}"></div>
-
         <form th:action="@{/admin/event-hooks/save}" method="post" th:object="${endpoint}">
             <input type="hidden" th:field="*{id}"/>
 

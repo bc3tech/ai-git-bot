@@ -416,6 +416,22 @@ class GiteaApiClientTest {
     }
 
     @Test
+    void removeReaction_deletesEyesReactionFromComment() {
+        RestClient.Builder builder = RestClient.builder().baseUrl("https://gitea.example.com");
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GiteaApiClient client = new GiteaApiClient(builder.build(), CREDS);
+
+        server.expect(requestTo("https://gitea.example.com/api/v1/repos/owner/repo/issues/comments/42/reactions"))
+                .andExpect(method(HttpMethod.DELETE))
+                .andExpect(jsonPath("$.content").value("eyes"))
+                .andRespond(withSuccess());
+
+        client.removeReaction("owner", "repo", 42L, "eyes");
+
+        server.verify();
+    }
+
+    @Test
     void addIssueReaction_postsEyesReactionToTheIssue() {
         RestClient.Builder builder = RestClient.builder().baseUrl("https://gitea.example.com");
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();

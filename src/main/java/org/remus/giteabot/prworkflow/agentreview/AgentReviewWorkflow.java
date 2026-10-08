@@ -63,6 +63,12 @@ public class AgentReviewWorkflow implements PrWorkflow {
     @Override public PrWorkflowCategory category() { return PrWorkflowCategory.REVIEW; }
 
     @Override
+    public boolean supersedesReviews(Map<String, String> hints) {
+        String clarification = hints == null ? null : hints.get(PrWorkflowContext.HINT_AGENTIC_REVIEW_CLARIFICATION);
+        return clarification == null || clarification.isBlank();
+    }
+
+    @Override
     public WorkflowParamsSchema paramsSchema() {
         return WorkflowParamsSchema.of(
                 new WorkflowParamField(AgentReviewParam.MAX_TOOL_ROUNDS,
@@ -121,7 +127,7 @@ public class AgentReviewWorkflow implements PrWorkflow {
 
         AgentReviewService.ReviewResult reviewed = serviceFactory.create(bot)
                 .reviewPullRequest(payload, maxToolRounds, enableFormalDecision, decisionPrompt, thresholds,
-                        context.runId(), context.auditToolCallConsumer());
+                        context.runId(), context.auditToolCallConsumer(), context::requireActive);
 
         WorkflowResult result = switch (reviewed) {
             case POSTED -> WorkflowResult.success("Agentic review posted");

@@ -23,6 +23,17 @@ import static org.mockito.Mockito.verify;
 class AgentReviewServiceTest {
 
     @Test
+    void parseFormalReviewResult_reviewEnvelopeIsNotMistakenForAClassification() {
+        String review = """
+                ```json
+                {"summary": "Minor.", "findings": [{"body": "x", "category": "low"}]}
+                ```""";
+        var result = AgentReviewService.parseFormalReviewResult(review, thresholds(0, null, null));
+        assertThat(result.classification()).isNull();
+        assertThat(result.reviewText()).isEqualTo(review);
+    }
+
+    @Test
     void parseFormalReviewResult_nullAndEmptyYieldsNone() {
         assertThat(AgentReviewService.parseFormalReviewResult(null, thresholds(0, null, null)).action()).isNull();
         assertThat(AgentReviewService.parseFormalReviewResult("", thresholds(0, null, null)).action()).isNull();

@@ -473,6 +473,84 @@ class PrWorkflowOrchestratorTest {
         verify(runService, times(2)).start(anyLong(), any(), any(), anyLong(), any());
     }
 
+    @Test
+    void reviewRunSupersedesActiveRunsOfOtherReviewWorkflowsOnly() {
+        when(runService.start(anyLong(), any(), any(), anyLong(), any())).thenReturn(runWithId(20L));
+        when(runService.complete(anyLong(), any(), any()))
+                .thenReturn(runWithIdAndStatus(20L, PrWorkflowRunStatus.SUCCESS));
+        PrWorkflowOrchestrator orchestrator = newOrchestrator(
+                keyed("review", PrWorkflowCategory.REVIEW),
+                keyed("agentic-review", PrWorkflowCategory.REVIEW),
+                keyed("e2e-test", PrWorkflowCategory.TESTING));
+        Bot bot = new Bot();
+        bot.setId(1L);
+
+        orchestrator.run(bot, payloadFor("o", "r", 5), "agentic-review");
+
+        verify(runService).cancelActiveRunsForPr(1L, "o", "r", 5L, "review");
+        verify(runService, org.mockito.Mockito.never())
+                .cancelActiveRunsForPr(anyLong(), any(), any(), anyLong(), eq("e2e-test"));
+        verify(runService, org.mockito.Mockito.never())
+                .cancelActiveRunsForPr(anyLong(), any(), any(), anyLong(), eq("agentic-review"));
+        verify(runService).start(1L, "o", "r", 5L, "agentic-review");
+    }
+
+    @Test
+    void nonReviewRunDoesNotCancelReviews() {
+        when(runService.start(anyLong(), any(), any(), anyLong(), any())).thenReturn(runWithId(21L));
+        when(runService.complete(anyLong(), any(), any()))
+                .thenReturn(runWithIdAndStatus(21L, PrWorkflowRunStatus.SUCCESS));
+        PrWorkflowOrchestrator orchestrator = newOrchestrator(
+                keyed("review", PrWorkflowCategory.REVIEW),
+                keyed("e2e-test", PrWorkflowCategory.TESTING));
+        Bot bot = new Bot();
+        bot.setId(1L);
+
+        orchestrator.run(bot, payloadFor("o", "r", 6), "e2e-test");
+
+        verify(runService, org.mockito.Mockito.never())
+                .cancelActiveRunsForPr(anyLong(), any(), any(), anyLong(), any());
+    }
+
+    @Test
+    void conversationalReviewRunDoesNotCancelOtherReviews() {
+        when(runService.start(anyLong(), any(), any(), anyLong(), any())).thenReturn(runWithId(22L));
+        when(runService.complete(anyLong(), any(), any()))
+                .thenReturn(runWithIdAndStatus(22L, PrWorkflowRunStatus.SUCCESS));
+        PrWorkflowOrchestrator orchestrator = newOrchestrator(
+                keyed("review", PrWorkflowCategory.REVIEW),
+                keyed("agentic-review", PrWorkflowCategory.REVIEW));
+        Bot bot = new Bot();
+        bot.setId(1L);
+
+        orchestrator.run(bot, payloadFor("o", "r", 7), "review", java.util.Map.of("conversation", "yes"));
+
+        verify(runService, org.mockito.Mockito.never())
+                .cancelActiveRunsForPr(anyLong(), any(), any(), anyLong(), any());
+    }
+
+    @Test
+    void runAllRunsOnlyAgenticReviewWhenBothReviewTypesAreEnabled() {
+        assertEquals(List.of("agentic-review", "e2e-test"),
+                PrWorkflowOrchestrator.preferAgenticReview(List.of("review", "agentic-review", "e2e-test")));
+        assertEquals(List.of("review", "e2e-test"),
+                PrWorkflowOrchestrator.preferAgenticReview(List.of("review", "e2e-test")));
+    }
+
+    private static PrWorkflow keyed(String key, PrWorkflowCategory category) {
+        return new PrWorkflow() {
+            @Override public String key() { return key; }
+            @Override public String displayName() { return key; }
+            @Override public PrWorkflowCategory category() { return category; }
+            @Override public boolean supersedesReviews(java.util.Map<String, String> hints) {
+                return !hints.containsKey("conversation");
+            }
+            @Override public WorkflowResult run(PrWorkflowContext ctx) {
+                return new WorkflowResult(WorkflowResultStatus.SUCCESS, "done");
+            }
+        };
+    }
+
     private static PrWorkflowRun runWithId(long id) {
         PrWorkflowRun run = new PrWorkflowRun();
         run.setId(id);

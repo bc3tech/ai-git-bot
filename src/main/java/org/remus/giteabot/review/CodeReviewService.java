@@ -6,9 +6,13 @@ import org.remus.giteabot.ai.AiClient;
 import org.remus.giteabot.ai.AiMessage;
 import org.remus.giteabot.config.ReviewConfigProperties;
 import org.remus.giteabot.gitea.model.WebhookPayload;
+import org.remus.giteabot.prworkflow.WorkflowCancelledException;
+import org.remus.giteabot.repository.PostReviewAction;
 import org.remus.giteabot.repository.RepositoryApiClient;
 import org.remus.giteabot.repository.model.Review;
 import org.remus.giteabot.repository.model.ReviewComment;
+import org.remus.giteabot.repository.model.ReviewPublicationResult;
+import org.remus.giteabot.repository.model.ReviewSnapshot;
 import org.remus.giteabot.review.enrichment.PrContextEnricher;
 import org.remus.giteabot.session.ReviewSession;
 import org.remus.giteabot.session.SessionService;
@@ -73,6 +77,28 @@ public class CodeReviewService {
     }
 
     public boolean reviewPullRequest(WebhookPayload payload, String promptName) {
+        return runReview(payload, promptName, ReviewFence.NONE).reviewed();
+    }
+
+    /**
+     * Outcome of a generated review.
+     *
+     * @param reviewed      whether a review was produced and delivered
+     * @param actionAllowed whether the caller may still submit the configured post-review action;
+     *                      false when submitting it would consume a pending review the bot owns
+     */
+    public record ReviewRun(boolean reviewed, boolean actionAllowed) {
+        static final ReviewRun SKIPPED = new ReviewRun(false, false);
+    }
+
+    /**
+     * Reviews the pull request and publishes findings as inline comments where the provider and the
+     * diff allow it, with a concise summary for everything else.
+     *
+     * @param fence checked before every AI call, session write and remote write; a cancelled run
+     *              propagates its {@link WorkflowCancelledException} instead of being reported as a failure
+     */
+    public ReviewRun runReview(WebhookPayload payload, String promptName, ReviewFence fence) {
         String owner = payload.getRepository().getOwner().getLogin();
         String repo = payload.getRepository().getName();
         Long prNumber = payload.getPullRequest().getNumber();
@@ -82,13 +108,15 @@ public class CodeReviewService {
         log.info("Starting code review for PR #{} '{}' in {}/{}, prompt={}", prNumber, prTitle, owner, repo, promptName);
 
         try {
-            String diff = fetchFilteredDiff(owner, repo, prNumber);
+            ReviewSnapshot snapshot = ReviewPublicationService.snapshot(repositoryClient, owner, repo, prNumber);
+            String diff = DiffFileFilter.filter(snapshot.diff(), excludedFilePatterns);
             if (diff == null || diff.isBlank()) {
                 log.warn("No diff found for PR #{} in {}/{}", prNumber, owner, repo);
-                return false;
+                return ReviewRun.SKIPPED;
             }
+            snapshot = snapshot.withDiff(diff);
 
-            String systemPrompt = reviewSystemPrompt;
+            String systemPrompt = reviewSystemPrompt + ReviewOutputInstructions.standard();
 
             // Build enriched context for better review quality
             String headRef = resolveHeadRef(payload);
@@ -96,62 +124,67 @@ public class CodeReviewService {
 
             ReviewSession session = sessionService.getOrCreateSession(owner, repo, prNumber, sessionPromptKey);
 
-            String review;
+            ReviewDocument document;
+            String sessionUserMessage;
             if (session.getMessages().isEmpty()) {
                 // Initial review: use the chunked diff review with enriched context
                 log.debug("LLM request [reviewDiff] for PR #{}: systemPrompt length={}, prTitle='{}', prBody length={}, diff length={}, additionalContext length={}",
-                        prNumber, systemPrompt != null ? systemPrompt.length() : 0, prTitle,
+                        prNumber, systemPrompt.length(), prTitle,
                         prBody != null ? prBody.length() : 0, diff.length(),
                         additionalContext != null ? additionalContext.length() : 0);
-                review = reviewDiffWithChunking(prTitle, prBody, diff, systemPrompt, additionalContext);
-                log.debug("LLM response [reviewDiff] for PR #{}: length={}, preview='{}'",
-                        prNumber, review.length(),
-                        review.substring(0, Math.min(review.length(), 500)));
-
-                if (review == null || review.strip().isEmpty()) {
-                    review = "⚠️ *The review feedback was empty or could not be generated.*";
-                }
-
-                // Store a summary user message and the review in the session
-                String userSummary = buildPrSummaryMessage(prTitle, prBody);
-                sessionService.addMessage(session, "user", userSummary);
-                sessionService.addMessage(session, "assistant", review);
+                document = reviewDiffWithChunking(prTitle, prBody, diff, systemPrompt, additionalContext, fence);
+                sessionUserMessage = buildPrSummaryMessage(prTitle, prBody);
             } else {
-                // PR was updated: use conversation context with new diff
+                // PR was updated: use conversation history with the current diff and enriched context
                 String updateMessage = buildPrUpdateMessage(prTitle, diff);
                 List<AiMessage> history = sessionService.toAiMessages(session);
+                // Fresh enrichment is request-only context; keep file snapshots out of stored history.
+                String modelInput = additionalContext.isBlank()
+                        ? updateMessage
+                        : updateMessage + "\n\n**Additional Context:**\n" + additionalContext;
 
-                log.debug("LLM request [chat/update] for PR #{}: history size={}, updateMessage length={}, systemPrompt length={}",
-                        prNumber, history.size(), updateMessage.length(),
-                        systemPrompt != null ? systemPrompt.length() : 0);
-                review = aiClient.chat(history, updateMessage, systemPrompt, null);
+                log.debug("LLM request [chat/update] for PR #{}: history size={}, modelInput length={}, systemPrompt length={}",
+                        prNumber, history.size(), modelInput.length(), systemPrompt.length());
+                fence.requireActive("before requesting the updated review");
+                String review = aiClient.chat(history, modelInput, systemPrompt, null);
                 log.debug("LLM response [chat/update] for PR #{}: length={}, preview='{}'",
                         prNumber, review != null ? review.length() : 0,
                         review != null ? review.substring(0, Math.min(review.length(), 500)) : "null");
-
-                if (review == null || review.strip().isEmpty()) {
-                    review = "⚠️ *The review feedback was empty or could not be generated.*";
-                }
-
-                sessionService.addMessage(session, "user", updateMessage);
-                sessionService.addMessage(session, "assistant", review);
+                document = ReviewOutputParser.parse(review).document();
+                sessionUserMessage = updateMessage;
             }
 
+            if (document.isEmpty()) {
+                document = ReviewDocument.text(EMPTY_REVIEW);
+            }
 
+            // Conversational follow-ups read this history, so store the readable rendering.
+            fence.requireActive("before storing the review in the session");
+            sessionService.addMessage(session, "user", sessionUserMessage);
+            sessionService.addMessage(session, "assistant",
+                    ReviewPublicationService.render(document.summary(), document.findings(), false));
 
-            String commentBody = formatReviewComment(review);
-            repositoryClient.postReviewComment(owner, repo, prNumber, commentBody);
+            ReviewPublicationService.Outcome outcome = ReviewPublicationService.publish(repositoryClient,
+                    owner, repo, prNumber, snapshot, document, PostReviewAction.NONE, this::formatReviewComment,
+                    fence);
 
             // Compact context window to reduce memory/token usage for subsequent calls
             sessionService.compactContextWindow(session);
 
-            log.info("Code review completed for PR #{} in {}/{}", prNumber, owner, repo);
-            return true;
+            log.info("Code review completed for PR #{} in {}/{} (inline {}: {}/{} confirmed)", prNumber, owner, repo,
+                    outcome.inlineStatus(), outcome.inlineConfirmed(), outcome.inlineRequested());
+            return new ReviewRun(outcome.delivered(),
+                    outcome.inlineStatus() != ReviewPublicationResult.Status.PENDING_CONFLICT);
+        } catch (WorkflowCancelledException e) {
+            throw e;
         } catch (Exception e) {
             log.error("Code review failed for PR #{} in {}/{}: {}", prNumber, owner, repo, e.getMessage(), e);
-            return false;
+            // Propagate so the workflow run is recorded as FAILED and the trigger can be told.
+            throw e instanceof RuntimeException re ? re : new IllegalStateException("Code review failed", e);
         }
     }
+
+    private static final String EMPTY_REVIEW = "⚠️ *The review feedback was empty or could not be generated.*";
 
     public void handleBotCommand(WebhookPayload payload, String promptName) {
         String owner = payload.getRepository().getOwner().getLogin();
@@ -162,10 +195,12 @@ public class CodeReviewService {
 
         log.info("Handling bot command in comment #{} for PR #{} in {}/{}", commentId, prNumber, owner, repo);
 
+        boolean reactionAdded = false;
         try {
             // Add eyes reaction to acknowledge the comment
             try {
                 repositoryClient.addReaction(owner, repo, commentId, "eyes");
+                reactionAdded = true;
             } catch (Exception e) {
                 log.warn("Failed to add reaction to comment #{}: {}", commentId, e.getMessage());
             }
@@ -221,6 +256,22 @@ public class CodeReviewService {
 
             log.info("Bot command handled for comment #{} on PR #{} in {}/{}", commentId, prNumber, owner, repo);
         } catch (Exception e) {
+            if (reactionAdded) {
+                try {
+                    repositoryClient.removeReaction(owner, repo, commentId, "eyes");
+                } catch (Exception cleanupException) {
+                    log.warn("Failed to remove reaction from failed bot command comment #{}: {}",
+                            commentId, cleanupException.getMessage());
+                }
+            }
+            try {
+                repositoryClient.postPullRequestComment(owner, repo, prNumber,
+                        "⚠️ I couldn't complete the AI review because an error occurred while processing this request. "
+                                + "Please try again later.");
+            } catch (Exception commentException) {
+                log.warn("Failed to post AI review failure comment on PR #{} in {}/{}: {}",
+                        prNumber, owner, repo, commentException.getMessage());
+            }
             log.error("Failed to handle bot command for comment #{} on PR #{} in {}/{}: {}",
                     commentId, prNumber, owner, repo, e.getMessage(), e);
             if (e instanceof RuntimeException runtimeException) {
@@ -625,13 +676,13 @@ public class CodeReviewService {
 
     /**
      * Reviews a diff by splitting it into chunks, sending each to the AI provider,
-     * and joining the results.
+     * and merging the structured results.
      */
-    private String reviewDiffWithChunking(String prTitle, String prBody, String diff,
-                                          String systemPrompt, String additionalContext) {
+    private ReviewDocument reviewDiffWithChunking(String prTitle, String prBody, String diff,
+                                                  String systemPrompt, String additionalContext, ReviewFence fence) {
         log.info("Requesting code review from AI provider model={} (via chunking)", aiClient.getModel());
         ChunkingResult chunkingResult = splitDiffIntoChunks(diff);
-        List<String> reviews = new ArrayList<>();
+        List<ReviewDocument> reviews = new ArrayList<>();
         int failedChunks = 0;
         Exception lastException = null;
 
@@ -640,23 +691,21 @@ public class CodeReviewService {
             int chunkNumber = i + 1;
             int totalChunks = chunkingResult.chunks().size();
 
+            fence.requireActive("before reviewing diff chunk " + chunkNumber + "/" + totalChunks);
             try {
                 String review = reviewSingleChunk(prTitle, prBody, chunk, chunkNumber, totalChunks, false,
                         systemPrompt, additionalContext);
-
-                if (totalChunks > 1) {
-                    reviews.add("### Diff chunk " + chunkNumber + "/" + totalChunks + "\n" + review);
-                } else {
-                    reviews.add(review);
-                }
+                reviews.add(ReviewOutputParser.parse(review).document());
+            } catch (WorkflowCancelledException e) {
+                throw e;
             } catch (Exception e) {
                 failedChunks++;
                 lastException = e;
                 aiClient.reportError(e);
                 log.warn("Review failed for chunk {}/{}: {}", chunkNumber, totalChunks, e.getMessage());
                 if (totalChunks > 1) {
-                    reviews.add("### Diff chunk " + chunkNumber + "/" + totalChunks
-                            + "\n_Review for this chunk failed: " + e.getMessage() + "_");
+                    reviews.add(ReviewDocument.text("_Review for diff chunk " + chunkNumber + "/" + totalChunks
+                            + " failed: " + e.getMessage() + "_"));
                 }
             }
         }
@@ -666,15 +715,16 @@ public class CodeReviewService {
         }
 
         if (failedChunks > 0) {
-            reviews.add("**Note:** " + failedChunks + " of " + chunkingResult.chunks().size()
-                    + " diff chunk(s) could not be reviewed due to API errors.");
+            reviews.add(ReviewDocument.text("**Note:** " + failedChunks + " of " + chunkingResult.chunks().size()
+                    + " diff chunk(s) could not be reviewed due to API errors."));
         }
 
         if (chunkingResult.wasTruncated()) {
-            reviews.add("**Warning:** review is incomplete because the diff was truncated after " + maxDiffChunks + " chunks.");
+            reviews.add(ReviewDocument.text("**Warning:** review is incomplete because the diff was truncated after "
+                    + maxDiffChunks + " chunks."));
         }
 
-        return String.join("\n\n", reviews);
+        return ReviewOutputParser.merge(reviews);
     }
 
     private String reviewSingleChunk(String prTitle, String prBody, String diffChunk, int chunkNumber, int totalChunks,

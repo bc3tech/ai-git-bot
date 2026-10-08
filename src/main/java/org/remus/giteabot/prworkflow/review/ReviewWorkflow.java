@@ -127,6 +127,12 @@ public class ReviewWorkflow implements PrWorkflow {
     }
 
     @Override
+    public boolean supersedesReviews(Map<String, String> hints) {
+        String action = hints == null ? null : hints.get(HINT_REVIEW_ACTION);
+        return action == null || action.isEmpty() || ACTION_REVIEW.equals(action);
+    }
+
+    @Override
     public WorkflowResult run(PrWorkflowContext context) {
         String action = context.hint(HINT_REVIEW_ACTION);
         if (action == null || action.isEmpty()) {
@@ -177,14 +183,18 @@ public class ReviewWorkflow implements PrWorkflow {
 
         context.requireActive("before invoking CodeReviewService.reviewPullRequest");
 
-        boolean reviewed = codeReviewServiceFactory.create(bot, repositoryClient,
+        CodeReviewService.ReviewRun run = codeReviewServiceFactory.create(bot, repositoryClient,
                         maxDiffCharsPerChunk, maxDiffChunks, retryTruncatedChunkChars, excludedFilePatterns)
-                .reviewPullRequest(payload, null);
+                .runReview(payload, null, context::requireActive);
+        boolean reviewed = run.reviewed();
 
         context.appendStep("review",
-                reviewed ? "Posted review comment for PR" : "Skipped — no diff or no eligible content");
+                reviewed ? "Posted review for PR" : "Skipped — no diff or no eligible content");
 
-        if (reviewed && bot.getGitIntegration() != null) {
+        if (reviewed && !run.actionAllowed()) {
+            context.appendStep("post-review-action",
+                    "Skipped — a pending review blocks submitting the post-review action");
+        } else if (reviewed && bot.getGitIntegration() != null) {
             context.requireActive("before posting post-review action");
 
             String owner = payload.getRepository().getOwner().getLogin();

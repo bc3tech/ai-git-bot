@@ -9,7 +9,11 @@ import org.remus.giteabot.repository.PostReviewAction;
 import org.remus.giteabot.repository.RepositoryApiClient;
 import org.remus.giteabot.repository.WorkflowDispatchRequest;
 import org.remus.giteabot.repository.WorkflowRunStatus;
+import org.remus.giteabot.repository.model.DiffSide;
 import org.remus.giteabot.repository.model.RepositoryCredentials;
+import org.remus.giteabot.repository.model.ReviewAnchorComment;
+import org.remus.giteabot.repository.model.ReviewPublicationResult;
+import org.remus.giteabot.repository.model.ReviewSnapshot;
 import org.remus.giteabot.repository.model.Review;
 import org.remus.giteabot.repository.model.ReviewComment;
 import org.springframework.core.ParameterizedTypeReference;
@@ -18,7 +22,9 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
+import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.RestClient;
+import org.springframework.web.client.RestClientException;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -98,6 +104,227 @@ public class GitLabApiClient implements RepositoryApiClient {
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> diffs = (List<Map<String, Object>>) compare.get("diffs");
         return buildUnifiedDiff(diffs);
+    }
+
+    @Override
+    public ReviewSnapshot getReviewSnapshot(String owner, String repo, Long pullNumber) {
+        String projectPath = encodeProjectPath(owner, repo);
+        List<Map<String, Object>> versions = gitlabRestClient.get()
+                .uri("/api/v4/projects/{projectPath}/merge_requests/{iid}/versions", projectPath, pullNumber)
+                .retrieve()
+                .body(new ParameterizedTypeReference<>() {});
+        if (versions == null || versions.isEmpty()) {
+            throw new IllegalStateException("GitLab returned no merge request diff versions");
+        }
+
+        Map<String, Object> latest = versions.getFirst();
+        String versionId = requiredString(latest, "id");
+        String baseSha = requiredString(latest, "base_commit_sha");
+        String startSha = requiredString(latest, "start_commit_sha");
+        String headSha = requiredString(latest, "head_commit_sha");
+        Map<String, Object> version = gitlabRestClient.get()
+                .uri("/api/v4/projects/{projectPath}/merge_requests/{iid}/versions/{versionId}",
+                        projectPath, pullNumber, versionId)
+                .retrieve()
+                .body(new ParameterizedTypeReference<>() {});
+        if (version == null || !(version.get("diffs") instanceof List<?> rawDiffs)) {
+            throw new IllegalStateException("GitLab returned no diffs for the latest merge request version");
+        }
+
+        List<Map<String, Object>> diffs = rawDiffs.stream()
+                .filter(Map.class::isInstance)
+                .map(value -> (Map<String, Object>) value)
+                .toList();
+        if (diffs.size() != rawDiffs.size()) {
+            throw new IllegalStateException("GitLab returned an invalid merge request diff version");
+        }
+        return new ReviewSnapshot(headSha, baseSha, startSha, buildVersionDiff(diffs), true);
+    }
+
+    @Override
+    public ReviewPublicationResult publishInlineReview(String owner, String repo, Long pullNumber,
+                                                       ReviewSnapshot snapshot, String body,
+                                                       List<ReviewAnchorComment> comments,
+                                                       PostReviewAction action) {
+        List<ReviewAnchorComment> requested = comments == null ? List.of() : List.copyOf(comments);
+        String projectPath = encodeProjectPath(owner, repo);
+        List<ReviewPublicationResult.CommentOutcome> outcomes = new java.util.ArrayList<>();
+        ReviewPublicationResult.Delivery firstFailure = null;
+
+        for (ReviewAnchorComment comment : requested) {
+            try {
+                Map<String, Object> response = gitlabRestClient.post()
+                        .uri("/api/v4/projects/{projectPath}/merge_requests/{iid}/discussions",
+                                projectPath, pullNumber)
+                        .body(Map.of("body", comment.body(), "position", gitLabPosition(snapshot, comment)))
+                        .retrieve()
+                        .body(new ParameterizedTypeReference<>() {});
+                String discussionId = response == null ? null : String.valueOf(response.get("id"));
+                if (discussionId != null && "null".equals(discussionId)) {
+                    discussionId = null;
+                }
+                ReviewPublicationResult.Delivery delivery = hasFirstNotePosition(response)
+                        ? ReviewPublicationResult.Delivery.CONFIRMED
+                        : ReviewPublicationResult.Delivery.MISPLACED;
+                outcomes.add(new ReviewPublicationResult.CommentOutcome(comment, delivery, discussionId));
+            } catch (HttpStatusCodeException e) {
+                ReviewPublicationResult.Delivery failure = e.getStatusCode().is4xxClientError()
+                        ? ReviewPublicationResult.Delivery.FAILED : ReviewPublicationResult.Delivery.UNKNOWN;
+                if (firstFailure == null) {
+                    firstFailure = failure;
+                }
+                outcomes.add(new ReviewPublicationResult.CommentOutcome(comment, failure, null));
+            } catch (RestClientException e) {
+                if (firstFailure == null) {
+                    firstFailure = ReviewPublicationResult.Delivery.UNKNOWN;
+                }
+                outcomes.add(new ReviewPublicationResult.CommentOutcome(
+                        comment, ReviewPublicationResult.Delivery.UNKNOWN, null));
+            }
+        }
+
+        ReviewPublicationResult.Delivery summaryDelivery = attemptSummary(owner, repo, pullNumber, body);
+        if (firstFailure == null && (summaryDelivery == ReviewPublicationResult.Delivery.FAILED
+                || summaryDelivery == ReviewPublicationResult.Delivery.UNKNOWN)) {
+            firstFailure = summaryDelivery;
+        }
+        ReviewPublicationResult.Delivery actionDelivery = attemptAction(owner, repo, pullNumber, action);
+        if (firstFailure == null && (actionDelivery == ReviewPublicationResult.Delivery.FAILED
+                || actionDelivery == ReviewPublicationResult.Delivery.UNKNOWN)) {
+            firstFailure = actionDelivery;
+        }
+        ReviewPublicationResult.Delivery reviewDelivery = combine(summaryDelivery, actionDelivery);
+
+        boolean allConfirmed = reviewDelivery == ReviewPublicationResult.Delivery.CONFIRMED
+                && outcomes.stream().allMatch(outcome -> outcome.delivery() == ReviewPublicationResult.Delivery.CONFIRMED);
+        if (allConfirmed) {
+            return new ReviewPublicationResult(ReviewPublicationResult.Status.PUBLISHED, reviewDelivery,
+                    outcomes, null);
+        }
+
+        boolean actionDidNotWrite = action == null || action == PostReviewAction.NONE;
+        boolean nothingWritten = summaryDelivery == ReviewPublicationResult.Delivery.FAILED
+                && (actionDelivery == ReviewPublicationResult.Delivery.FAILED || actionDidNotWrite)
+                && outcomes.stream().allMatch(outcome -> outcome.delivery() == ReviewPublicationResult.Delivery.FAILED);
+        if (nothingWritten && firstFailure == ReviewPublicationResult.Delivery.FAILED) {
+            return new ReviewPublicationResult(ReviewPublicationResult.Status.REJECTED, reviewDelivery,
+                    outcomes, "GitLab rejected review publication before any component was written");
+        }
+
+        boolean actionWasRequested = action != null && action != PostReviewAction.NONE;
+        boolean hasConfirmedWrite = summaryDelivery == ReviewPublicationResult.Delivery.CONFIRMED
+                || (actionWasRequested && actionDelivery == ReviewPublicationResult.Delivery.CONFIRMED)
+                || outcomes.stream().anyMatch(outcome -> outcome.delivery() == ReviewPublicationResult.Delivery.CONFIRMED
+                        || outcome.delivery() == ReviewPublicationResult.Delivery.MISPLACED);
+        boolean hasFailedWrite = summaryDelivery == ReviewPublicationResult.Delivery.FAILED
+                || actionDelivery == ReviewPublicationResult.Delivery.FAILED
+                || outcomes.stream().anyMatch(outcome -> outcome.delivery() == ReviewPublicationResult.Delivery.FAILED);
+        boolean hasUnknownWrite = summaryDelivery == ReviewPublicationResult.Delivery.UNKNOWN
+                || actionDelivery == ReviewPublicationResult.Delivery.UNKNOWN
+                || outcomes.stream().anyMatch(outcome -> outcome.delivery() == ReviewPublicationResult.Delivery.UNKNOWN);
+        return new ReviewPublicationResult(hasUnknownWrite && !hasConfirmedWrite && !hasFailedWrite
+                ? ReviewPublicationResult.Status.UNKNOWN : ReviewPublicationResult.Status.PARTIAL,
+                reviewDelivery, outcomes,
+                "GitLab review publication was only partially confirmed");
+    }
+
+    private Map<String, Object> gitLabPosition(ReviewSnapshot snapshot, ReviewAnchorComment comment) {
+        Map<String, Object> position = new LinkedHashMap<>();
+        position.put("position_type", "text");
+        position.put("base_sha", snapshot.baseSha());
+        position.put("start_sha", snapshot.startSha());
+        position.put("head_sha", snapshot.headSha());
+        position.put("old_path", comment.oldPath());
+        position.put("new_path", comment.path());
+        if (comment.oldLine() != null && comment.newLine() != null) {
+            position.put("old_line", comment.oldLine());
+            position.put("new_line", comment.newLine());
+        } else if (comment.side() == DiffSide.NEW) {
+            position.put("new_line", comment.newLine() == null ? comment.line() : comment.newLine());
+        } else {
+            position.put("old_line", comment.oldLine() == null ? comment.line() : comment.oldLine());
+        }
+        return position;
+    }
+
+    private boolean hasFirstNotePosition(Map<String, Object> discussion) {
+        if (discussion == null || !(discussion.get("notes") instanceof List<?> notes) || notes.isEmpty()) {
+            return false;
+        }
+        Object first = notes.getFirst();
+        return first instanceof Map<?, ?> note && note.get("position") instanceof Map<?, ?>;
+    }
+
+    private ReviewPublicationResult.Delivery attemptSummary(String owner, String repo, Long pullNumber,
+                                                            String body) {
+        try {
+            postPullRequestComment(owner, repo, pullNumber, body);
+            return ReviewPublicationResult.Delivery.CONFIRMED;
+        } catch (HttpStatusCodeException e) {
+            return e.getStatusCode().is4xxClientError() ? ReviewPublicationResult.Delivery.FAILED
+                    : ReviewPublicationResult.Delivery.UNKNOWN;
+        } catch (RestClientException e) {
+            return ReviewPublicationResult.Delivery.UNKNOWN;
+        }
+    }
+
+    private ReviewPublicationResult.Delivery attemptAction(String owner, String repo, Long pullNumber,
+                                                           PostReviewAction action) {
+        try {
+            postReviewAction(owner, repo, pullNumber, action);
+            return ReviewPublicationResult.Delivery.CONFIRMED;
+        } catch (HttpStatusCodeException e) {
+            return e.getStatusCode().is4xxClientError() ? ReviewPublicationResult.Delivery.FAILED
+                    : ReviewPublicationResult.Delivery.UNKNOWN;
+        } catch (RestClientException e) {
+            return ReviewPublicationResult.Delivery.UNKNOWN;
+        }
+    }
+
+    private static ReviewPublicationResult.Delivery combine(ReviewPublicationResult.Delivery first,
+                                                             ReviewPublicationResult.Delivery second) {
+        if (first == ReviewPublicationResult.Delivery.FAILED || second == ReviewPublicationResult.Delivery.FAILED) {
+            return ReviewPublicationResult.Delivery.FAILED;
+        }
+        if (first == ReviewPublicationResult.Delivery.UNKNOWN || second == ReviewPublicationResult.Delivery.UNKNOWN) {
+            return ReviewPublicationResult.Delivery.UNKNOWN;
+        }
+        return ReviewPublicationResult.Delivery.CONFIRMED;
+    }
+
+    private static String requiredString(Map<String, Object> value, String key) {
+        Object result = value == null ? null : value.get(key);
+        if (result == null || result.toString().isBlank()) {
+            throw new IllegalStateException("GitLab diff version is missing " + key);
+        }
+        return result.toString();
+    }
+
+    private String buildVersionDiff(List<Map<String, Object>> diffs) {
+        StringBuilder unified = new StringBuilder();
+        for (Map<String, Object> fileDiff : diffs) {
+            String oldPath = requiredString(fileDiff, "old_path");
+            String newPath = requiredString(fileDiff, "new_path");
+            String diff = (String) fileDiff.get("diff");
+            boolean newFile = Boolean.TRUE.equals(fileDiff.get("new_file"));
+            boolean deletedFile = Boolean.TRUE.equals(fileDiff.get("deleted_file"));
+            boolean renamed = Boolean.TRUE.equals(fileDiff.get("renamed_file"));
+
+            unified.append("diff --git a/").append(oldPath).append(" b/").append(newPath).append("\n");
+            if (renamed) {
+                unified.append("rename from ").append(oldPath).append("\n");
+                unified.append("rename to ").append(newPath).append("\n");
+            }
+            unified.append("--- ").append(newFile ? "/dev/null" : "a/" + oldPath).append("\n");
+            unified.append("+++ ").append(deletedFile ? "/dev/null" : "b/" + newPath).append("\n");
+            if (diff != null) {
+                unified.append(diff);
+                if (!diff.endsWith("\n")) {
+                    unified.append("\n");
+                }
+            }
+        }
+        return unified.toString();
     }
 
     @Override

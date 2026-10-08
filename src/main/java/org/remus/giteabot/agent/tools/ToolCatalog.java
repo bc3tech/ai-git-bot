@@ -49,8 +49,21 @@ public class ToolCatalog {
      * unit-test author, readme-sync). Tools tagged with this role are of kind
      * {@link ToolKind#PR_WORKFLOW} and trigger a workflow-internal call inside
      * the bot rather than being general-purpose repository tools.</p>
+     *
+     * <p>{@code REVIEW} must be explicitly assigned to each read-only built-in.
+     * Context classification or WRITER membership alone never grants review access.</p>
      */
-    public enum Role { CODING, WRITER, PR_WORKFLOW }
+    public enum Role { CODING, WRITER, REVIEW, PR_WORKFLOW }
+
+    /** Intersects the bot configuration with explicit REVIEW-role entries; null denies all built-ins. */
+    public Set<String> reviewToolNames(Set<String> allowed) {
+        if (allowed == null) {
+            return Set.of();
+        }
+        return STATIC_TOOLS.stream().filter(entry -> entry.roles().contains(Role.REVIEW))
+                .map(Entry::name).filter(allowed::contains)
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+    }
 
     /** Internal record per built-in (non-validation) tool. */
     private record Entry(String name, ToolKind kind, Set<Role> roles,
@@ -92,18 +105,18 @@ public class ToolCatalog {
                     objectSchema(prop("path", "string", "Repository-relative path to the file to delete."),
                             required("path"))),
 
-            // ---- repository exploration (shared by coding + writer) ----
+            // ---- repository exploration (coding + writer; read-only entries opt in to review) ----
             entry("branch-switcher", ToolKind.CONTEXT, EnumSet.of(Role.CODING, Role.WRITER),
                     "Switch the workspace/context to a different branch before any other repository "
                             + "tool. Call this FIRST when you need a non-default base branch.",
                     objectSchema(prop("branch", "string", "Branch name to check out."), required("branch"))),
-            entry("rg", ToolKind.CONTEXT, EnumSet.of(Role.CODING, Role.WRITER),
+            entry("rg", ToolKind.CONTEXT, EnumSet.of(Role.CODING, Role.WRITER, Role.REVIEW),
                     "Run ripgrep across the workspace. Common args: [\"pattern\"] or [\"pattern\", \"path\"].",
                     varargsSchema()),
-            entry("find", ToolKind.CONTEXT, EnumSet.of(Role.CODING, Role.WRITER),
+            entry("find", ToolKind.CONTEXT, EnumSet.of(Role.CODING, Role.WRITER, Role.REVIEW),
                     "Find files by glob pattern. Args: [\"*.yml\"] or [\"*.java\", \"src\"].",
                     varargsSchema()),
-            entry("cat", ToolKind.CONTEXT, EnumSet.of(Role.CODING, Role.WRITER),
+            entry("cat", ToolKind.CONTEXT, EnumSet.of(Role.CODING, Role.WRITER, Role.REVIEW),
                     "Read specific line ranges of a file with 1-based line numbers. "
                             + "Use this for precision reads after understanding structure via "
                             + "`ctags-signatures` — not for first-time file exploration.",
@@ -112,16 +125,16 @@ public class ToolCatalog {
                             prop("startLine", "integer", "First line to include (inclusive, 1-based). Optional — omit to start at 1."),
                             prop("endLine",   "integer", "Last line to include (inclusive). Optional — omit to read to EOF."),
                             required("path"))),
-            entry("git-log", ToolKind.CONTEXT, EnumSet.of(Role.CODING, Role.WRITER),
+            entry("git-log", ToolKind.CONTEXT, EnumSet.of(Role.CODING, Role.WRITER, Role.REVIEW),
                     "Inspect change history. Args: [\"path/file\"] or [\"path/file\", \"limit\"].",
                     varargsSchema()),
-            entry("git-blame", ToolKind.CONTEXT, EnumSet.of(Role.CODING, Role.WRITER),
+            entry("git-blame", ToolKind.CONTEXT, EnumSet.of(Role.CODING, Role.WRITER, Role.REVIEW),
                     "Inspect line history. Args: [\"path/file\", \"startLine\", \"endLine\"].",
                     varargsSchema()),
-            entry("tree", ToolKind.CONTEXT, EnumSet.of(Role.CODING, Role.WRITER),
+            entry("tree", ToolKind.CONTEXT, EnumSet.of(Role.CODING, Role.WRITER, Role.REVIEW),
                     "List a directory recursively. Args: [\"src\"] or [\"src\", \"3\"] (depth).",
                     varargsSchema()),
-            entry("ctags-signatures", ToolKind.CONTEXT, EnumSet.of(Role.CODING, Role.WRITER),
+            entry("ctags-signatures", ToolKind.CONTEXT, EnumSet.of(Role.CODING, Role.WRITER, Role.REVIEW),
                     "Extract function, class, method, and interface signatures from a source file. "
                             + "PREFER this over `cat` for first-time file exploration — it reveals the "
                             + "file's architecture (classes, methods, interfaces, functions) at a "
@@ -132,7 +145,7 @@ public class ToolCatalog {
                             prop("path",  "string",  "Repository-relative path to the file."),
                             prop("limit", "integer", "Max signatures to return (default: 100)."),
                             required("path"))),
-            entry("ctags-deps", ToolKind.CONTEXT, EnumSet.of(Role.CODING, Role.WRITER),
+            entry("ctags-deps", ToolKind.CONTEXT, EnumSet.of(Role.CODING, Role.WRITER, Role.REVIEW),
                     "Extract imports, includes, and namespace/package declarations from a source file. "
                             + "Returns JSON with the declared namespace and all "
                             + "external dependencies. Use this to understand which modules a file depends on. "
@@ -140,7 +153,7 @@ public class ToolCatalog {
                     objectSchema(
                             prop("path", "string", "Repository-relative path to the file."),
                             required("path"))),
-            entry("pr-diff", ToolKind.CONTEXT, EnumSet.of(Role.CODING, Role.WRITER),
+            entry("pr-diff", ToolKind.CONTEXT, EnumSet.of(Role.CODING, Role.WRITER, Role.REVIEW),
                     "Return the diff hunks for a specific changed file in the current pull request. "
                             + "Use this after inspecting the changed-file summary to see what exactly "
                             + "was added, removed, or modified in a file. "
@@ -154,11 +167,11 @@ public class ToolCatalog {
             silentAlias("ripgrep", ToolKind.CONTEXT),
             silentAlias("grep",    ToolKind.CONTEXT),
 
-            // ---- writer-only repository helpers ----
-            entry("get-issue", ToolKind.REPOSITORY, EnumSet.of(Role.WRITER),
+            // ---- read-only repository helpers (writer + review) ----
+            entry("get-issue", ToolKind.REPOSITORY, EnumSet.of(Role.WRITER, Role.REVIEW),
                     "Fetch the body and metadata of an issue by number (args: issue number).",
                     varargsSchema()),
-            entry("search-issues", ToolKind.REPOSITORY, EnumSet.of(Role.WRITER),
+            entry("search-issues", ToolKind.REPOSITORY, EnumSet.of(Role.WRITER, Role.REVIEW),
                     "Search issues by free-text query (args: query string).",
                     varargsSchema()),
 
@@ -431,13 +444,17 @@ public class ToolCatalog {
      * The JSON-schema surface advertised via the AI provider's native
      * function-calling API for the given role. Built-in tools come from
      * {@link #STATIC_TOOLS} and are filtered through {@code allowedBuiltinTools}
-     * (a {@code null} set disables filtering — test paths only). Validation
+     * (a {@code null} set disables filtering for other roles — test paths only;
+     * REVIEW always requires an explicit non-null allowlist). Validation
      * tools come from {@link AgentConfigProperties.ValidationConfig#getAvailableTools()}
      * (coding only); MCP tools come from {@code mcpCatalog} and are passed
      * through unchanged — MCP filtering happens via {@code McpToolSelectionService}.
      */
     public List<ToolDescriptor> nativeDescriptors(Role role, McpToolCatalog mcpCatalog,
                                                   Set<String> allowedBuiltinTools) {
+        if (role == Role.REVIEW) {
+            allowedBuiltinTools = reviewToolNames(allowedBuiltinTools);
+        }
         List<ToolDescriptor> out = new ArrayList<>();
         for (Entry e : STATIC_TOOLS) {
             if (e.schema() == null) {                 // silent alias — never advertised

@@ -183,15 +183,7 @@ public class GitLabWebhookHandler {
             webhookPayload.getIssue().setPullRequest(issuePr);
         }
 
-        String botAlias = botWebhookService.getBotAlias(bot);
-        if (botWebhookService.isReviewAgainRequest(webhookPayload, botAlias)) {
-            if (botWebhookService.isReviewAgainRequestFromPullRequestAuthor(webhookPayload, botAlias)) {
-                botWebhookService.reviewPullRequest(bot, webhookPayload);
-                return ResponseEntity.ok("review triggered");
-            }
-            return ResponseEntity.ok("ignored");
-        }
-
+        // Review requests are routed to a review run inside handleBotCommand.
         botWebhookService.handleBotCommand(bot, webhookPayload);
         return ResponseEntity.ok("command received");
     }
