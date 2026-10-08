@@ -14,7 +14,7 @@ import org.remus.giteabot.prworkflow.WorkflowResult;
 import org.remus.giteabot.prworkflow.config.WorkflowSelectionService;
 import org.remus.giteabot.repository.RepositoryApiClient;
 import org.remus.giteabot.review.CodeReviewService;
-import org.remus.giteabot.review.ReviewSkipService;
+import org.remus.giteabot.review.state.ReviewRunLeaseService.LeaseAcquisitionTimeoutException;
 import org.remus.giteabot.review.grounding.DoubleCheckSettings;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
@@ -58,7 +58,6 @@ public class ReviewWorkflow implements PrWorkflow {
     public static final String ACTION_REVIEW_SUBMITTED = "reviewSubmitted";
     public static final String ACTION_PR_CLOSED = "prClosed";
 
-    private final ReviewSkipService skipService;
     private final CodeReviewServiceFactory codeReviewServiceFactory;
     private final GiteaClientFactory giteaClientFactory;
     private final WorkflowSelectionService selectionService;
@@ -67,8 +66,7 @@ public class ReviewWorkflow implements PrWorkflow {
     public ReviewWorkflow(CodeReviewServiceFactory codeReviewServiceFactory,
                           GiteaClientFactory giteaClientFactory,
                           @Lazy WorkflowSelectionService selectionService,
-                          ReviewChunkingProperties chunkingProperties, ReviewSkipService skipService) {
-        this.skipService = skipService;
+                          ReviewChunkingProperties chunkingProperties) {
         this.codeReviewServiceFactory = codeReviewServiceFactory;
         this.giteaClientFactory = giteaClientFactory;
         this.selectionService = selectionService;
@@ -87,7 +85,7 @@ public class ReviewWorkflow implements PrWorkflow {
 
     @Override
     public String description() {
-        return "Posts an AI code review as a single PR comment whenever a pull request is opened "
+        return "Posts a grounded AI code review with inline findings and a concise summary whenever a pull request is opened "
                 + "or updated, responds to @-mentions and inline review comments with conversational "
                 + "follow-ups, and optionally approves or requests changes based on the bot's "
                 + "configured post-review action.";
@@ -190,13 +188,23 @@ public class ReviewWorkflow implements PrWorkflow {
         RepositoryApiClient repositoryClient = giteaClientFactory.getApiClient(bot.getGitIntegration());
 
         context.requireActive("before invoking CodeReviewService.reviewPullRequest");
-        if (skipService.trySkip(context, KEY)) {
-            return WorkflowResult.skipped("No changes since last review");
+        CodeReviewService.ReviewRun run;
+        try {
+            run = codeReviewServiceFactory.create(bot, repositoryClient,
+                            maxDiffCharsPerChunk, maxDiffChunks, retryTruncatedChunkChars, excludedFilePatterns, doubleCheckSettings)
+                    .runReview(payload, null, context.runId(), context.explicitRequest(),
+                            bot.getGitIntegration() == null ? null : bot.getGitIntegration().getPostReviewAction(),
+                            context::requireActive);
+        } catch (LeaseAcquisitionTimeoutException e) {
+            context.requireActive("before clearing timed-out review acknowledgement");
+            try {
+                repositoryClient.removePullRequestReaction(payload.getRepository().getOwner().getLogin(),
+                        payload.getRepository().getName(), payload.getPullRequest().getNumber(), "eyes");
+            } catch (RuntimeException cleanupFailure) {
+                log.warn("Could not clear timed-out review acknowledgement: {}", cleanupFailure.getMessage());
+            }
+            throw e;
         }
-
-        CodeReviewService.ReviewRun run = codeReviewServiceFactory.create(bot, repositoryClient,
-                        maxDiffCharsPerChunk, maxDiffChunks, retryTruncatedChunkChars, excludedFilePatterns, doubleCheckSettings)
-                .runReview(payload, null, context::requireActive);
         boolean reviewed = run.reviewed();
 
         context.appendStep("review",
@@ -206,13 +214,6 @@ public class ReviewWorkflow implements PrWorkflow {
             context.appendStep("post-review-action",
                     "Skipped — a pending review blocks submitting the post-review action");
         } else if (reviewed && bot.getGitIntegration() != null) {
-            context.requireActive("before posting post-review action");
-
-            String owner = payload.getRepository().getOwner().getLogin();
-            String repo = payload.getRepository().getName();
-            Long prNumber = payload.getPullRequest().getNumber();
-            repositoryClient.postReviewAction(owner, repo, prNumber,
-                    bot.getGitIntegration().getPostReviewAction());
             context.appendStep("post-review-action",
                     "Forwarded post-review action: " + bot.getGitIntegration().getPostReviewAction());
         }

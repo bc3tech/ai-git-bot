@@ -7,6 +7,14 @@ import org.remus.giteabot.ai.AiClient;
 import org.remus.giteabot.config.ReviewConfigProperties;
 import org.remus.giteabot.repository.RepositoryApiClient;
 import org.remus.giteabot.review.grounding.DoubleCheckSettings;
+import org.remus.giteabot.review.grounding.FindingGroundingService;
+import org.remus.giteabot.review.grounding.PriorFindingsService;
+import org.remus.giteabot.review.grounding.ThreadActionExecutor;
+import org.remus.giteabot.review.state.ReviewRunLeaseService;
+import org.remus.giteabot.review.state.ReviewStateService;
+import org.remus.giteabot.review.ReviewSkipService;
+import org.remus.giteabot.audit.PrAuditEventService;
+import java.time.Duration;
 import org.remus.giteabot.session.SessionService;
 import org.remus.giteabot.systemsettings.SystemPrompt;
 
@@ -20,7 +28,9 @@ class CodeReviewServiceFactoryTest {
         AiClient client = mock(AiClient.class);
         when(clients.getClient(any())).thenReturn(client);
         CodeReviewServiceFactory factory = new CodeReviewServiceFactory(clients, mock(SessionService.class),
-                new ReviewConfigProperties());
+                new ReviewConfigProperties(), mock(ReviewRunLeaseService.class), mock(ReviewStateService.class),
+                mock(PriorFindingsService.class), mock(FindingGroundingService.class), mock(ThreadActionExecutor.class),
+                mock(PrAuditEventService.class), mock(ReviewSkipService.class), Duration.ofMinutes(10));
         Bot bot = new Bot();
         bot.setUsername("bot");
         SystemPrompt prompt = new SystemPrompt();

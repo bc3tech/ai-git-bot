@@ -151,7 +151,7 @@ class BotWebhookServiceTest {
         lenient().when(chunkingProperties.getRetryTruncatedChunkChars()).thenReturn(60_000);
         var reviewWorkflow = new org.remus.giteabot.prworkflow.review.ReviewWorkflow(
                 codeReviewServiceFactory, giteaClientFactory, workflowSelectionService,
-                chunkingProperties, org.mockito.Mockito.mock(org.remus.giteabot.review.ReviewSkipService.class));
+                chunkingProperties);
         lenient().when(prWorkflowOrchestrator.run(
                         any(Bot.class), any(WebhookPayload.class), eq("review"), anyMap()))
                 .thenAnswer(invocation -> {

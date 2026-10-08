@@ -141,6 +141,43 @@ class PrAuditEventServiceTest {
         }
     }
 
+    @Test
+    void reusedRunContextKeepsAllEventsAndHashChain() {
+        PrAuditEventRepository repository = mock(PrAuditEventRepository.class);
+        List<PrAuditEvent> persisted = new ArrayList<>();
+        when(repository.findTopByRunIdOrderByIdDesc(77L))
+                .thenAnswer(inv -> persisted.isEmpty() ? null : persisted.getLast());
+        when(repository.save(any(PrAuditEvent.class))).thenAnswer(inv -> {
+            PrAuditEvent event = inv.getArgument(0);
+            if (event.getId() == null) {
+                event.setId((long) persisted.size() + 1);
+                persisted.add(event);
+            }
+            return event;
+        });
+        PrAuditEventService service = new PrAuditEventService(repository);
+        PrAuditEvent context = auditContext();
+        service.recordFindingDisposition(context, AuditEventType.FINDING_DROPPED,
+                "first", "A.java", "NEW", 1, "return value();", "HIGH", "bug", "QUOTE",
+                "missing quote", "head", "base");
+        service.recordFindingDisposition(context, AuditEventType.FINDING_HELD,
+                "second", "B.java", "NEW", 2, "validateAccess();", "HIGH", "bug", "DOUBLE_CHECK",
+                "uncertain", "head", "base");
+        service.recordGroundingWarning(context, "THREAD", "retry action", "head", "base");
+
+        List<PrAuditEvent> events = persisted;
+        assertThat(events).hasSize(3);
+        assertThat(events).extracting(PrAuditEvent::getEventType).containsExactly(
+                AuditEventType.FINDING_DROPPED, AuditEventType.FINDING_HELD, AuditEventType.GROUNDING_WARNING);
+        assertThat(events).extracting(PrAuditEvent::getId).doesNotHaveDuplicates();
+        assertThat(events.getFirst().getPreviousHash()).isNull();
+        for (int i = 1; i < events.size(); i++) {
+            assertThat(events.get(i).getPreviousHash()).isEqualTo(events.get(i - 1).getHash());
+        }
+        assertThat(context.getId()).isNull();
+        assertThat(context.getEventType()).isNull();
+    }
+
     private static PrAuditEvent auditContext() {
         return PrAuditEvent.builder()
                 .botId(1L).repoOwner("auditor").repoName("repo").prNumber(2L).runId(77L)

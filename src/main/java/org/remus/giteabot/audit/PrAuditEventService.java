@@ -119,9 +119,7 @@ public class PrAuditEventService {
         payload.put("headSha", headSha);
         payload.put("effectiveBaseSha", effectiveBaseSha);
 
-        event.setEventType(dispositionType);
-        event.setEventPayloadJson(toJson(payload));
-        record(event);
+        record(runEvent(event, dispositionType, toJson(payload)));
     }
 
     /** Records a run-level warning that affected grounding behavior. */
@@ -136,9 +134,19 @@ public class PrAuditEventService {
         payload.put("headSha", headSha);
         payload.put("effectiveBaseSha", effectiveBaseSha);
 
-        event.setEventType(AuditEventType.GROUNDING_WARNING);
-        event.setEventPayloadJson(toJson(payload));
-        record(event);
+        record(runEvent(event, AuditEventType.GROUNDING_WARNING, toJson(payload)));
+    }
+
+    private static PrAuditEvent runEvent(PrAuditEvent context, AuditEventType type, String payload) {
+        return PrAuditEvent.builder()
+                .eventType(type).eventPayloadJson(payload)
+                .botId(context.getBotId()).repoOwner(context.getRepoOwner()).repoName(context.getRepoName())
+                .prNumber(context.getPrNumber()).runId(context.getRunId())
+                .actorType(context.getActorType()).actorId(context.getActorId())
+                .stepIndex(context.getStepIndex()).stepName(context.getStepName()).stepStatus(context.getStepStatus())
+                .aiSessionId(context.getAiSessionId()).aiUsageSessionId(context.getAiUsageSessionId())
+                .correlationId(context.getCorrelationId())
+                .build();
     }
 
     private static void requireRun(PrAuditEvent event) {

@@ -4,6 +4,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.NonNull;
 import org.remus.giteabot.ai.AiClient;
 import org.remus.giteabot.ai.AiMessage;
+import org.remus.giteabot.audit.PrAuditEvent;
+import org.remus.giteabot.audit.PrAuditEventService;
 import org.remus.giteabot.config.ReviewConfigProperties;
 import org.remus.giteabot.gitea.model.WebhookPayload;
 import org.remus.giteabot.prworkflow.WorkflowCancelledException;
@@ -15,12 +17,31 @@ import org.remus.giteabot.repository.model.ReviewPublicationResult;
 import org.remus.giteabot.repository.model.ReviewSnapshot;
 import org.remus.giteabot.review.enrichment.PrContextEnricher;
 import org.remus.giteabot.review.grounding.DoubleCheckSettings;
+import org.remus.giteabot.review.grounding.DoubleCheckService.Budget;
+import org.remus.giteabot.review.grounding.DoubleCheckService.Evidence;
+import org.remus.giteabot.review.grounding.FindingGroundingService;
+import org.remus.giteabot.review.grounding.GroundingResult;
+import org.remus.giteabot.review.grounding.PinnedSourceReader;
+import org.remus.giteabot.review.grounding.PriorFindingsDigest;
+import org.remus.giteabot.review.grounding.PriorFindingsService;
+import org.remus.giteabot.review.grounding.ThreadActionExecutor;
+import org.remus.giteabot.review.state.ReviewRevisionRecord;
+import org.remus.giteabot.review.state.ReviewRunLeaseService;
+import org.remus.giteabot.review.state.ReviewRunLeaseService.LeaseToken;
+import org.remus.giteabot.review.state.ReviewStateService;
 import org.remus.giteabot.session.ReviewSession;
 import org.remus.giteabot.session.SessionService;
 import org.springframework.web.client.HttpClientErrorException;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Core code-review business logic.  Not a Spring-managed singleton — instances
@@ -44,6 +65,15 @@ public class CodeReviewService {
     private final int retryTruncatedChunkChars;
     private final List<String> excludedFilePatterns;
     private final DoubleCheckSettings doubleCheckSettings;
+    private final Long botId;
+    private final ReviewRunLeaseService leases;
+    private final ReviewStateService state;
+    private final PriorFindingsService priors;
+    private final FindingGroundingService grounding;
+    private final ThreadActionExecutor threadActions;
+    private final PrAuditEventService audit;
+    private final ReviewSkipService skip;
+    private final Duration leaseTtl;
 
     public CodeReviewService(RepositoryApiClient repositoryClient, AiClient aiClient,
                              SessionService sessionService, String botUsername, ReviewConfigProperties reviewConfig,
@@ -60,13 +90,37 @@ public class CodeReviewService {
                              String sessionPromptKey, String reviewSystemPrompt,
                              int maxDiffCharsPerChunk, int maxDiffChunks, int retryTruncatedChunkChars,
                              String excludedFilePatterns, DoubleCheckSettings doubleCheckSettings) {
+        this(repositoryClient, aiClient, sessionService, botUsername, reviewConfig, sessionPromptKey,
+                reviewSystemPrompt, maxDiffCharsPerChunk, maxDiffChunks, retryTruncatedChunkChars,
+                excludedFilePatterns, doubleCheckSettings, null, null, null, null, null, null, null, null,
+                Duration.ofMinutes(10));
+    }
+
+    public CodeReviewService(RepositoryApiClient repositoryClient, AiClient aiClient,
+                             SessionService sessionService, String botUsername, ReviewConfigProperties reviewConfig,
+                             String sessionPromptKey, String reviewSystemPrompt,
+                             int maxDiffCharsPerChunk, int maxDiffChunks, int retryTruncatedChunkChars,
+                             String excludedFilePatterns, DoubleCheckSettings doubleCheckSettings,
+                             Long botId, ReviewRunLeaseService leases, ReviewStateService state,
+                             PriorFindingsService priors, FindingGroundingService grounding,
+                             ThreadActionExecutor threadActions, PrAuditEventService audit,
+                             ReviewSkipService skip, Duration leaseTtl) {
+        this.botId = botId;
+        this.leases = leases;
+        this.state = state;
+        this.priors = priors;
+        this.grounding = grounding;
+        this.threadActions = threadActions;
+        this.audit = audit;
+        this.skip = skip;
+        this.leaseTtl = leaseTtl;
         if (sessionPromptKey == null || sessionPromptKey.isBlank()) {
             throw new IllegalArgumentException("Session prompt key is required");
         }
         if (reviewSystemPrompt == null || reviewSystemPrompt.isBlank()) {
             throw new IllegalArgumentException("Review system prompt is required");
         }
-        this.doubleCheckSettings = java.util.Objects.requireNonNull(doubleCheckSettings);
+        this.doubleCheckSettings = Objects.requireNonNull(doubleCheckSettings);
         this.repositoryClient = repositoryClient;
         this.aiClient = aiClient;
         this.sessionService = sessionService;
@@ -93,115 +147,136 @@ public class CodeReviewService {
         return DiffFileFilter.filter(diff, excludedFilePatterns);
     }
 
-    public boolean reviewPullRequest(WebhookPayload payload, String promptName) {
-        return runReview(payload, promptName, ReviewFence.NONE).reviewed();
-    }
-
-    /**
-     * Outcome of a generated review.
-     *
-     * @param reviewed      whether a review was produced and delivered
-     * @param actionAllowed whether the caller may still submit the configured post-review action;
-     *                      false when submitting it would consume a pending review the bot owns
-     */
+    /** The formal action is already handled under the run lease; actionAllowed is false on pending-review conflicts. */
     public record ReviewRun(boolean reviewed, boolean actionAllowed) {
         static final ReviewRun SKIPPED = new ReviewRun(false, false);
     }
 
-    /**
-     * Reviews the pull request and publishes findings as inline comments where the provider and the
-     * diff allow it, with a concise summary for everything else.
-     *
-     * @param fence checked before every AI call, session write and remote write; a cancelled run
-     *              propagates its {@link WorkflowCancelledException} instead of being reported as a failure
-     */
-    public ReviewRun runReview(WebhookPayload payload, String promptName, ReviewFence fence) {
+    /** Runs generation, grounding, publication and revision tracking under one renewable PR lease. */
+    public ReviewRun runReview(WebhookPayload payload, String promptName, Long runId,
+                               boolean explicitRequest, PostReviewAction action, ReviewFence fence) {
+        Objects.requireNonNull(runId, "Review run ID is required");
+        Objects.requireNonNull(leases, "Review run services are required");
         String owner = payload.getRepository().getOwner().getLogin();
         String repo = payload.getRepository().getName();
         Long prNumber = payload.getPullRequest().getNumber();
-        String prTitle = payload.getPullRequest().getTitle();
-        String prBody = payload.getPullRequest().getBody();
-
-        log.info("Starting code review for PR #{} '{}' in {}/{}, prompt={}", prNumber, prTitle, owner, repo, promptName);
-
+        log.info("Starting fresh code review for PR #{} in {}/{}, run={}, prompt={}", prNumber, owner, repo, runId, promptName);
+        PrAuditEvent event = PrAuditEvent.builder().botId(botId).repoOwner(owner).repoName(repo)
+                .prNumber(prNumber).runId(runId).actorType("BOT").actorId(botUsername).build();
+        fence.requireActive("before acquiring review lease");
+        LeaseToken lease = leases.acquire(botId, owner, repo, prNumber);
+        ScheduledExecutorService heartbeat = Executors.newSingleThreadScheduledExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "standard-review-lease-" + runId);
+            thread.setDaemon(true);
+            return thread;
+        });
+        AtomicReference<RuntimeException> heartbeatFailure = new AtomicReference<>();
+        ReviewFence held = location -> {
+            fence.requireActive(location);
+            if (heartbeatFailure.get() != null) throw heartbeatFailure.get();
+            leases.assertHeld(lease);
+        };
+        ReviewSnapshot snapshot = null;
         try {
-            ReviewSnapshot snapshot = ReviewPublicationService.snapshot(repositoryClient, owner, repo, prNumber);
-            String diff = DiffFileFilter.filter(snapshot.diff(), excludedFilePatterns);
-            if (diff == null || diff.isBlank()) {
-                log.warn("No diff found for PR #{} in {}/{}", prNumber, owner, repo);
+            long interval = Math.max(1, leaseTtl.toNanos() / 3);
+            heartbeat.scheduleAtFixedRate(() -> {
+                try { leases.renew(lease); }
+                catch (RuntimeException e) { heartbeatFailure.compareAndSet(null, e); }
+            }, interval, interval, TimeUnit.NANOSECONDS);
+            held.requireActive("before reading current review snapshot");
+            snapshot = ReviewPublicationService.snapshot(repositoryClient, owner, repo, prNumber);
+            held.requireActive("before reconciling prior findings");
+            PriorFindingsDigest digest = priors.load(repositoryClient, lease, "review", botUsername);
+            if (skip.shouldSkip(repositoryClient, lease, "review", botUsername, snapshot, explicitRequest)) {
+                held.requireActive("before posting unchanged revision reply");
+                repositoryClient.postPullRequestComment(owner, repo, prNumber,
+                        "No changes since last review at `"
+                                + snapshot.headSha().substring(0, Math.min(7, snapshot.headSha().length())) + "`.");
+                clearAcknowledgement(payload, held);
                 return ReviewRun.SKIPPED;
             }
+            String diff = DiffFileFilter.filter(snapshot.diff(), excludedFilePatterns);
+            if (diff == null || diff.isBlank()) return ReviewRun.SKIPPED;
             snapshot = snapshot.withDiff(diff);
-
-            String systemPrompt = reviewSystemPrompt + ReviewOutputInstructions.standard();
-
-            // Build enriched context for better review quality
-            String headRef = resolveHeadRef(payload);
-            String additionalContext = gatherAdditionalContext(owner, repo, prNumber, diff, headRef, prBody);
-
-            ReviewSession session = sessionService.getOrCreateSession(owner, repo, prNumber, sessionPromptKey);
-
-            ReviewDocument document;
-            String sessionUserMessage;
-            if (session.getMessages().isEmpty()) {
-                // Initial review: use the chunked diff review with enriched context
-                log.debug("LLM request [reviewDiff] for PR #{}: systemPrompt length={}, prTitle='{}', prBody length={}, diff length={}, additionalContext length={}",
-                        prNumber, systemPrompt.length(), prTitle,
-                        prBody != null ? prBody.length() : 0, diff.length(),
-                        additionalContext != null ? additionalContext.length() : 0);
-                document = reviewDiffWithChunking(prTitle, prBody, diff, systemPrompt, additionalContext, fence);
-                sessionUserMessage = buildPrSummaryMessage(prTitle, prBody);
-            } else {
-                // PR was updated: use conversation history with the current diff and enriched context
-                String updateMessage = buildPrUpdateMessage(prTitle, diff);
-                List<AiMessage> history = sessionService.toAiMessages(session);
-                // Fresh enrichment is request-only context; keep file snapshots out of stored history.
-                String modelInput = additionalContext.isBlank()
-                        ? updateMessage
-                        : updateMessage + "\n\n**Additional Context:**\n" + additionalContext;
-
-                log.debug("LLM request [chat/update] for PR #{}: history size={}, modelInput length={}, systemPrompt length={}",
-                        prNumber, history.size(), modelInput.length(), systemPrompt.length());
-                fence.requireActive("before requesting the updated review");
-                String review = aiClient.chat(history, modelInput, systemPrompt, null);
-                log.debug("LLM response [chat/update] for PR #{}: length={}, preview='{}'",
-                        prNumber, review != null ? review.length() : 0,
-                        review != null ? review.substring(0, Math.min(review.length(), 500)) : "null");
-                document = ReviewOutputParser.parse(review).document();
-                sessionUserMessage = updateMessage;
-            }
-
-            if (document.isEmpty()) {
-                document = ReviewDocument.text(EMPTY_REVIEW);
-            }
-
-            // Conversational follow-ups read this history, so store the readable rendering.
-            fence.requireActive("before storing the review in the session");
-            sessionService.addMessage(session, "user", sessionUserMessage);
-            sessionService.addMessage(session, "assistant",
-                    ReviewPublicationService.render(document.summary(), document.findings(), false));
-
+            Evidence evidence = snapshot.pinned()
+                    ? new Evidence(new PinnedSourceReader(repositoryClient, owner, repo, snapshot.headSha()),
+                            new PinnedSourceReader(repositoryClient, owner, repo, snapshot.effectiveBaseSha()), diff)
+                    : new Evidence(null, null, diff);
+            String additionalContext = evidence.pinned()
+                    ? contextEnricher.buildEnrichedContext(owner, repo, prNumber, diff, snapshot.headSha(),
+                            payload.getPullRequest().getBody(), evidence.head()) : "";
+            String promptContext = additionalContext + "\n\n" + digest.promptBlock();
+            GeneratedReview generated = reviewDiffWithChunking(payload.getPullRequest().getTitle(),
+                    payload.getPullRequest().getBody(), diff, reviewSystemPrompt + ReviewOutputInstructions.standard(),
+                    promptContext, held);
+            ReviewDocument document = generated.document();
+            GroundingResult grounded = grounding.ground(document, evidence, digest,
+                    state.findingsForDedup(botId, owner, repo, prNumber, "review"), doubleCheckSettings, aiClient,
+                    new Budget(maxDiffCharsPerChunk, maxDiffChunks), event, held);
             ReviewPublicationService.Outcome outcome = ReviewPublicationService.publish(repositoryClient,
-                    owner, repo, prNumber, snapshot, document, PostReviewAction.NONE, this::formatReviewComment,
-                    fence);
-
-            // Compact context window to reduce memory/token usage for subsequent calls
+                    snapshot, document.summary(), grounded, PostReviewAction.NONE, this::formatReviewComment,
+                    held, state, leases, lease, "review", audit, event);
+            if (!outcome.delivered()) return ReviewRun.SKIPPED;
+            boolean threadFailures = !threadActions.execute(repositoryClient, lease, grounded.threadActions(),
+                    botUsername, event, snapshot.headSha(), snapshot.effectiveBaseSha(), held).isEmpty();
+            ReviewRevisionRecord revision = new ReviewRevisionRecord();
+            revision.setBotId(botId);
+            revision.setRepoOwner(owner);
+            revision.setRepoName(repo);
+            revision.setPrNumber(prNumber);
+            revision.setWorkflowKey("review");
+            revision.setHeadSha(snapshot.headSha());
+            revision.setEffectiveBaseSha(snapshot.effectiveBaseSha());
+            revision.setReviewedAt(Instant.now());
+            revision.setDegraded(grounded.degraded() || generated.incomplete() || threadFailures || !digest.commentsComplete());
+            if (digest.commentCursor() != null) {
+                revision.setLastSeenCommentAt(digest.commentCursor().timestamp());
+                revision.setLastSeenCommentId(digest.commentCursor().id());
+            }
+            held.requireActive("before recording reviewed revision");
+            state.upsertRevision(revision, lease);
+            held.requireActive("before appending grounded review to chat session");
+            ReviewSession session = sessionService.getOrCreateSession(owner, repo, prNumber, sessionPromptKey);
+            sessionService.addMessage(session, "user", buildPrSummaryMessage(payload.getPullRequest().getTitle(),
+                    payload.getPullRequest().getBody()));
+            held.requireActive("before storing grounded review rendering");
+            String safeSummary = grounded.summaryNotes().contains(FindingGroundingService.PARSE_FAILURE)
+                    ? FindingGroundingService.PARSE_FAILURE
+                    : document.summary() + "\n\n" + String.join("\n\n", grounded.summaryNotes());
+            sessionService.addMessage(session, "assistant",
+                    ReviewPublicationService.render(safeSummary, grounded.publish(), false));
+            held.requireActive("before compacting review session");
             sessionService.compactContextWindow(session);
-
-            log.info("Code review completed for PR #{} in {}/{} (inline {}: {}/{} confirmed)", prNumber, owner, repo,
-                    outcome.inlineStatus(), outcome.inlineConfirmed(), outcome.inlineRequested());
-            return new ReviewRun(outcome.delivered(),
-                    outcome.inlineStatus() != ReviewPublicationResult.Status.PENDING_CONFLICT);
-        } catch (WorkflowCancelledException e) {
+            boolean actionAllowed = outcome.inlineStatus() != ReviewPublicationResult.Status.PENDING_CONFLICT;
+            if (actionAllowed && action != null) {
+                held.requireActive("before posting post-review action");
+                repositoryClient.postReviewAction(owner, repo, prNumber, action);
+            }
+            log.info("Grounded review completed for PR #{} in {}/{} (inline {}: {}/{} confirmed)",
+                    prNumber, owner, repo, outcome.inlineStatus(), outcome.inlineConfirmed(), outcome.inlineRequested());
+            return new ReviewRun(true, actionAllowed);
+        } catch (ReviewRunLeaseService.LeaseLostException e) {
+            audit.recordGroundingWarning(event, "REVIEW", "lease lost",
+                    snapshot == null ? null : snapshot.headSha(), snapshot == null ? null : snapshot.effectiveBaseSha());
             throw e;
-        } catch (Exception e) {
-            log.error("Code review failed for PR #{} in {}/{}: {}", prNumber, owner, repo, e.getMessage(), e);
-            // Propagate so the workflow run is recorded as FAILED and the trigger can be told.
-            throw e instanceof RuntimeException re ? re : new IllegalStateException("Code review failed", e);
+        } finally {
+            heartbeat.shutdownNow();
+            leases.release(lease);
         }
     }
 
-    private static final String EMPTY_REVIEW = "⚠️ *The review feedback was empty or could not be generated.*";
+    private void clearAcknowledgement(WebhookPayload payload, ReviewFence fence) {
+        String owner = payload.getRepository().getOwner().getLogin();
+        String repo = payload.getRepository().getName();
+        fence.requireActive("before clearing review acknowledgement");
+        try { repositoryClient.removePullRequestReaction(owner, repo, payload.getPullRequest().getNumber(), "eyes"); }
+        catch (RuntimeException e) { log.warn("Could not clear PR review acknowledgement: {}", e.getMessage()); }
+        if (payload.getComment() != null && payload.getComment().getId() != null) {
+            fence.requireActive("before clearing comment review acknowledgement");
+            try { repositoryClient.removeReaction(owner, repo, payload.getComment().getId(), "eyes"); }
+            catch (RuntimeException e) { log.warn("Could not clear comment review acknowledgement: {}", e.getMessage()); }
+        }
+    }
 
     public void handleBotCommand(WebhookPayload payload, String promptName) {
         String owner = payload.getRepository().getOwner().getLogin();
@@ -614,14 +689,6 @@ public class CodeReviewService {
         return sb.toString();
     }
 
-    private String buildPrUpdateMessage(String prTitle, String diff) {
-        // Truncate diff for conversation context to avoid excessively large messages
-        String truncatedDiff = diff.length() > MAX_DIFF_CHARS_FOR_CONTEXT
-                ? diff.substring(0, MAX_DIFF_CHARS_FOR_CONTEXT) + "\n...(truncated)" : diff;
-        return "The pull request '" + prTitle + "' has been updated with new changes. " +
-                "Please review the updated diff:\n```diff\n" + truncatedDiff + "\n```";
-    }
-
     String buildInlineCommentContext(String filePath, String diffHunk, String commentBody) {
         StringBuilder sb = new StringBuilder();
         sb.append("Someone left an inline review comment on file `").append(filePath).append("`.\n\n");
@@ -695,7 +762,7 @@ public class CodeReviewService {
      * Reviews a diff by splitting it into chunks, sending each to the AI provider,
      * and merging the structured results.
      */
-    private ReviewDocument reviewDiffWithChunking(String prTitle, String prBody, String diff,
+    private GeneratedReview reviewDiffWithChunking(String prTitle, String prBody, String diff,
                                                   String systemPrompt, String additionalContext, ReviewFence fence) {
         log.info("Requesting code review from AI provider model={} (via chunking)", aiClient.getModel());
         ChunkingResult chunkingResult = splitDiffIntoChunks(diff);
@@ -711,9 +778,9 @@ public class CodeReviewService {
             fence.requireActive("before reviewing diff chunk " + chunkNumber + "/" + totalChunks);
             try {
                 String review = reviewSingleChunk(prTitle, prBody, chunk, chunkNumber, totalChunks, false,
-                        systemPrompt, additionalContext);
+                        systemPrompt, additionalContext, fence);
                 reviews.add(ReviewOutputParser.parse(review).document());
-            } catch (WorkflowCancelledException e) {
+            } catch (WorkflowCancelledException | ReviewRunLeaseService.LeaseLostException e) {
                 throw e;
             } catch (Exception e) {
                 failedChunks++;
@@ -721,8 +788,8 @@ public class CodeReviewService {
                 aiClient.reportError(e);
                 log.warn("Review failed for chunk {}/{}: {}", chunkNumber, totalChunks, e.getMessage());
                 if (totalChunks > 1) {
-                    reviews.add(ReviewDocument.text("_Review for diff chunk " + chunkNumber + "/" + totalChunks
-                            + " failed: " + e.getMessage() + "_"));
+                    reviews.add(new ReviewDocument("_Review for diff chunk " + chunkNumber + "/" + totalChunks
+                            + " failed._", List.of(), true));
                 }
             }
         }
@@ -732,20 +799,23 @@ public class CodeReviewService {
         }
 
         if (failedChunks > 0) {
-            reviews.add(ReviewDocument.text("**Note:** " + failedChunks + " of " + chunkingResult.chunks().size()
-                    + " diff chunk(s) could not be reviewed due to API errors."));
+            reviews.add(new ReviewDocument("**Note:** " + failedChunks + " of " + chunkingResult.chunks().size()
+                    + " diff chunk(s) could not be reviewed due to API errors.", List.of(), true));
         }
 
         if (chunkingResult.wasTruncated()) {
-            reviews.add(ReviewDocument.text("**Warning:** review is incomplete because the diff was truncated after "
-                    + maxDiffChunks + " chunks."));
+            reviews.add(new ReviewDocument("**Warning:** review is incomplete because the diff was truncated after "
+                    + maxDiffChunks + " chunks.", List.of(), true));
         }
 
-        return ReviewOutputParser.merge(reviews);
+        return new GeneratedReview(ReviewOutputParser.merge(reviews), failedChunks > 0 || chunkingResult.wasTruncated());
     }
 
+    private record GeneratedReview(ReviewDocument document, boolean incomplete) {}
+
     private String reviewSingleChunk(String prTitle, String prBody, String diffChunk, int chunkNumber, int totalChunks,
-                                     boolean isRetry, String systemPrompt, String additionalContext) {
+                                     boolean isRetry, String systemPrompt, String additionalContext, ReviewFence fence) {
+        fence.requireActive("before submitting review prompt");
         try {
             return reviewSingleChunkInternal(prTitle, prBody, diffChunk, chunkNumber, totalChunks, isRetry,
                     systemPrompt, additionalContext);
@@ -758,7 +828,7 @@ public class CodeReviewService {
                         retryTruncatedChunkChars);
                 String truncatedChunk = truncateDiff(diffChunk, retryTruncatedChunkChars);
                 return reviewSingleChunk(prTitle, prBody, truncatedChunk, chunkNumber, totalChunks, true,
-                        systemPrompt, additionalContext);
+                        systemPrompt, additionalContext, fence);
             }
             throw e;
         }

@@ -60,9 +60,22 @@ class ExplicitReviewSkipWorkflowTest {
     private PrWorkflow workflow(String key) {
         WorkflowSelectionService selection = mock(WorkflowSelectionService.class);
         if (key.equals("review")) {
-            when(standardFactory.create(any(), any(), anyInt(), anyInt(), anyInt(), any(), any())).thenReturn(standard);
-            when(standard.runReview(any(), any(), any())).thenReturn(new CodeReviewService.ReviewRun(true, true));
-            return new ReviewWorkflow(standardFactory, clients, selection, new ReviewChunkingProperties(), skip);
+            CodeReviewService service = standard;
+            if (context.explicitRequest()) {
+                service = new CodeReviewService(api, mock(org.remus.giteabot.ai.AiClient.class),
+                        mock(org.remus.giteabot.session.SessionService.class), "bot",
+                        new org.remus.giteabot.config.ReviewConfigProperties(), "prompt:1", "Review", 120000, 8, 60000, "",
+                        org.remus.giteabot.review.grounding.DoubleCheckSettings.defaults(), 1L, leases, state,
+                        new org.remus.giteabot.review.grounding.PriorFindingsService(state),
+                        mock(org.remus.giteabot.review.grounding.FindingGroundingService.class),
+                        mock(org.remus.giteabot.review.grounding.ThreadActionExecutor.class),
+                        mock(org.remus.giteabot.audit.PrAuditEventService.class), skip, java.time.Duration.ofMinutes(10));
+            } else {
+                when(standard.runReview(any(), any(), any(), anyBoolean(), any(), any()))
+                        .thenReturn(new CodeReviewService.ReviewRun(true, true));
+            }
+            when(standardFactory.create(any(), any(), anyInt(), anyInt(), anyInt(), any(), any())).thenReturn(service);
+            return new ReviewWorkflow(standardFactory, clients, selection, new ReviewChunkingProperties());
         }
         when(agentFactory.create(any(), any())).thenReturn(agent);
         when(agent.reviewPullRequest(any(), anyInt(), anyBoolean(), anyString(), any(), any(), any(), any(), anyBoolean()))
@@ -105,7 +118,7 @@ class ExplicitReviewSkipWorkflowTest {
         assertThat(workflow(key).run(context).status()).isEqualTo(WorkflowResultStatus.SUCCESS);
         verifyNoInteractions(state, leases);
         verify(api, never()).postPullRequestComment(any(), any(), any(), any());
-        if (key.equals("review")) verify(standard).runReview(any(), any(), any());
+        if (key.equals("review")) verify(standard).runReview(any(), any(), any(), anyBoolean(), any(), any());
         else verify(agent).reviewPullRequest(any(), anyInt(), anyBoolean(), anyString(), any(), any(), any(), any(), anyBoolean());
     }
 }

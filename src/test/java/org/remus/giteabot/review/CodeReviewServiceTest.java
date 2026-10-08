@@ -21,7 +21,12 @@ import org.remus.giteabot.repository.model.ReviewSnapshot;
 import org.remus.giteabot.session.ReviewSession;
 import org.remus.giteabot.session.SessionService;
 
+import org.remus.giteabot.audit.PrAuditEventService;
+import org.remus.giteabot.review.grounding.*;
+import org.remus.giteabot.review.state.*;
+import java.time.Duration;
 import java.util.List;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -40,6 +45,8 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
 
 @ExtendWith(MockitoExtension.class)
 class CodeReviewServiceTest {
@@ -57,13 +64,33 @@ class CodeReviewServiceTest {
     private static final String SESSION_PROMPT_KEY = "system-prompt:1";
     private static final String REVIEW_PROMPT = TEST_PROMPT + ReviewOutputInstructions.standard();
 
+    private static final String HEAD = "a".repeat(40);
+    private static final String BASE = "b".repeat(40);
+    private final ReviewRunLeaseService leases = mock(ReviewRunLeaseService.class);
+    private final ReviewStateService state = mock(ReviewStateService.class);
+    private final PriorFindingsService priors = mock(PriorFindingsService.class);
+    private final PrAuditEventService audits = mock(PrAuditEventService.class);
+    private final DoubleCheckService checks = mock(DoubleCheckService.class);
+    private final ThreadActionExecutor threads = mock(ThreadActionExecutor.class);
+    private final ReviewSkipService skip = mock(ReviewSkipService.class);
+    private final ReviewRunLeaseService.LeaseToken lease = new ReviewRunLeaseService.LeaseToken(
+            1L, "testowner", "testrepo", 1L, "worker", 1L);
     private CodeReviewService codeReviewService;
 
     @BeforeEach
     void setUp() {
+        lenient().when(leases.acquire(1L, "testowner", "testrepo", 1L)).thenReturn(lease);
+        lenient().when(priors.load(repositoryClient, lease, "review", "ai_bot"))
+                .thenReturn(new PriorFindingsDigest(List.of(), true, null));
+        lenient().when(checks.check(anyList(), any(), any(), any(), any(), any(), any())).thenAnswer(inv -> {
+            List<DoubleCheckService.Candidate> candidates = inv.getArgument(0);
+            return candidates.stream().collect(Collectors.toMap(c -> c.finding().id(),
+                    c -> new DoubleCheckService.DoubleCheckOutcome(DoubleCheckService.Verdict.KEEP, "verified")));
+        });
         codeReviewService = new CodeReviewService(repositoryClient, aiClient,
                 sessionService, "ai_bot", new ReviewConfigProperties(), SESSION_PROMPT_KEY, TEST_PROMPT,
-                120000, 8, 60000, "");
+                120000, 8, 60000, "", DoubleCheckSettings.defaults(), 1L, leases, state, priors,
+                new FindingGroundingService(checks, audits), threads, audits, skip, Duration.ofMinutes(10));
     }
 
     @Test
@@ -78,9 +105,9 @@ class CodeReviewServiceTest {
         when(aiClient.submitReviewPrompt(eq(REVIEW_PROMPT), isNull(), anyString()))
                 .thenReturn("{\"summary\": \"Looks good!\", \"findings\": []}");
 
-        codeReviewService.reviewPullRequest(payload, null);
+        codeReviewService.runReview(payload, null, 1L, false, null, ReviewFence.NONE).reviewed();
 
-        verify(repositoryClient).postReview(
+        verify(repositoryClient).postReviewReturningId(
                 eq("testowner"), eq("testrepo"), eq(1L), contains("Looks good!"), eq(PostReviewAction.NONE));
         verify(sessionService).getOrCreateSession("testowner", "testrepo", 1L, SESSION_PROMPT_KEY);
         verify(sessionService, times(2)).addMessage(any(), anyString(), anyString());
@@ -90,7 +117,8 @@ class CodeReviewServiceTest {
     void reviewPullRequest_excludedFilePatterns_stripsMatchingFilesFromDiff() {
         codeReviewService = new CodeReviewService(repositoryClient, aiClient,
                 sessionService, "ai_bot", new ReviewConfigProperties(), SESSION_PROMPT_KEY, TEST_PROMPT,
-                120000, 8, 60000, "package-lock.json, *.min.js");
+                120000, 8, 60000, "package-lock.json, *.min.js", DoubleCheckSettings.defaults(), 1L, leases, state, priors,
+                new FindingGroundingService(checks, audits), threads, audits, skip, Duration.ofMinutes(10));
         WebhookPayload payload = createTestPayload();
         ReviewSession session = new ReviewSession("testowner", "testrepo", 1L, null);
 
@@ -108,7 +136,7 @@ class CodeReviewServiceTest {
         when(aiClient.submitReviewPrompt(eq(REVIEW_PROMPT), isNull(), anyString()))
                 .thenReturn("Looks good!");
 
-        codeReviewService.reviewPullRequest(payload, null);
+        codeReviewService.runReview(payload, null, 1L, false, null, ReviewFence.NONE).reviewed();
 
         ArgumentCaptor<String> userMessage = ArgumentCaptor.forClass(String.class);
         verify(aiClient).submitReviewPrompt(eq(REVIEW_PROMPT), isNull(), userMessage.capture());
@@ -125,7 +153,7 @@ class CodeReviewServiceTest {
         when(repositoryClient.getPullRequestDiff("testowner", "testrepo", 1L))
                 .thenReturn("");
 
-        codeReviewService.reviewPullRequest(payload, null);
+        codeReviewService.runReview(payload, null, 1L, false, null, ReviewFence.NONE).reviewed();
 
         verify(aiClient, never()).submitReviewPrompt(anyString(), anyString(), anyString());
         verify(repositoryClient, never()).postReview(anyString(), anyString(), anyLong(), anyString(), any());
@@ -143,9 +171,9 @@ class CodeReviewServiceTest {
         when(aiClient.submitReviewPrompt(eq(REVIEW_PROMPT), isNull(), anyString()))
                 .thenReturn("{\"summary\": \"Bot prompt used.\", \"findings\": []}");
 
-        codeReviewService.reviewPullRequest(payload, "security");
+        codeReviewService.runReview(payload, "security", 1L, false, null, ReviewFence.NONE).reviewed();
 
-        verify(repositoryClient).postReview(
+        verify(repositoryClient).postReviewReturningId(
                 eq("testowner"), eq("testrepo"), eq(1L), contains("Bot prompt used."), eq(PostReviewAction.NONE));
     }
 
@@ -153,7 +181,8 @@ class CodeReviewServiceTest {
     void reviewPullRequest_withConfiguredSystemPrompt_usesBotPrompt() {
         codeReviewService = new CodeReviewService(repositoryClient, aiClient,
                 sessionService, "ai_bot", new ReviewConfigProperties(), SESSION_PROMPT_KEY, "Configured review prompt",
-                120000, 8, 60000, "");
+                120000, 8, 60000, "", DoubleCheckSettings.defaults(), 1L, leases, state, priors,
+                new FindingGroundingService(checks, audits), threads, audits, skip, Duration.ofMinutes(10));
         WebhookPayload payload = createTestPayload();
         ReviewSession session = new ReviewSession("testowner", "testrepo", 1L, null);
 
@@ -164,75 +193,61 @@ class CodeReviewServiceTest {
         when(aiClient.submitReviewPrompt(eq("Configured review prompt" + ReviewOutputInstructions.standard()), isNull(), anyString()))
                 .thenReturn("{\"summary\": \"Configured prompt used.\", \"findings\": []}");
 
-        codeReviewService.reviewPullRequest(payload, null);
+        codeReviewService.runReview(payload, null, 1L, false, null, ReviewFence.NONE).reviewed();
 
-        verify(repositoryClient).postReview(
+        verify(repositoryClient).postReviewReturningId(
                 eq("testowner"), eq("testrepo"), eq(1L), contains("Configured prompt used."), eq(PostReviewAction.NONE));
     }
 
     @Test
-    void reviewPullRequest_existingSession_usesChat() {
+    void reviewPullRequest_existingSessionUsesFreshChunksWithoutHistory() {
         WebhookPayload payload = createTestPayload();
         ReviewSession session = new ReviewSession("testowner", "testrepo", 1L, null);
-        session.addMessage("user", "Previous question");
-        session.addMessage("assistant", "Previous answer");
-
+        session.addMessage("user", "old diff must not be replayed");
+        session.addMessage("assistant", "old fabricated finding");
         when(sessionService.getOrCreateSession("testowner", "testrepo", 1L, SESSION_PROMPT_KEY)).thenReturn(session);
-        when(sessionService.addMessage(any(), anyString(), anyString())).thenReturn(session);
-        when(sessionService.toAiMessages(session)).thenReturn(List.of(
-                AiMessage.builder().role("user").content("Previous question").build(),
-                AiMessage.builder().role("assistant").content("Previous answer").build()
-        ));
-        when(repositoryClient.getPullRequestDiff("testowner", "testrepo", 1L))
-                .thenReturn("new diff content");
-        when(aiClient.chat(anyList(), anyString(), eq(REVIEW_PROMPT), isNull()))
-                .thenReturn("Updated review");
+        when(repositoryClient.getPullRequestDiff("testowner", "testrepo", 1L)).thenReturn("new diff content");
+        when(aiClient.submitReviewPrompt(eq(REVIEW_PROMPT), isNull(), anyString()))
+                .thenReturn("{\"summary\":\"Fresh review\",\"findings\":[]}");
 
-        codeReviewService.reviewPullRequest(payload, null);
+        assertTrue(codeReviewService.runReview(payload, null, 1L, false, null, ReviewFence.NONE).reviewed());
 
-        ArgumentCaptor<String> modelInput = ArgumentCaptor.forClass(String.class);
-        verify(aiClient).chat(anyList(), modelInput.capture(), eq(REVIEW_PROMPT), isNull());
-        assertTrue(modelInput.getValue().contains("new diff content"));
-        assertFalse(modelInput.getValue().contains("**Additional Context:**"));
-        verify(sessionService).addMessage(session, "user", modelInput.getValue());
-        verify(aiClient, never()).submitReviewPrompt(anyString(), anyString(), anyString());
+        ArgumentCaptor<String> input = ArgumentCaptor.forClass(String.class);
+        verify(aiClient).submitReviewPrompt(eq(REVIEW_PROMPT), isNull(), input.capture());
+        assertTrue(input.getValue().contains("new diff content"));
+        assertFalse(input.getValue().contains("old diff"));
+        verify(aiClient, never()).chat(anyList(), anyString(), anyString(), any());
+        verify(sessionService, never()).toAiMessages(any());
+        verify(sessionService).addMessage(eq(session), eq("assistant"), contains("Fresh review"));
+        verify(leases).release(lease);
     }
 
     @Test
-    void reviewPullRequest_existingSessionIncludesFreshContextButStoresOnlyUpdate() {
+    void reviewPullRequestPinsEnrichmentAndDoesNotStoreCodeSnapshots() {
         WebhookPayload payload = createTestPayload();
-        payload.setAction("synchronize");
         ReviewSession session = new ReviewSession("testowner", "testrepo", 1L, null);
-        session.addMessage("user", "Previous question");
-        session.addMessage("assistant", "Previous answer");
-        List<AiMessage> history = List.of(
-                AiMessage.builder().role("user").content("Previous question").build(),
-                AiMessage.builder().role("assistant").content("Previous answer").build());
+        session.addMessage("assistant", "previous review");
         String diff = "diff --git a/src/Foo.java b/src/Foo.java\n+int x = 1;";
-        String latestFileContent = "class Foo { int x = 1; int unchangedField = 2; }";
-
+        String code = "class Foo { int x = 1; int unchangedField = 2; }";
         when(sessionService.getOrCreateSession("testowner", "testrepo", 1L, SESSION_PROMPT_KEY)).thenReturn(session);
-        when(sessionService.addMessage(any(), anyString(), anyString())).thenReturn(session);
-        when(sessionService.toAiMessages(session)).thenReturn(history);
-        when(repositoryClient.getPullRequestDiff("testowner", "testrepo", 1L)).thenReturn(diff);
-        when(repositoryClient.getFileContent("testowner", "testrepo", "src/Foo.java", "feature-branch"))
-                .thenReturn(latestFileContent);
-        when(aiClient.chat(anyList(), anyString(), eq(REVIEW_PROMPT), isNull())).thenReturn("Updated review");
+        when(repositoryClient.getReviewSnapshot("testowner", "testrepo", 1L))
+                .thenReturn(new ReviewSnapshot(HEAD, BASE, BASE, diff, true));
+        when(repositoryClient.getFileContent("testowner", "testrepo", "src/Foo.java", HEAD)).thenReturn(code);
+        when(aiClient.submitReviewPrompt(eq(REVIEW_PROMPT), isNull(), anyString()))
+                .thenReturn("{\"summary\":\"Fresh review\",\"findings\":[]}");
 
-        assertTrue(codeReviewService.reviewPullRequest(payload, null));
+        assertTrue(codeReviewService.runReview(payload, null, 1L, false, null, ReviewFence.NONE).reviewed());
 
-        ArgumentCaptor<String> modelInput = ArgumentCaptor.forClass(String.class);
-        verify(aiClient).chat(eq(history), modelInput.capture(), eq(REVIEW_PROMPT), isNull());
-        assertTrue(modelInput.getValue().contains(diff));
-        assertTrue(modelInput.getValue().contains("**Additional Context:**"));
-        assertTrue(modelInput.getValue().contains(latestFileContent));
-
-        ArgumentCaptor<String> storedMessage = ArgumentCaptor.forClass(String.class);
-        verify(sessionService).addMessage(eq(session), eq("user"), storedMessage.capture());
-        assertTrue(storedMessage.getValue().contains(diff));
-        assertFalse(storedMessage.getValue().contains("**Additional Context:**"));
-        assertFalse(storedMessage.getValue().contains(latestFileContent));
-        verify(sessionService).addMessage(session, "assistant", "Updated review");
+        verify(repositoryClient).getFileContent("testowner", "testrepo", "src/Foo.java", HEAD);
+        verify(repositoryClient).getRepositoryTree("testowner", "testrepo", HEAD);
+        verify(repositoryClient, never()).getFileContent(anyString(), anyString(), anyString(), eq("feature-branch"));
+        ArgumentCaptor<String> input = ArgumentCaptor.forClass(String.class);
+        verify(aiClient).submitReviewPrompt(eq(REVIEW_PROMPT), isNull(), input.capture());
+        assertTrue(input.getValue().contains(code));
+        ArgumentCaptor<String> stored = ArgumentCaptor.forClass(String.class);
+        verify(sessionService).addMessage(eq(session), eq("user"), stored.capture());
+        assertFalse(stored.getValue().contains(code));
+        verify(sessionService, never()).toAiMessages(any());
     }
 
     @Test
@@ -768,8 +783,8 @@ class CodeReviewServiceTest {
         WebhookPayload payload = createTestPayload();
         ReviewSession session = new ReviewSession("testowner", "testrepo", 1L, null);
         String diff = "diff --git a/src/A.java b/src/A.java\n--- a/src/A.java\n+++ b/src/A.java\n"
-                + "@@ -1,1 +1,2 @@\n one\n+two\n";
-        ReviewSnapshot snapshot = new ReviewSnapshot("head", "base", null, diff, true);
+                + "@@ -1,1 +1,2 @@\n one\n+return value();\n";
+        ReviewSnapshot snapshot = new ReviewSnapshot(HEAD, BASE, BASE, diff, true);
 
         when(sessionService.getOrCreateSession("testowner", "testrepo", 1L, SESSION_PROMPT_KEY)).thenReturn(session);
         when(sessionService.addMessage(any(), anyString(), anyString())).thenReturn(session);
@@ -777,10 +792,12 @@ class CodeReviewServiceTest {
         when(aiClient.submitReviewPrompt(eq(REVIEW_PROMPT), isNull(), anyString())).thenReturn("""
                 ```json
                 {"summary": "One issue.", "findings": [
-                  {"path": "src/A.java", "side": "new", "line": 2, "severity": "MEDIUM", "body": "Name this."}
+                  {"path": "src/A.java", "side": "new", "line": 2, "severity": "MEDIUM", "body": "Name this.", "quote": "return value();"}
                 ]}
                 ```
                 """);
+        when(repositoryClient.getFileContent("testowner", "testrepo", "src/A.java", HEAD))
+                .thenReturn("one\nreturn value();\n");
         when(repositoryClient.publishInlineReview(any(), any(), any(), any(), anyString(), anyList(), any()))
                 .thenAnswer(inv -> {
                     List<ReviewAnchorComment> anchors = inv.getArgument(5);
@@ -790,7 +807,7 @@ class CodeReviewServiceTest {
                                     ReviewPublicationResult.Delivery.CONFIRMED, "1")).toList(), null);
                 });
 
-        CodeReviewService.ReviewRun run = codeReviewService.runReview(payload, null, ReviewFence.NONE);
+        CodeReviewService.ReviewRun run = codeReviewService.runReview(payload, null, 1L, false, null, ReviewFence.NONE);
 
         assertTrue(run.reviewed());
         assertTrue(run.actionAllowed());
@@ -812,41 +829,37 @@ class CodeReviewServiceTest {
         WebhookPayload payload = createTestPayload();
         ReviewSession session = new ReviewSession("testowner", "testrepo", 1L, null);
         String diff = "diff --git a/src/A.java b/src/A.java\n--- a/src/A.java\n+++ b/src/A.java\n"
-                + "@@ -1,1 +1,2 @@\n one\n+two\n";
+                + "@@ -1,1 +1,2 @@\n one\n+return value();\n";
 
         when(sessionService.getOrCreateSession("testowner", "testrepo", 1L, SESSION_PROMPT_KEY)).thenReturn(session);
         when(sessionService.addMessage(any(), anyString(), anyString())).thenReturn(session);
         when(repositoryClient.getReviewSnapshot("testowner", "testrepo", 1L))
-                .thenReturn(new ReviewSnapshot("head", "base", null, diff, true));
+                .thenReturn(new ReviewSnapshot(HEAD, BASE, BASE, diff, true));
         when(aiClient.submitReviewPrompt(eq(REVIEW_PROMPT), isNull(), anyString())).thenReturn(
                 "```json\n{\"summary\": \"s\", \"findings\": [{\"path\": \"src/A.java\", \"side\": \"new\", "
-                        + "\"line\": 2, \"body\": \"x\"}]}\n```");
+                        + "\"line\": 2, \"body\": \"x\", \"quote\": \"return value();\"}]}\n```");
+        when(repositoryClient.getFileContent("testowner", "testrepo", "src/A.java", HEAD))
+                .thenReturn("one\nreturn value();\n");
         when(repositoryClient.publishInlineReview(any(), any(), any(), any(), anyString(), anyList(), any()))
                 .thenAnswer(inv -> ReviewPublicationResult.notWritten(
                         ReviewPublicationResult.Status.PENDING_CONFLICT, inv.getArgument(5), "pending"));
 
-        CodeReviewService.ReviewRun run = codeReviewService.runReview(payload, null, ReviewFence.NONE);
+        CodeReviewService.ReviewRun run = codeReviewService.runReview(payload, null, 1L, false, null, ReviewFence.NONE);
 
         assertTrue(run.reviewed());
         assertFalse(run.actionAllowed());
-        verify(repositoryClient).postPullRequestComment(eq("testowner"), eq("testrepo"), eq(1L), contains("x"));
+        verify(repositoryClient).postPullRequestCommentReturningId(eq("testowner"), eq("testrepo"), eq(1L), contains("x"));
     }
 
     @Test
     void runReview_cancellationPropagatesAndSkipsWrites() {
         WebhookPayload payload = createTestPayload();
-        ReviewSession session = new ReviewSession("testowner", "testrepo", 1L, null);
-
-        when(sessionService.getOrCreateSession("testowner", "testrepo", 1L, SESSION_PROMPT_KEY)).thenReturn(session);
-        when(repositoryClient.getPullRequestDiff("testowner", "testrepo", 1L))
-                .thenReturn("diff --git a/file.txt b/file.txt\n+new line");
-
         ReviewFence cancelled = location -> {
             throw new WorkflowCancelledException("superseded " + location);
         };
 
         assertThrows(WorkflowCancelledException.class,
-                () -> codeReviewService.runReview(payload, null, cancelled));
+                () -> codeReviewService.runReview(payload, null, 1L, false, null, cancelled));
         verify(aiClient, never()).submitReviewPrompt(anyString(), any(), anyString());
         verify(repositoryClient, never()).postReview(any(), any(), any(), any(), any());
         verify(sessionService, never()).addMessage(any(), anyString(), anyString());
@@ -864,12 +877,12 @@ class CodeReviewServiceTest {
         when(aiClient.submitReviewPrompt(eq(REVIEW_PROMPT), isNull(), anyString()))
                 .thenReturn("");
 
-        codeReviewService.reviewPullRequest(payload, null);
+        codeReviewService.runReview(payload, null, 1L, false, null, ReviewFence.NONE).reviewed();
 
-        verify(repositoryClient).postReview(
+        verify(repositoryClient).postReviewReturningId(
                 eq("testowner"), eq("testrepo"), eq(1L), contains(org.remus.giteabot.review.grounding.FindingGroundingService.PARSE_FAILURE), eq(PostReviewAction.NONE));
         verify(sessionService).addMessage(eq(session), eq("user"), contains("Test PR"));
-        verify(sessionService).addMessage(eq(session), eq("assistant"), contains("was empty or could not be generated"));
+        verify(sessionService).addMessage(eq(session), eq("assistant"), contains("review output could not be parsed"));
     }
 
     @Test

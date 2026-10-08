@@ -179,6 +179,31 @@ history. Timestamp ties and missing timestamps are conservatively new; the
 latest answered comment ID prevents repeating replies to the same dispute.
 This service is a grounding foundation; review workflows wire it in separately.
 
+## Standard grounded reviews
+
+`ReviewWorkflow` passes the run identity, explicit-request flag, and configured
+formal action to `CodeReviewService`. The service acquires the per-PR lease before
+reading a current snapshot and renews it on a heartbeat until the entire run ends.
+Pending findings are reconciled before checking for an unchanged explicit request.
+A lease wait timeout propagates through the existing webhook failure-notice path;
+the workflow also removes the PR acknowledgement.
+
+Every generation uses fresh diff chunks and labeled prior-findings history, never
+the stored chat transcript. Changed-file enrichment reads the head SHA through a
+cached `PinnedSourceReader`; unreadable pinned text stops the run rather than
+falling back to a branch. Deleted and binary files are not requested for text
+enrichment. Unpinned reviews use diff-only evidence and summary publication.
+
+Grounded publication records findings before provider writes. Thread actions run
+under the same fencing token, then successful delivery updates `review_revision`
+with the effective base, head, comment cursor, and degraded state. Failed thread
+actions and incomplete comment scans force a later explicit request to retry.
+Only the safe grounded rendering is appended to the chat session. The configured
+post-review action runs before lease release and is suppressed on pending-review
+conflicts. Conversational handlers continue to use session history independently.
+Disposition and warning audits copy the run context into a fresh event entity so
+multiple findings cannot overwrite one another through an assigned database ID.
+
 ## Finding grounding and thread actions
 
 `FindingGroundingService.ground` verifies structured finding quotes and citations,
