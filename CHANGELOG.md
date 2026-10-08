@@ -14,6 +14,8 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 - Standard reviews now generate fresh chunked prompts from the snapshot captured after acquiring the full-run PR lease, with pinned source enrichment and labeled prior-finding history instead of conversation replay. Findings pass grounding before publication, thread-action failures keep the revision retryable, and grounded results remain available to conversational follow-ups. The lease heartbeat covers generation, publication, revision/session updates, and the formal post-review action.
 
+- Standard and agentic reviews now suppress `APPROVE` when grounding, generation, prior-comment scans, thread actions, or publication are incomplete or uncertain. Agentic approval is deferred until thread-action results are known.
+
 - Added a lease-protected unchanged-revision guard to standard and agentic reviews, using the head SHA, effective diff base, successful non-degraded revision state, and complete comment scans. Only explicit review requests may skip; automatic triggers always review. Skips post a short revision reply and clear the bot's eyes reactions. GitHub snapshots now obtain the merge-base through the compare API. Revision-state persistence is supplied by the grounded review-path integration.
 
 - Added the shared finding-grounding and thread-action services: deterministic evidence checks, AI keep/drop/hold reconciliation, unchanged-finding suppression, dispute replies and withdrawals, and lease-fenced write-ahead publication with recoverable finding markers. Standard and agentic workflow integration follows separately.
@@ -58,6 +60,5 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 - Historical release notes before the introduction of this changelog were tracked through repository commits, pull requests, and releases.
 - See the README and documentation in `doc/` for the current feature set, including reviewer-triggered PR reviews, coding-agent workflows, writer-agent workflows, MCP handling, and local LLM support.
-
 
 
