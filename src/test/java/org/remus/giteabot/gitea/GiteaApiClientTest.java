@@ -99,7 +99,7 @@ class GiteaApiClientTest {
         RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
         GiteaApiClient client = new GiteaApiClient(builder.build(), CREDS);
-        server.expect(requestTo(CREDS.baseUrl() + "/api/v1/user/keys?limit=50&page=1"))
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v1/user/keys?page=1&limit=50"))
                 .andRespond(withSuccess("[{\"id\":1,\"title\":\"unrelated\"}]", MediaType.APPLICATION_JSON));
         server.expect(requestTo(CREDS.baseUrl() + "/api/v1/user/keys?page=2&limit=50"))
                 .andRespond(withSuccess("[{\"id\":42,\"title\":\"unique-title\"}]", MediaType.APPLICATION_JSON));
@@ -115,7 +115,7 @@ class GiteaApiClientTest {
         RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
         GiteaApiClient client = new GiteaApiClient(builder.build(), CREDS);
-        server.expect(requestTo(CREDS.baseUrl() + "/api/v1/user/keys?limit=50&page=1"))
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v1/user/keys?page=1&limit=50"))
                 .andRespond(withSuccess(response, MediaType.APPLICATION_JSON));
         assertThrows(IllegalStateException.class, client::getSshKeyIds);
         server.verify();

@@ -368,13 +368,13 @@ public class GitHubApiClient implements RepositoryApiClient {
                 .uri(uriBuilder -> uriBuilder.path("/repos/{owner}/{repo}/pulls/{pull_number}/comments")
                         .queryParam("per_page", 100).queryParam("page", page).build(owner, repo, pullNumber))
                 .retrieve().body(new ParameterizedTypeReference<List<GitHubReviewComment>>() {}));
-        return new CommentScan<>(scan.items(), scan.complete());
+        return new CommentScan<>(new ArrayList<ReviewComment>(scan.items()), scan.complete());
     }
 
     @Override
     public CommentScan<Map<String, Object>> listPullRequestComments(String owner, String repo, Long pullNumber) {
         CommentScan<Map<String, Object>> conversation = scanIssueComments(owner, repo, pullNumber);
-        CommentScan<GitHubReviewComment> inline = fetchPages(page -> restClient.get()
+        PageScan<GitHubReviewComment> inline = fetchPages(page -> restClient.get()
                 .uri(uriBuilder -> uriBuilder.path("/repos/{owner}/{repo}/pulls/{pull_number}/comments")
                         .queryParam("per_page", 100).queryParam("page", page).build(owner, repo, pullNumber))
                 .retrieve().body(new ParameterizedTypeReference<List<GitHubReviewComment>>() {}));
