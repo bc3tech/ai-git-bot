@@ -3,9 +3,11 @@ package org.remus.giteabot.review;
 import org.junit.jupiter.api.Test;
 import org.remus.giteabot.repository.model.DiffSide;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ReviewOutputParserTest {
 
@@ -40,6 +42,8 @@ class ReviewOutputParserTest {
         assertThat(located.line()).isEqualTo(12);
         assertThat(located.body()).isEqualTo("Use `Objects.equals` here: {\"a\": 1} — café ✓");
         assertThat(located.severity()).isEqualTo("MEDIUM");
+        assertThat(located.quote()).isNull();
+        assertThat(located.citations()).isEmpty();
         assertThat(doc.findings().get(1).hasLocation()).isFalse();
     }
 
@@ -136,5 +140,140 @@ class ReviewOutputParserTest {
         assertThat(merged.summary()).isEqualTo("one\n\ntwo");
         assertThat(merged.findings()).extracting(ReviewDocument.Finding::body).containsExactly("same", "other");
         assertThat(merged.findings()).extracting(ReviewDocument.Finding::id).containsExactly("f1", "f2");
+    }
+
+    @Test
+    void parsesAnchoredQuoteWithoutChangingWhitespace() {
+        String raw = """
+                {"findings": [{"path": "src/A.java", "side": "new", "line": 12,
+                  "body": "Null dereference.", "quote": "  return value.toString();  "}]}
+                """;
+        ReviewOutputParser.Result result = ReviewOutputParser.parse(raw);
+        assertThat(result.warning()).isNull();
+        assertThat(result.document().findings()).singleElement().satisfies(f -> {
+            assertThat(f.hasLocation()).isTrue();
+            assertThat(f.quote()).isEqualTo("  return value.toString();  ");
+            assertThat(f.citations()).isEmpty();
+        });
+    }
+
+    @Test
+    void parsesReviewWideFindingWithTwoCitations() {
+        String raw = """
+                {"findings": [{"body": "The contracts disagree.", "citations": [
+                  {"path": "src/A.java", "quote": "return null;"},
+                  {"path": "src/B.java", "quote": "value.toString();"}
+                ]}]}
+                """;
+        ReviewOutputParser.Result result = ReviewOutputParser.parse(raw);
+        assertThat(result.warning()).isNull();
+        assertThat(result.document().findings()).singleElement().satisfies(f -> {
+            assertThat(f.hasLocation()).isFalse();
+            assertThat(f.quote()).isNull();
+            assertThat(f.citations()).containsExactly(
+                    new ReviewDocument.Citation("src/A.java", "return null;"),
+                    new ReviewDocument.Citation("src/B.java", "value.toString();"));
+        });
+    }
+
+    @Test
+    void preservesMultilineQuoteAndCitationNewlines() {
+        String raw = """
+                {"findings": [
+                  {"path": "src/A.java", "side": "old", "line": 12, "body": "Missing guard.",
+                   "quote": "  if (value == null) {\\n    return null;\\n  }"},
+                  {"body": "Contract issue.", "citations": [
+                    {"path": "src/B.java", "quote": "return value\\n    .toString();"}
+                  ]}
+                ]}
+                """;
+        ReviewDocument doc = ReviewOutputParser.parse(raw).document();
+        assertThat(doc.structured()).isTrue();
+        assertThat(doc.findings().getFirst().quote()).isEqualTo("  if (value == null) {\n    return null;\n  }");
+        assertThat(doc.findings().get(1).citations().getFirst().quote()).isEqualTo("return value\n    .toString();");
+    }
+
+    @Test
+    void leavesInvalidEvidenceForLaterValidation() {
+        String raw = """
+                {"findings": [
+                  {"body": "Missing evidence."},
+                  {"body": "Wrong types.", "quote": 42, "citations": {}},
+                  {"body": "Incomplete citations.", "quote": "", "citations": [
+                    {"path": "src/A.java"}, {"quote": "return null;"}, null
+                  ]}
+                ]}
+                """;
+        ReviewOutputParser.Result result = ReviewOutputParser.parse(raw);
+        assertThat(result.warning()).isNull();
+        assertThat(result.document().structured()).isTrue();
+        assertThat(result.document().findings()).hasSize(3);
+        assertThat(result.document().findings().getFirst().quote()).isNull();
+        assertThat(result.document().findings().getFirst().citations()).isEmpty();
+        assertThat(result.document().findings().get(1).quote()).isNull();
+        assertThat(result.document().findings().get(1).citations()).isEmpty();
+        assertThat(result.document().findings().get(2).quote()).isEmpty();
+        assertThat(result.document().findings().get(2).citations()).containsExactly(
+                new ReviewDocument.Citation("src/A.java", null),
+                new ReviewDocument.Citation(null, "return null;"),
+                new ReviewDocument.Citation(null, null));
+    }
+
+    @Test
+    void mergePreservesEvidenceAndDistinctCategories() {
+        ReviewDocument.Finding a = new ReviewDocument.Finding("chunk-1", "same", "a", DiffSide.NEW, 1,
+                "MEDIUM", "bug", "return null;", null);
+        ReviewDocument.Finding duplicate = new ReviewDocument.Finding("chunk-2", "same", "a", DiffSide.NEW, 1,
+                "MEDIUM", "bug", "return null;", null);
+        ReviewDocument.Finding otherCategory = new ReviewDocument.Finding("chunk-2", "same", "a", DiffSide.NEW, 1,
+                "MEDIUM", "security", "return null;", null);
+        ReviewDocument.Finding otherQuote = new ReviewDocument.Finding("chunk-3", "same", "a", DiffSide.NEW, 1,
+                "MEDIUM", "bug", "return value;", null);
+        List<ReviewDocument.Citation> citations = List.of(new ReviewDocument.Citation("a", "return null;"));
+        ReviewDocument.Finding wide = new ReviewDocument.Finding("chunk-1", "contracts", null, null, null,
+                "LOW", "bug", null, citations);
+        ReviewDocument.Finding otherCitations = new ReviewDocument.Finding("chunk-2", "contracts", null, null, null,
+                "LOW", "bug", null, List.of(new ReviewDocument.Citation("b", "return value;")));
+        ReviewDocument merged = ReviewOutputParser.merge(List.of(
+                new ReviewDocument("one", List.of(a, wide), true),
+                new ReviewDocument("two", List.of(duplicate, otherCategory, otherQuote, otherCitations), true)));
+        assertThat(merged.structured()).isTrue();
+        assertThat(merged.findings()).containsExactly(
+                new ReviewDocument.Finding("f1", "same", "a", DiffSide.NEW, 1,
+                        "MEDIUM", "bug", "return null;", List.of()),
+                new ReviewDocument.Finding("f2", "contracts", null, null, null,
+                        "LOW", "bug", null, citations),
+                new ReviewDocument.Finding("f3", "same", "a", DiffSide.NEW, 1,
+                        "MEDIUM", "security", "return null;", List.of()),
+                new ReviewDocument.Finding("f4", "same", "a", DiffSide.NEW, 1,
+                        "MEDIUM", "bug", "return value;", List.of()),
+                new ReviewDocument.Finding("f5", "contracts", null, null, null,
+                        "LOW", "bug", null, otherCitations.citations()));
+    }
+
+    @Test
+    void findingCopiesCitationsAndDefaultsMissingEvidence() {
+        List<ReviewDocument.Citation> citations = new ArrayList<>();
+        citations.add(new ReviewDocument.Citation("a", "return null;"));
+        ReviewDocument.Finding finding = new ReviewDocument.Finding("f1", "issue", null, null, null,
+                null, null, null, citations);
+        citations.clear();
+        assertThat(finding.citations()).containsExactly(new ReviewDocument.Citation("a", "return null;"));
+        assertThatThrownBy(() -> finding.citations().clear()).isInstanceOf(UnsupportedOperationException.class);
+        ReviewDocument.Finding legacy = new ReviewDocument.Finding("f2", "issue", null, null, null, null, null);
+        assertThat(legacy.quote()).isNull();
+        assertThat(legacy.citations()).isEmpty();
+    }
+
+    @Test
+    void standardAndAgenticInstructionsRequireVerbatimEvidence() {
+        for (String instructions : List.of(ReviewOutputInstructions.standard(),
+                ReviewOutputInstructions.agentic(false), ReviewOutputInstructions.agentic(true))) {
+            assertThat(instructions).contains(
+                    "Every line-anchored finding must include \"quote\"",
+                    "exact, verbatim quote of the current",
+                    "include \"citations\": at least one object with \"path\" and \"quote\"",
+                    "escape newlines as \\n in JSON");
+        }
     }
 }

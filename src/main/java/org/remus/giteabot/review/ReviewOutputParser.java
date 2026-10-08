@@ -119,12 +119,12 @@ public final class ReviewOutputParser {
     }
 
     private static List<ReviewDocument.Finding> dedupe(List<ReviewDocument.Finding> findings) {
-        Set<String> seen = new LinkedHashSet<>();
+        Set<ReviewDocument.Finding> seen = new LinkedHashSet<>();
         List<ReviewDocument.Finding> result = new ArrayList<>();
         for (ReviewDocument.Finding f : findings) {
             if (seen.add(f.dedupKey())) {
                 result.add(new ReviewDocument.Finding("f" + (result.size() + 1), f.body(), f.path(), f.side(),
-                        f.line(), f.severity(), f.category()));
+                        f.line(), f.severity(), f.category(), f.quote(), f.citations()));
             }
         }
         return result;
@@ -150,7 +150,19 @@ public final class ReviewOutputParser {
         Integer line = lineNode != null && lineNode.isIntegralNumber() && lineNode.canConvertToInt()
                 ? lineNode.asInt() : null;
         return new ReviewDocument.Finding("f" + index, body, path, side, line,
-                text(element.get("severity")), text(element.get("category")));
+                text(element.get("severity")), text(element.get("category")), text(element.get("quote")),
+                toCitations(element.get("citations")));
+    }
+
+    private static List<ReviewDocument.Citation> toCitations(JsonNode node) {
+        if (node == null || !node.isArray()) {
+            return List.of();
+        }
+        List<ReviewDocument.Citation> citations = new ArrayList<>();
+        for (JsonNode citation : node) {
+            citations.add(new ReviewDocument.Citation(text(citation.get("path")), text(citation.get("quote"))));
+        }
+        return citations;
     }
 
     private static String firstText(JsonNode node, String... keys) {

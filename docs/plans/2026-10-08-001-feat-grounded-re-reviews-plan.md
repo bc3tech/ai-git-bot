@@ -272,7 +272,7 @@ GroundingResult {
 
 ### Phase A — Foundations
 
-- [ ] **U1. Finding evidence schema**
+- [x] **U1. Finding evidence schema**
   - **Goal:** Findings carry a structured `quote` (line-anchored) or `citations` (review-wide). (R3, R5)
   - **Requirements:** R3, R5
   - **Dependencies:** none

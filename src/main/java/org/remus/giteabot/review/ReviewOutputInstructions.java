@@ -25,6 +25,7 @@ public final class ReviewOutputInstructions {
                   "line": 42,
                   "severity": "MEDIUM",
                   "category": "bug",
+                  "quote": "return value.toString();",
                   "body": "Markdown explanation of the problem and a concrete suggestion."
                 }
               ]
@@ -40,7 +41,14 @@ public final class ReviewOutputInstructions {
               the old version of the file.
             - "line" must be a line that appears inside a diff hunk. Compute it from the hunk header
               "@@ -oldStart,oldCount +newStart,newCount @@" by counting lines. Never guess.
-            - For feedback that does not belong to a specific changed line, omit "path", "side" and "line".
+            - Every line-anchored finding must include "quote": an exact, verbatim quote of the current
+              code it criticizes at or near the anchored line on the indicated side. Never paraphrase code
+              or quote an earlier revision. Preserve internal whitespace and escape newlines as \\n in JSON.
+            - For feedback that does not belong to a specific changed line, omit "path", "side" and "line"
+              and include "citations": at least one object with "path" and "quote", for example
+              [{"path": "src/main/java/Foo.java", "quote": "return value.toString();"}]. Each citation
+              must quote exact, verbatim current code from that file. Every citation must be verifiable.
+            - Each quote must contain at least one line with at least 8 non-whitespace characters.
             - "severity" is one of "BLOCKER", "MEDIUM" or "LOW"; "category" is optional.
             - Use an empty "findings" array when there are no issues.
             - Escape the JSON correctly; Markdown is allowed inside string values.

@@ -40,14 +40,22 @@ public record ReviewDocument(String summary, List<Finding> findings, boolean str
      * @param line     requested line number on {@code side}, or {@code null}
      * @param severity optional severity label
      * @param category optional category label
+     * @param quote    verbatim code evidence for a line-anchored finding, or {@code null}
+     * @param citations file/quote evidence for a review-wide finding
      */
     public record Finding(String id, String body, String path, DiffSide side, Integer line,
-                         String severity, String category) {
+                         String severity, String category, String quote, List<Citation> citations) {
 
         public Finding {
             Objects.requireNonNull(body, "body");
             body = body.strip();
             path = path == null || path.isBlank() ? null : path.strip();
+            citations = citations == null ? List.of() : List.copyOf(citations);
+        }
+
+        public Finding(String id, String body, String path, DiffSide side, Integer line,
+                       String severity, String category) {
+            this(id, body, path, side, line, severity, category, null, List.of());
         }
 
         public boolean hasLocation() {
@@ -55,8 +63,12 @@ public record ReviewDocument(String summary, List<Finding> findings, boolean str
         }
 
         /** Identity used to collapse exact duplicates produced within a single run. */
-        String dedupKey() {
-            return path + "|" + side + "|" + line + "|" + body;
+        Finding dedupKey() {
+            return new Finding(null, body, path, side, line, severity, category, quote, citations);
         }
+    }
+
+    /** File-level verbatim code evidence for a review-wide finding. */
+    public record Citation(String path, String quote) {
     }
 }
