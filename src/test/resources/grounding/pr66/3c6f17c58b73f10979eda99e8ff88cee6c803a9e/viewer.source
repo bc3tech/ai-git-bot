@@ -1,0 +1,12 @@
+      fetch(`${second}/session/harness-1/link-1/export`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ downloadAttempt: attempt!, acknowledge: "accepted" }) }),
+    ]);
+    expect([downloadA.status, downloadB.status].sort()).toEqual([200, 428]);
+    for (const [firstResponse, secondResponse] of [[downloadA, downloadB], [downloadB, downloadA]] as const) {
+      const successful = firstResponse.status === 200 ? firstResponse : secondResponse;
+      expect(successful.headers.get("content-type")).toBe("application/zip");
+      expect(successful.headers.get("cache-control")).toBe("private, no-store");
+      const failed = firstResponse.status === 428 ? firstResponse : secondResponse;
+      expect(await failed.clone().text()).toContain("Open Download again");
+    }
+  });
+});

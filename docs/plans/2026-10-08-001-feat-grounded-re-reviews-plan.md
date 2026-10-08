@@ -630,7 +630,7 @@ GroundingResult {
 
 ### Phase D — Regression
 
-- [ ] **U12. PR 66 replay regression set**
+- [x] **U12. PR 66 replay regression set**
   - **Goal:** Labeled regression suite on both paths. (Success criteria, R14)
   - **Requirements:** R14, success criteria
   - **Dependencies:** U9, U10, U11
@@ -647,7 +647,8 @@ GroundingResult {
       survives. Valid dispute → withdrawn. False dispute → upheld reply. Double-check failure → BLOCKER-only.
     - `/review` without changes → single "no changes" reply.
     - Every drop appears as an audit event with reason.
-  - **Verification:** regression test green on both paths.
+  - **Verification:** 16 replay cases green across both paths; ArchitectureTest, related service tests, and the full Maven suite pass.
+  - **Regression fixes:** Guard a missing human-comment cursor when recording an agentic revision. Exclude command-only review requests from the new-comment skip check; requests with additional commentary still force a review.
 
 - [ ] **U13. Live double-check evaluation harness (opt-in)**
   - **Goal:** Measure whether the real double-check prompt and configured model actually make the right calls,

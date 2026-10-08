@@ -1,0 +1,92 @@
+{
+  "absent": {
+    "body": "The workflow uses incorrect Bash syntax for array assignment: `force_args=($RELEASE_FORCE)` and `force_args+=(-Force -Confirm)`. This will cause a runtime error when the script tries to execute, preventing `-Force -Confirm` arguments from being passed to PowerShell. Correct usage should be `force_args+=(...)` or proper quoting/iteration of arguments.",
+    "path": ".gitea/workflows/publish-plugin.yml",
+    "line": 76,
+    "side": "NEW",
+    "quote": "force_args=($RELEASE_FORCE)",
+    "severity": "BLOCKER",
+    "category": "bug"
+  },
+  "absent-gate": {
+    "body": "The workflow uses incorrect Bash syntax for array assignment: `force_args=($RELEASE_FORCE)` and `force_args+=(-Force -Confirm)`. This will cause a runtime error when the script tries to execute, preventing `-Force -Confirm` arguments from being passed to PowerShell. Correct usage should be `force_args+=(...)` or proper quoting/iteration of arguments.",
+    "path": ".gitea/workflows/publish-plugin.yml",
+    "line": 93,
+    "side": "NEW",
+    "quote": "force_args+=(-Force -Confirm)",
+    "severity": "HIGH",
+    "category": "bug"
+  },
+  "misattributed": {
+    "body": "Synthetic misattributed quote control.",
+    "path": "apps/web/test/auth/viewerSignIn.integration.test.ts",
+    "line": 100,
+    "side": "NEW",
+    "quote": "const failed = firstResponse.status === 428 ? firstResponse : secondResponse;",
+    "severity": "HIGH",
+    "category": "bug"
+  },
+  "intended-fix": {
+    "body": "The test previously asserted that the rejected response would have status `409` (Conflict). However, according to documentation and the assertion on line 391 (`expect([downloadA.status, downloadB.status].sort()).toEqual([200, 428])`), the correct status for a rejected download should be `428` (Precondition Required) as per RFC 6585. This change fixes test assertions to use `428` and makes the test more robust against race conditions by checking both possible response orderings.",
+    "path": "apps/web/test/auth/viewerSignIn.integration.test.ts",
+    "line": 392,
+    "side": "NEW",
+    "quote": "const failed = firstResponse.status === 428 ? firstResponse : secondResponse;",
+    "severity": "HIGH",
+    "category": "bug"
+  },
+  "valid": {
+    "body": "Synthetic valid finding control: require an additional cache-header assertion.",
+    "path": "apps/web/test/auth/viewerSignIn.integration.test.ts",
+    "line": 391,
+    "side": "NEW",
+    "quote": "expect(successful.headers.get(\"cache-control\")).toBe(\"private, no-store\");",
+    "severity": "HIGH",
+    "category": "positive-control"
+  },
+  "blocker": {
+    "body": "Synthetic verified BLOCKER control.",
+    "path": "apps/web/test/auth/viewerSignIn.integration.test.ts",
+    "line": 391,
+    "side": "NEW",
+    "quote": "expect(successful.headers.get(\"cache-control\")).toBe(\"private, no-store\");",
+    "severity": "BLOCKER",
+    "category": "blocker-control"
+  },
+  "high": {
+    "body": "Synthetic verified HIGH control.",
+    "path": "apps/web/test/auth/viewerSignIn.integration.test.ts",
+    "line": 391,
+    "side": "NEW",
+    "quote": "expect(successful.headers.get(\"cache-control\")).toBe(\"private, no-store\");",
+    "severity": "HIGH",
+    "category": "high-control"
+  },
+  "medium": {
+    "body": "Synthetic verified MEDIUM control.",
+    "path": "apps/web/test/auth/viewerSignIn.integration.test.ts",
+    "line": 391,
+    "side": "NEW",
+    "quote": "expect(successful.headers.get(\"cache-control\")).toBe(\"private, no-store\");",
+    "severity": "MEDIUM",
+    "category": "medium-control"
+  },
+  "stale-409": {
+    "body": "Synthetic stale-diff control: the removed 409 selector is still current.",
+    "path": "apps/web/test/auth/viewerSignIn.integration.test.ts",
+    "line": 391,
+    "side": "NEW",
+    "quote": "const failed = downloadA.status === 409 ? downloadA : downloadB;",
+    "severity": "HIGH",
+    "category": "bug"
+  },
+  "old-side-fix": {
+    "body": "The test previously asserted that the rejected response would have status `409` (Conflict). However, according to documentation and the assertion on line 391 (`expect([downloadA.status, downloadB.status].sort()).toEqual([200, 428])`), the correct status for a rejected download should be `428` (Precondition Required) as per RFC 6585. This change fixes test assertions to use `428` and makes the test more robust against race conditions by checking both possible response orderings.",
+    "path": "apps/web/test/auth/viewerSignIn.integration.test.ts",
+    "line": 391,
+    "side": "OLD",
+    "quote": "const failed = downloadA.status === 409 ? downloadA : downloadB;",
+    "severity": "HIGH",
+    "category": "bug"
+  }
+}

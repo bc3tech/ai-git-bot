@@ -338,8 +338,10 @@ public class AgentReviewService {
             revision.setEffectiveBaseSha(snapshot.effectiveBaseSha());
             revision.setReviewedAt(Instant.now());
             revision.setDegraded(grounded.degraded() || threadFailures || !digest.commentsComplete());
-            revision.setLastSeenCommentAt(digest.commentCursor().timestamp());
-            revision.setLastSeenCommentId(digest.commentCursor().id());
+            if (digest.commentCursor() != null) {
+                revision.setLastSeenCommentAt(digest.commentCursor().timestamp());
+                revision.setLastSeenCommentId(digest.commentCursor().id());
+            }
             state.upsertRevision(revision, lease);
             publishFindingEvents(eventHookPublisher, bot, decision, owner, repo, prNumber);
             return ReviewResult.POSTED;

@@ -1,0 +1,22 @@
+diff --git a/apps/web/test/auth/viewerSignIn.integration.test.ts b/apps/web/test/auth/viewerSignIn.integration.test.ts
+index 6a86c3b..c8ac601 100644
+--- a/apps/web/test/auth/viewerSignIn.integration.test.ts
++++ b/apps/web/test/auth/viewerSignIn.integration.test.ts
+@@ -385,10 +385,12 @@ describe("viewer sign-in across the real web HTTP boundary", () => {
+       fetch(`${second}/session/harness-1/link-1/export`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ downloadAttempt: attempt!, acknowledge: "accepted" }) }),
+     ]);
+     expect([downloadA.status, downloadB.status].sort()).toEqual([200, 428]);
+-    const successful = downloadA.status === 200 ? downloadA : downloadB;
+-    expect(successful.headers.get("content-type")).toBe("application/zip");
+-    expect(successful.headers.get("cache-control")).toBe("private, no-store");
+-    const failed = downloadA.status === 409 ? downloadA : downloadB;
+-    expect(await failed.text()).toContain("Open Download again");
++    for (const [firstResponse, secondResponse] of [[downloadA, downloadB], [downloadB, downloadA]] as const) {
++      const successful = firstResponse.status === 200 ? firstResponse : secondResponse;
++      expect(successful.headers.get("content-type")).toBe("application/zip");
++      expect(successful.headers.get("cache-control")).toBe("private, no-store");
++      const failed = firstResponse.status === 428 ? firstResponse : secondResponse;
++      expect(await failed.clone().text()).toContain("Open Download again");
++    }
+   });
+ });

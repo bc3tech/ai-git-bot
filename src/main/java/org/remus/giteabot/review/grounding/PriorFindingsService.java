@@ -134,7 +134,7 @@ public class PriorFindingsService {
             }
             comments.comments().forEach(comment -> replies.add(fromMap(comment).reply()));
             return replies.stream().anyMatch(reply -> !isBot(reply, botLogin)
-                    && (reply.login() == null || cursor.isNew(reply)));
+                    && (reply.login() == null || !isReviewRequestOnly(reply, botLogin) && cursor.isNew(reply)));
         } catch (RuntimeException e) {
             return true;
         }
@@ -243,6 +243,11 @@ public class PriorFindingsService {
         } catch (RestClientException | UnsupportedOperationException e) {
             return new CommentScan<>(List.of(), false);
         }
+    }
+
+    private static boolean isReviewRequestOnly(Reply reply, String botLogin) {
+        return Pattern.compile("(?i)(?:@" + Pattern.quote(botLogin) + "\\s+)?(?:/review|review again|re-review)")
+                .matcher(reply.body().strip()).matches();
     }
 
     private static boolean isBot(Reply reply, String botLogin) {
