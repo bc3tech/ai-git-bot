@@ -295,7 +295,7 @@ GroundingResult {
     - Regression: existing envelope fixtures without quotes still parse.
   - **Verification:** `ReviewOutputParserTest` passes; `ReviewOutputInstructions` text includes quote contract.
 
-- [ ] **U2. Pinned source reader + QuoteVerifier**
+- [x] **U2. Pinned source reader + QuoteVerifier**
   - **Goal:** Deterministic quote check against the pinned revision. (R4, R5, R15)
   - **Requirements:** R4, R5, R15
   - **Dependencies:** U1
@@ -328,7 +328,7 @@ GroundingResult {
     - Error: file unreadable at SHA → `RevisionUnavailableException`.
   - **Verification:** unit tests green; no call path passes a branch ref (assert in test via mock verify).
 
-- [ ] **U3. Review state persistence, run lease, and lifecycle**
+- [x] **U3. Review state persistence, run lease, and lifecycle**
   - **Goal:** Persist published findings and last-reviewed revisions; provide the per-PR run lease and operational
     retention. (R2, R9, R11, R12; KTD1, KTD6, KTD12, KTD13, KTD15, KTD16)
   - **Requirements:** R2, R9, R11, R12
@@ -418,7 +418,7 @@ GroundingResult {
 
 ### Phase B — Grounding core
 
-- [ ] **U8. Per-finding audit events**
+- [x] **U8. Per-finding audit events**
   - **Goal:** Record dropped/held/withdrawn findings and grounding warnings with reasons. (R13; KTD10)
   - **Requirements:** R13
   - **Dependencies:** none (defines the disposition audit contract U7 records against)
