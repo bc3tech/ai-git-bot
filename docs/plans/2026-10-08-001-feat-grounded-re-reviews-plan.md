@@ -554,7 +554,7 @@ GroundingResult {
   - **Verification:** grounding tests green; `ReviewPublicationServiceTest` updated and green.
 ### Phase C — Path integration
 
-- [ ] **U9. Standard review: fresh, pinned, grounded**
+- [x] **U9. Standard review: fresh, pinned, grounded**
   - **Goal:** Remove transcript replay; pin context reads; inject digest; wire grounding + state. (R1, R2, R14,
     R15)
   - **Requirements:** R1, R2, R14, R15
@@ -578,7 +578,7 @@ GroundingResult {
     - Integration: session still receives rendered review (chat continuity).
   - **Verification:** `CodeReviewServiceTest` green; grep confirms no review path calls `toAiMessages`.
 
-- [ ] **U10. Agentic review: pinned, grounded**
+- [x] **U10. Agentic review: pinned, grounded**
   - **Goal:** Pin workspace/tool reads to head SHA; inject digest; wire grounding. (R2, R14, R15)
   - **Requirements:** R2, R14, R15
   - **Dependencies:** U5, U7, U8
