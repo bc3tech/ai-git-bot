@@ -176,7 +176,7 @@ class AgentReviewCompletionTest {
     @Test
     void completedTurnPublishesOnlyTheFinalReview() {
         when(aiClient.chatWithTools(anyList(), any(), anyList(), anyString(), isNull(), anyInt()))
-                .thenReturn(exploration(1), ChatTurn.text("No correctness issues found."));
+                .thenReturn(exploration(1), ChatTurn.text("{\"summary\": \"No correctness issues found.\", \"findings\": []}"));
 
         AgentReviewService.ReviewResult reviewed = service.reviewPullRequest(payload, 1, false, null,
                 new AgentReviewService.SeverityThresholds(null, null, null), 1L, null);

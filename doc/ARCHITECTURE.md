@@ -179,6 +179,33 @@ history. Timestamp ties and missing timestamps are conservatively new; the
 latest answered comment ID prevents repeating replies to the same dispute.
 This service is a grounding foundation; review workflows wire it in separately.
 
+## Finding grounding and thread actions
+
+`FindingGroundingService.ground` verifies structured finding quotes and citations,
+then batches eligible findings and disputed/context-changed priors through
+`DoubleCheckService`. The result carries publishable findings, summary notes,
+thread actions, audited drop/hold dispositions, evidence fingerprints, and a
+revision-degraded flag. Pinned-read failures abort rather than silently changing
+revisions. Unpinned runs use only diff evidence, remove inline anchors, and never
+re-evaluate or action prior findings. Incomplete history scans leave priors alone.
+
+The grounded `ReviewPublicationService.publish` overload writes each finding as
+`PENDING` before provider delivery and embeds its UUID marker in inline or summary
+text. Only confirmed deliveries become `PUBLISHED`; failed/unknown writes remain
+recoverable by the next complete marker scan. Replacement findings supersede old
+records only after delivery succeeds. Review-wide citations are stored as JSON in
+the finding's existing quote field; anchored quotes remain verbatim text. Shared
+summary comments are identified by marker and never edited for one finding.
+
+`ThreadActionExecutor.execute` replies in a native thread when supported and uses
+a linked PR comment otherwise (always for summary-only findings). Withdrawals are
+recorded only after successful communication; failed replies leave findings active
+for retry (callers mark the revision degraded when actions fail). It re-reads thread replies immediately before resolving and skips
+resolution when the scan is incomplete or a new non-bot reply appeared. Lease-token
+checks precede every provider mutation and state write; lease loss aborts and emits
+a grounding warning. Workflow integration remains separate from these services.
+
+
 ## Persistence and secrets
 
 The database stores durable configuration and run state rather than transient

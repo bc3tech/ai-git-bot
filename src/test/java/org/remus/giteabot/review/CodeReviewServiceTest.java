@@ -76,7 +76,7 @@ class CodeReviewServiceTest {
         when(repositoryClient.getPullRequestDiff("testowner", "testrepo", 1L))
                 .thenReturn("diff --git a/file.txt b/file.txt\n+new line");
         when(aiClient.submitReviewPrompt(eq(REVIEW_PROMPT), isNull(), anyString()))
-                .thenReturn("Looks good!");
+                .thenReturn("{\"summary\": \"Looks good!\", \"findings\": []}");
 
         codeReviewService.reviewPullRequest(payload, null);
 
@@ -141,7 +141,7 @@ class CodeReviewServiceTest {
         when(repositoryClient.getPullRequestDiff("testowner", "testrepo", 1L))
                 .thenReturn("diff --git a/file.txt b/file.txt\n+new line");
         when(aiClient.submitReviewPrompt(eq(REVIEW_PROMPT), isNull(), anyString()))
-                .thenReturn("Bot prompt used.");
+                .thenReturn("{\"summary\": \"Bot prompt used.\", \"findings\": []}");
 
         codeReviewService.reviewPullRequest(payload, "security");
 
@@ -162,7 +162,7 @@ class CodeReviewServiceTest {
         when(repositoryClient.getPullRequestDiff("testowner", "testrepo", 1L))
                 .thenReturn("diff --git a/file.txt b/file.txt\n+new line");
         when(aiClient.submitReviewPrompt(eq("Configured review prompt" + ReviewOutputInstructions.standard()), isNull(), anyString()))
-                .thenReturn("Configured prompt used.");
+                .thenReturn("{\"summary\": \"Configured prompt used.\", \"findings\": []}");
 
         codeReviewService.reviewPullRequest(payload, null);
 
@@ -867,7 +867,7 @@ class CodeReviewServiceTest {
         codeReviewService.reviewPullRequest(payload, null);
 
         verify(repositoryClient).postReview(
-                eq("testowner"), eq("testrepo"), eq(1L), contains("was empty or could not be generated"), eq(PostReviewAction.NONE));
+                eq("testowner"), eq("testrepo"), eq(1L), contains(org.remus.giteabot.review.grounding.FindingGroundingService.PARSE_FAILURE), eq(PostReviewAction.NONE));
         verify(sessionService).addMessage(eq(session), eq("user"), contains("Test PR"));
         verify(sessionService).addMessage(eq(session), eq("assistant"), contains("was empty or could not be generated"));
     }

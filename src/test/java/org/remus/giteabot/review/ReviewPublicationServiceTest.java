@@ -51,6 +51,14 @@ class ReviewPublicationServiceTest {
     private final ReviewDocument.Finding reviewWide = finding("f4", "Add tests.", null, null, null);
 
     @Test
+    void unstructuredOutputPostsOnlyParseWarning() {
+        publish(ReviewDocument.text("unsafe model text"), PostReviewAction.NONE, ReviewFence.NONE);
+        verify(client).postReview(eq("o"), eq("r"), eq(1L),
+                eq(FRAME.apply(org.remus.giteabot.review.grounding.FindingGroundingService.PARSE_FAILURE)),
+                eq(PostReviewAction.NONE));
+    }
+
+    @Test
     void allInlineReviewKeepsSummaryConciseAndDoesNotDuplicateDetail() {
         when(client.publishInlineReview(any(), any(), any(), any(), anyString(), anyList(), any()))
                 .thenAnswer(inv -> confirmed(inv.getArgument(5)));
