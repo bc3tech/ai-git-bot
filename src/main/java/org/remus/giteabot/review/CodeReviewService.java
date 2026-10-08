@@ -219,6 +219,8 @@ public class CodeReviewService {
             if (!outcome.delivered()) return ReviewRun.SKIPPED;
             boolean threadFailures = !threadActions.execute(repositoryClient, lease, grounded.threadActions(),
                     botUsername, event, snapshot.headSha(), snapshot.effectiveBaseSha(), held).isEmpty();
+            boolean degraded = grounded.degraded() || generated.incomplete() || threadFailures
+                    || !digest.commentsComplete() || !outcome.approvalSafe();
             ReviewRevisionRecord revision = new ReviewRevisionRecord();
             revision.setBotId(botId);
             revision.setRepoOwner(owner);
@@ -228,7 +230,7 @@ public class CodeReviewService {
             revision.setHeadSha(snapshot.headSha());
             revision.setEffectiveBaseSha(snapshot.effectiveBaseSha());
             revision.setReviewedAt(Instant.now());
-            revision.setDegraded(grounded.degraded() || generated.incomplete() || threadFailures || !digest.commentsComplete());
+            revision.setDegraded(degraded);
             if (digest.commentCursor() != null) {
                 revision.setLastSeenCommentAt(digest.commentCursor().timestamp());
                 revision.setLastSeenCommentId(digest.commentCursor().id());
@@ -247,7 +249,8 @@ public class CodeReviewService {
                     ReviewPublicationService.render(safeSummary, grounded.publish(), false));
             held.requireActive("before compacting review session");
             sessionService.compactContextWindow(session);
-            boolean actionAllowed = outcome.inlineStatus() != ReviewPublicationResult.Status.PENDING_CONFLICT;
+            boolean actionAllowed = outcome.inlineStatus() != ReviewPublicationResult.Status.PENDING_CONFLICT
+                    && !(action == PostReviewAction.APPROVE && degraded);
             if (actionAllowed && action != null) {
                 held.requireActive("before posting post-review action");
                 repositoryClient.postReviewAction(owner, repo, prNumber, action);

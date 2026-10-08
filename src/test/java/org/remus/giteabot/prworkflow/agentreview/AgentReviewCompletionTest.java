@@ -263,6 +263,7 @@ class AgentReviewCompletionTest {
                         && !body.contains("\"blocker\"")),
                 argThat(anchors -> anchors.size() == 1 && anchors.getFirst().path().equals("Example.java")),
                 eq(PostReviewAction.REQUEST_CHANGES));
+        verify(repositoryClient, never()).postReviewAction(anyString(), anyString(), anyLong(), any());
         verify(repositoryClient, never()).postReview(anyString(), anyString(), anyLong(), anyString(), any());
     }
 
@@ -302,7 +303,8 @@ class AgentReviewCompletionTest {
                 .thenReturn(ChatTurn.text(envelope("fabricatedCall();", "BLOCKER") + "\n{\"blocker\": 99}"));
         assertThat(review(true)).isEqualTo(AgentReviewService.ReviewResult.POSTED);
         verify(repositoryClient).postReviewReturningId(eq("owner"), eq("repo"), eq(1L),
-                argThat(body -> !body.contains("Broken.")), eq(PostReviewAction.APPROVE));
+                argThat(body -> !body.contains("Broken.")), eq(PostReviewAction.NONE));
+        verify(repositoryClient).postReviewAction("owner", "repo", 1L, PostReviewAction.APPROVE);
         verifyNoInteractions(eventHooks);
         verify(audits).recordFindingDisposition(any(), eq(AuditEventType.FINDING_DROPPED), anyString(),
                 eq("Example.java"), eq("NEW"), eq(1), eq("fabricatedCall();"), eq("BLOCKER"), isNull(),
@@ -434,8 +436,43 @@ class AgentReviewCompletionTest {
                 .thenReturn(ChatTurn.text(envelope("newCall();", "BLOCKER") + "\n{\"blocker\": 1}"));
         assertThat(review(true)).isEqualTo(AgentReviewService.ReviewResult.POSTED);
         verify(repositoryClient).postReviewReturningId(any(), any(), any(),
-                argThat(body -> !body.contains("Broken.")), eq(PostReviewAction.APPROVE));
+                argThat(body -> !body.contains("Broken.")), eq(PostReviewAction.NONE));
+        verify(repositoryClient).postReviewAction("owner", "repo", 1L, PostReviewAction.APPROVE);
         verifyNoInteractions(eventHooks);
+    }
+
+    @Test
+    void incompletePriorCommentScanDoesNotApproveAgenticReview() {
+        when(priors.load(repositoryClient, LEASE, AgentReviewWorkflow.KEY, "bot"))
+                .thenReturn(new PriorFindingsDigest(List.of(), false, emptyDigest.commentCursor()));
+        when(aiClient.chatWithTools(anyList(), any(), anyList(), anyString(), isNull(), anyInt()))
+                .thenReturn(ChatTurn.text(envelope("newCall();", "BLOCKER") + "\n{\"blocker\": 1}"));
+
+        assertThat(review(true)).isEqualTo(AgentReviewService.ReviewResult.POSTED);
+
+        verify(repositoryClient).postReviewReturningId(any(), any(), any(),
+                anyString(), eq(PostReviewAction.NONE));
+        verify(repositoryClient, never()).postReviewAction(anyString(), anyString(), anyLong(), any());
+        verify(state).upsertRevision(argThat(ReviewRevisionRecord::isDegraded), eq(LEASE));
+    }
+
+    @Test
+    void failedThreadActionDoesNotApproveAgenticReview() {
+        ReviewFindingRecord prior = new ReviewFindingRecord();
+        prior.setId(UUID.randomUUID());
+        when(threadActions.execute(eq(repositoryClient), eq(LEASE), anyList(), eq("bot"), any(),
+                eq(HEAD), eq(BASE), any()))
+                .thenReturn(List.of(new ThreadAction.Withdraw(
+                        new PriorFindingsDigest.PriorFinding(prior, List.of(), false, null), "withdrawal failed")));
+        when(aiClient.chatWithTools(anyList(), any(), anyList(), anyString(), isNull(), anyInt()))
+                .thenReturn(ChatTurn.text(envelope("newCall();", "BLOCKER") + "\n{\"blocker\": 1}"));
+
+        assertThat(review(true)).isEqualTo(AgentReviewService.ReviewResult.POSTED);
+
+        verify(repositoryClient).postReviewReturningId(any(), any(), any(),
+                anyString(), eq(PostReviewAction.NONE));
+        verify(repositoryClient, never()).postReviewAction(anyString(), anyString(), anyLong(), any());
+        verify(state).upsertRevision(argThat(ReviewRevisionRecord::isDegraded), eq(LEASE));
     }
 
     @Test
@@ -447,6 +484,7 @@ class AgentReviewCompletionTest {
         assertThat(review(true)).isEqualTo(AgentReviewService.ReviewResult.POSTED);
         verify(repositoryClient).postReviewReturningId(any(), any(), any(),
                 argThat(body -> body.contains("Double-check unavailable") && !body.contains("Broken.")), eq(PostReviewAction.NONE));
+        verify(repositoryClient, never()).postReviewAction(anyString(), anyString(), anyLong(), any());
         verify(state).upsertRevision(argThat(ReviewRevisionRecord::isDegraded), eq(LEASE));
         verifyNoInteractions(eventHooks);
     }

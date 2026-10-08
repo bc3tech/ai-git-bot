@@ -57,6 +57,11 @@ public final class ReviewPublicationService {
         public boolean delivered() {
             return summary == Delivery.CONFIRMED;
         }
+
+        /** Approval requires a confirmed summary and a publication outcome without unresolved uncertainty. */
+        public boolean approvalSafe() {
+            return delivered() && (inlineStatus == Status.PUBLISHED || inlineStatus == Status.UNSUPPORTED);
+        }
     }
 
     /**

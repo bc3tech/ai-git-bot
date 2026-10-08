@@ -143,6 +143,18 @@ class StandardGroundedReviewTest {
     }
 
     @Test
+    void unpinnedReviewDoesNotApproveWhenGroundingIsDegraded() {
+        when(api.getReviewSnapshot("o", "r", 7L)).thenReturn(new ReviewSnapshot(HEAD, TARGET, null, DIFF, true));
+
+        CodeReviewService.ReviewRun run = run(PostReviewAction.APPROVE);
+
+        assertThat(run.reviewed()).isTrue();
+        assertThat(run.actionAllowed()).isFalse();
+        verify(state).upsertRevision(argThat(ReviewRevisionRecord::isDegraded), eq(lease));
+        verify(api, never()).postReviewAction(any(), any(), any(), any());
+    }
+
+    @Test
     void unparseableOutputFailsClosedAndNeverPollutesChat() {
         when(ai.submitReviewPrompt(anyString(), isNull(), anyString())).thenReturn("fabricated raw model review");
         assertThat(run(null).reviewed()).isTrue();

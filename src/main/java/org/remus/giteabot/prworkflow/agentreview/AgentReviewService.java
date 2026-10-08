@@ -321,12 +321,16 @@ public class AgentReviewService {
                     state.findingsForDedup(bot.getId(), owner, repo, prNumber, AgentReviewWorkflow.KEY),
                     doubleCheckSettings, aiClient, doubleCheckBudget, event, runFence);
             ParseResult decision = groundedDecision(document.summary(), grounded, enableFormalDecision, severityThresholds);
+            PostReviewAction publicationAction = decision.action() == PostReviewAction.APPROVE
+                    ? PostReviewAction.NONE : decision.action();
             ReviewPublicationService.Outcome published = ReviewPublicationService.publish(repositoryClient, snapshot,
-                    document.summary(), grounded, decision.action(), this::formatReview, runFence,
+                    document.summary(), grounded, publicationAction, this::formatReview, runFence,
                     state, leases, lease, AgentReviewWorkflow.KEY, audits, event);
             if (!published.delivered()) return ReviewResult.FAILED;
             boolean threadFailures = !threadActions.execute(repositoryClient, lease, grounded.threadActions(),
                     context.botUsername(), event, snapshot.headSha(), snapshot.effectiveBaseSha(), runFence).isEmpty();
+            boolean degraded = grounded.degraded() || threadFailures || !digest.commentsComplete()
+                    || !published.approvalSafe();
             runFence.requireActive("before recording reviewed agentic revision");
             ReviewRevisionRecord revision = new ReviewRevisionRecord();
             revision.setBotId(bot.getId());
@@ -337,12 +341,16 @@ public class AgentReviewService {
             revision.setHeadSha(snapshot.headSha());
             revision.setEffectiveBaseSha(snapshot.effectiveBaseSha());
             revision.setReviewedAt(Instant.now());
-            revision.setDegraded(grounded.degraded() || threadFailures || !digest.commentsComplete());
+            revision.setDegraded(degraded);
             if (digest.commentCursor() != null) {
                 revision.setLastSeenCommentAt(digest.commentCursor().timestamp());
                 revision.setLastSeenCommentId(digest.commentCursor().id());
             }
             state.upsertRevision(revision, lease);
+            if (decision.action() == PostReviewAction.APPROVE && !degraded) {
+                runFence.requireActive("before approving completed agentic review");
+                repositoryClient.postReviewAction(owner, repo, prNumber, PostReviewAction.APPROVE);
+            }
             publishFindingEvents(eventHookPublisher, bot, decision, owner, repo, prNumber);
             return ReviewResult.POSTED;
         } catch (WorkflowCancelledException e) {
