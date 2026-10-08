@@ -495,7 +495,7 @@ GroundingResult {
       ID → review's client + `GROUNDING_WARNING`.
   - **Verification:** unit tests green; params render on bot workflow config form.
 
-- [ ] **U7. FindingGroundingService and thread actions**
+- [x] **U7. FindingGroundingService and thread actions**
   - **Goal:** Orchestrate quote check → double-check → reconcile against prior findings; emit publish list,
     thread actions, summary notes, dispositions. (R4–R11, R16; KTD2, KTD13, KTD14, KTD16)
   - **Requirements:** R4, R5, R6, R8, R9, R10, R10a, R10b, R11, R16
@@ -599,7 +599,7 @@ GroundingResult {
     - Error: SHA checkout fails → review stops (R15).
   - **Verification:** agent review tests green.
 
-- [ ] **U11. Explicit-request flag and unchanged-revision skip**
+- [x] **U11. Explicit-request flag and unchanged-revision skip**
   - **Goal:** Skip explicit re-reviews when head + effective base unchanged. (R12, R16)
   - **Requirements:** R12, R16
   - **Dependencies:** U3
