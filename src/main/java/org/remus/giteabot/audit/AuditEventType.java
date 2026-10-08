@@ -22,6 +22,12 @@ public enum AuditEventType {
     /** Finding posted as part of a review — implemented (v1: one event per posted review). */
     FINDING_POSTED,
 
+    /** Grounding disposition for an individual finding. */
+    FINDING_DROPPED,
+    FINDING_HELD,
+    FINDING_WITHDRAWN,
+    GROUNDING_WARNING,
+
     /** Deferred: not yet in product. */
     @Deprecated GATE_OVERRIDDEN,
     @Deprecated FINDING_SUPPRESSED,
