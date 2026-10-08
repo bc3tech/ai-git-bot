@@ -91,6 +91,7 @@ class BotWebhookServiceTest {
     @Mock private org.remus.giteabot.eventhook.EventHookPublisher eventHookPublisher;
     @Mock private org.remus.giteabot.notification.WorkflowRetryNotices retryNotices;
     @Mock private org.remus.giteabot.notification.IssueCommentAcknowledgement commentAcknowledgement;
+    @Mock private org.remus.giteabot.review.state.ReviewStateService reviewStateService;
 
     private BotWebhookService botWebhookService;
     private org.remus.giteabot.prworkflow.config.WorkflowConfiguration codingIssueConfiguration;
@@ -127,7 +128,7 @@ class BotWebhookServiceTest {
                 e2eTestSlashCommandHandler, unitTestSlashCommandHandler,
                 agentReviewSlashCommandHandler, readmeSyncSlashCommandHandler,
                 i18nCoverageSlashCommandHandler, workflowSelectionService,
-                issueWorkflowOrchestrator);
+                issueWorkflowOrchestrator, reviewStateService);
         codingIssueConfiguration = namedConfiguration(101L, "coding-issue-cfg");
         writerIssueConfiguration = namedConfiguration(102L, "writer-issue-cfg");
         emptyPrConfiguration = namedConfiguration(103L, "empty-pr-cfg");
@@ -329,6 +330,30 @@ class BotWebhookServiceTest {
 
         verify(aiClientFactory, never()).getClient(any());
         verify(giteaClientFactory, never()).getApiClient(any());
+    }
+
+    @Test
+    void reviewPullRequest_reopenedClearsReviewStateCloseTimestamp() {
+        Bot bot = createBot("review", "review_bot");
+        bot.setId(7L);
+        WebhookPayload payload = openedPrPayload();
+        payload.setAction("reopened");
+        when(botService.getAllowedUsernames(bot)).thenReturn(Set.of());
+
+        botWebhookService.reviewPullRequest(bot, payload);
+
+        verify(reviewStateService).markPrReopened(7L, "Test", "my-repo", 42L);
+    }
+
+    @Test
+    void handlePrClosedStampsReviewStateWithoutDeletingIt() {
+        Bot bot = createBot("review", "review_bot");
+        bot.setId(8L);
+        WebhookPayload payload = openedPrPayload();
+
+        botWebhookService.handlePrClosed(bot, payload);
+
+        verify(reviewStateService).markPrClosed(eq(8L), eq("Test"), eq("my-repo"), eq(42L), any());
     }
 
     @Test

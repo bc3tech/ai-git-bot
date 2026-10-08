@@ -24,6 +24,7 @@ import org.remus.giteabot.prworkflow.unittest.UnitTestWorkflow;
 import org.remus.giteabot.repository.Reactions;
 import org.remus.giteabot.repository.RepositoryApiClient;
 import org.remus.giteabot.review.CodeReviewService;
+import org.remus.giteabot.review.state.ReviewStateService;
 import org.remus.giteabot.util.BranchFilter;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
@@ -31,6 +32,7 @@ import org.springframework.stereotype.Service;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.time.Instant;
 import java.util.regex.Pattern;
 
 /**
@@ -62,6 +64,7 @@ public class BotWebhookService {
     private final I18nCoverageSlashCommandHandler i18nCoverageSlashCommandHandler;
     private final WorkflowSelectionService workflowSelectionService;
     private final IssueWorkflowOrchestrator issueWorkflowOrchestrator;
+    private final ReviewStateService reviewStateService;
 
     public BotWebhookService(GiteaClientFactory giteaClientFactory,
                              AgentSessionService agentSessionService,
@@ -74,7 +77,8 @@ public class BotWebhookService {
                              ReadmeSyncSlashCommandHandler readmeSyncSlashCommandHandler,
                              I18nCoverageSlashCommandHandler i18nCoverageSlashCommandHandler,
                              WorkflowSelectionService workflowSelectionService,
-                             IssueWorkflowOrchestrator issueWorkflowOrchestrator) {
+                             IssueWorkflowOrchestrator issueWorkflowOrchestrator,
+                             ReviewStateService reviewStateService) {
         this.giteaClientFactory = giteaClientFactory;
         this.agentSessionService = agentSessionService;
         this.botService = botService;
@@ -87,6 +91,7 @@ public class BotWebhookService {
         this.i18nCoverageSlashCommandHandler = i18nCoverageSlashCommandHandler;
         this.workflowSelectionService = workflowSelectionService;
         this.issueWorkflowOrchestrator = issueWorkflowOrchestrator;
+        this.reviewStateService = reviewStateService;
     }
 
     /**
@@ -98,6 +103,9 @@ public class BotWebhookService {
     public void reviewPullRequest(Bot bot, WebhookPayload payload) {
         try {
             AiAuditContext.setSessionId(auditSessionId(payload));
+            if ("reopened".equals(payload.getAction()) || "opened".equals(payload.getAction())) {
+                updateReviewStateOnReopen(bot, payload);
+            }
             runPullRequestReview(bot, payload, null);
         } finally {
             AiAuditContext.clear();
@@ -607,6 +615,7 @@ public class BotWebhookService {
     public void handlePrClosed(Bot bot, WebhookPayload payload) {
         try {
             AiAuditContext.setSessionId(auditSessionId(payload));
+            updateReviewStateOnClose(bot, payload);
             try {
                 if (isWorkflowEnabled(bot, ReviewWorkflow.KEY)) {
                     var hints = Map.of(ReviewWorkflow.HINT_REVIEW_ACTION, ReviewWorkflow.ACTION_PR_CLOSED);
@@ -635,6 +644,38 @@ public class BotWebhookService {
             }
         } finally {
             AiAuditContext.clear();
+        }
+    }
+
+    private void updateReviewStateOnClose(Bot bot, WebhookPayload payload) {
+        updateReviewStateLifecycle(bot, payload, true);
+    }
+
+    private void updateReviewStateOnReopen(Bot bot, WebhookPayload payload) {
+        updateReviewStateLifecycle(bot, payload, false);
+    }
+
+    private void updateReviewStateLifecycle(Bot bot, WebhookPayload payload, boolean closed) {
+        if (bot.getId() == null || payload.getRepository() == null
+                || payload.getRepository().getOwner() == null || payload.getPullRequest() == null
+                || payload.getPullRequest().getNumber() == null) {
+            return;
+        }
+        String owner = payload.getRepository().getOwner().getLogin();
+        String repo = payload.getRepository().getName();
+        Long prNumber = payload.getPullRequest().getNumber();
+        if (owner == null || repo == null) {
+            return;
+        }
+        try {
+            if (closed) {
+                reviewStateService.markPrClosed(bot.getId(), owner, repo, prNumber, Instant.now());
+            } else {
+                reviewStateService.markPrReopened(bot.getId(), owner, repo, prNumber);
+            }
+        } catch (RuntimeException e) {
+            log.warn("[Bot '{}'] Failed to update review-state lifecycle for PR #{}: {}",
+                    bot.getName(), prNumber, e.getMessage());
         }
     }
 
