@@ -131,8 +131,7 @@ public class BotWebhookService {
         boolean reviewFailed;
         boolean agenticReviewFailed;
         try {
-            boolean explicitRequest = triggerCommentId != null || "review_requested".equals(payload.getAction())
-                    || "assigned".equals(payload.getAction());
+            boolean explicitRequest = triggerCommentId != null || "review_requested".equals(payload.getAction());
             List<PrWorkflowRun> runs = explicitRequest
                     ? prWorkflowOrchestrator.runAll(bot, payload,
                             Map.of(PrWorkflowContext.HINT_EXPLICIT_REVIEW_REQUEST, "true"))

@@ -55,13 +55,13 @@ class ReviewSkipServiceTest {
     }
 
     private boolean skip() {
-        return service.shouldSkip(api, lease, "review", "bot", snapshot, false);
+        return service.shouldSkip(api, lease, "review", "bot", snapshot, true);
     }
 
     @Test void unchangedCleanRevisionSkips() { assertThat(skip()).isTrue(); }
     @Test void movingTargetTipDoesNotChangeEffectiveBase() {
         assertThat(service.shouldSkip(api, lease, "review", "bot",
-                new ReviewSnapshot("head-sha", "new-target-tip", "merge-base", "diff", true), false)).isTrue();
+                new ReviewSnapshot("head-sha", "new-target-tip", "merge-base", "diff", true), true)).isTrue();
     }
     @Test void changedMergeBaseReviews() { previous.setEffectiveBaseSha("older-base"); assertThat(skip()).isFalse(); }
     @Test void changedHeadReviews() { previous.setHeadSha("older-head"); assertThat(skip()).isFalse(); }
@@ -71,8 +71,8 @@ class ReviewSkipServiceTest {
         when(state.findRevision(1L, "owner", "repo", 7L, "review")).thenReturn(Optional.empty());
         assertThat(skip()).isFalse();
     }
-    @Test void explicitRequestNeverSkips() {
-        assertThat(service.shouldSkip(api, lease, "review", "bot", snapshot, true)).isFalse();
+    @Test void automaticRequestNeverSkips() {
+        assertThat(service.shouldSkip(api, lease, "review", "bot", snapshot, false)).isFalse();
         verifyNoInteractions(leases, api);
     }
     @Test void unpinnedNeverSkips() {
@@ -80,7 +80,7 @@ class ReviewSkipServiceTest {
                 new ReviewSnapshot("head-sha", "target-tip", null, "diff", true),
                 new ReviewSnapshot(null, "target-tip", "merge-base", "diff", false),
                 new ReviewSnapshot("head-sha", "target-tip", " ", "diff", true))) {
-            assertThat(service.shouldSkip(api, lease, "review", "bot", unpinned, false)).isFalse();
+            assertThat(service.shouldSkip(api, lease, "review", "bot", unpinned, true)).isFalse();
         }
         verifyNoInteractions(leases, api);
     }
@@ -100,7 +100,7 @@ class ReviewSkipServiceTest {
     @Test void missingCommentIdReviews() { prComment(Map.of("created_at", time.toString(), "user", Map.of("login", "author"))); assertThat(skip()).isFalse(); }
     @Test void missingAuthorReviews() { prComment(Map.of("id", "10", "created_at", time.toString())); assertThat(skip()).isFalse(); }
     @Test void missingCursorReviews() { previous.setLastSeenCommentId(null); prComment(comment("10", time.toString(), "author")); assertThat(skip()).isFalse(); }
-    @Test void missingBotLoginReviews() { assertThat(service.shouldSkip(api, lease, "review", null, snapshot, false)).isFalse(); }
+    @Test void missingBotLoginReviews() { assertThat(service.shouldSkip(api, lease, "review", null, snapshot, true)).isFalse(); }
     @Test void blankCommentStillCountsAsNew() { prComment(Map.of("id", "11", "created_at", time.toString(), "user", Map.of("login", "author"), "body", "")); assertThat(skip()).isFalse(); }
     @Test void newInlineCommentReviews() {
         ReviewComment comment = mock(ReviewComment.class);
@@ -135,19 +135,35 @@ class ReviewSkipServiceTest {
     }
     @Test void skipPostsOneReplyClearsEyesAndReleasesLease() {
         prepareGuard();
-        assertThat(service.trySkip(context(false), "review")).isTrue();
+        assertThat(service.trySkip(context(true), "review")).isTrue();
         verify(api).postPullRequestComment("owner", "repo", 7L, "No changes since last review at `head-sh`.");
         verify(api).removePullRequestReaction("owner", "repo", 7L, "eyes");
         verify(leases).release(lease);
     }
+    @Test void commentCommandSkipClearsCommentAcknowledgement() {
+        prepareGuard();
+        PrWorkflowContext context = context(true);
+        WebhookPayload.Comment comment = new WebhookPayload.Comment();
+        comment.setId(12L); comment.setBody("@bot /review");
+        context.payload().setComment(comment);
+        assertThat(service.trySkip(context, "review")).isTrue();
+        verify(api).removeReaction("owner", "repo", 12L, "eyes");
+        verify(api).postPullRequestComment("owner", "repo", 7L, "No changes since last review at `head-sh`.");
+    }
+    @Test void synchronizeGuardNeverAcquiresLease() {
+        PrWorkflowContext context = context(false);
+        context.payload().setAction("synchronize");
+        assertThat(service.trySkip(context, "review")).isFalse();
+        verifyNoInteractions(state, leases, factory, api);
+    }
     @Test void replyFailureReleasesLease() {
         prepareGuard();
         doThrow(new IllegalStateException("write failed")).when(api).postPullRequestComment(any(), any(), any(), any());
-        assertThatThrownBy(() -> service.trySkip(context(false), "review")).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> service.trySkip(context(true), "review")).isInstanceOf(IllegalStateException.class);
         verify(leases).release(lease);
     }
-    @Test void explicitGuardDoesNotAcquireLeaseOrFetchSnapshot() {
-        assertThat(service.trySkip(context(true), "review")).isFalse();
+    @Test void automaticGuardDoesNotAcquireLeaseOrFetchSnapshot() {
+        assertThat(service.trySkip(context(false), "review")).isFalse();
         verifyNoInteractions(state, leases, factory, api);
     }
 }

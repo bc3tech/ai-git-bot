@@ -8,7 +8,7 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ### Added
 
-- Added a lease-protected unchanged-revision guard to standard and agentic reviews, using the head SHA, effective diff base, successful non-degraded revision state, and complete comment scans. Explicit review requests always run; automatic skips post a short revision reply and clear the bot's eyes reaction. GitHub snapshots now obtain the merge-base through the compare API. Revision-state persistence is supplied by the grounded review-path integration.
+- Added a lease-protected unchanged-revision guard to standard and agentic reviews, using the head SHA, effective diff base, successful non-degraded revision state, and complete comment scans. Only explicit review requests may skip; automatic triggers always review. Skips post a short revision reply and clear the bot's eyes reactions. GitHub snapshots now obtain the merge-base through the compare API. Revision-state persistence is supplied by the grounded review-path integration.
 
 - Added the prior-findings digest service for grounded re-reviews. It reconciles stored findings only after complete provider scans and associates non-bot replies by thread, finding marker/link, then uniquely quoted code. History is explicitly labeled as non-current code; review-path integration follows separately.
 

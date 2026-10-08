@@ -60,8 +60,7 @@ public record PrWorkflowContext(
 
     public boolean explicitRequest() {
         return Boolean.parseBoolean(hint(HINT_EXPLICIT_REVIEW_REQUEST))
-                || "review_requested".equals(payload.getAction())
-                || "assigned".equals(payload.getAction());
+                || "review_requested".equals(payload.getAction());
     }
 
     public String hint(String key) {

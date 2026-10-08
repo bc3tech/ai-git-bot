@@ -30,7 +30,7 @@ public class ReviewSkipService {
 
     /** Entry-point guard until the review services own the full-run lease. */
     public boolean trySkip(PrWorkflowContext context, String workflowKey) {
-        if (context.explicitRequest()) {
+        if (!context.explicitRequest()) {
             return false;
         }
         String owner = context.payload().getRepository().getOwner().getLogin();
@@ -59,6 +59,14 @@ public class ReviewSkipService {
             } catch (RuntimeException e) {
                 log.warn("Could not clear unchanged-review acknowledgement on PR #{}: {}", pr, e.getMessage());
             }
+            if (context.payload().getComment() != null && context.payload().getComment().getId() != null) {
+                leaseService.assertHeld(lease);
+                try {
+                    api.removeReaction(owner, repo, context.payload().getComment().getId(), "eyes");
+                } catch (RuntimeException e) {
+                    log.warn("Could not clear unchanged-review comment acknowledgement on PR #{}: {}", pr, e.getMessage());
+                }
+            }
             context.appendStep("review-skip", message);
             return true;
         } finally {
@@ -66,10 +74,10 @@ public class ReviewSkipService {
         }
     }
 
-    /** Call after acquiring the run lease and reading the snapshot; explicit requests always run. */
+    /** Call after acquiring the run lease and reading the snapshot; automatic requests always run. */
     public boolean shouldSkip(RepositoryApiClient api, LeaseToken lease, String workflowKey, String botLogin,
                               ReviewSnapshot snapshot, boolean explicitRequest) {
-        if (explicitRequest || snapshot == null || !snapshot.pinned()) {
+        if (!explicitRequest || snapshot == null || !snapshot.pinned()) {
             return false;
         }
         leaseService.assertHeld(lease);

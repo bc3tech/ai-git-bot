@@ -71,8 +71,9 @@ class ReviewWorkflowTest {
     }
 
     @Test
-    void unchangedRevisionSkipsReviewAndFormalAction() {
+    void explicitUnchangedRevisionSkipsReviewAndFormalAction() {
         PrWorkflowContext context = ctx(botWith(PostReviewAction.APPROVE), payloadFor("acme", "web", 7L));
+        context.payload().setAction("review_requested");
         when(skipService.trySkip(context, ReviewWorkflow.KEY)).thenReturn(true);
 
         assertEquals(WorkflowResultStatus.SKIPPED, workflow.run(context).status());

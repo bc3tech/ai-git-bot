@@ -18,12 +18,12 @@ class PrWorkflowContextTest {
         assertThat(context(new WebhookPayload(), Map.of(PrWorkflowContext.HINT_EXPLICIT_REVIEW_REQUEST, "true"))
                 .explicitRequest()).isTrue();
     }
-    @ParameterizedTest @ValueSource(strings = {"review_requested", "assigned"})
+    @ParameterizedTest @ValueSource(strings = {"review_requested"})
     void explicitEventCannotLoseFlag(String action) {
         WebhookPayload payload = new WebhookPayload(); payload.setAction(action);
         assertThat(context(payload, Map.of()).explicitRequest()).isTrue();
     }
-    @ParameterizedTest @ValueSource(strings = {"opened", "synchronize", "synchronized", "reopened"})
+    @ParameterizedTest @ValueSource(strings = {"opened", "synchronize", "synchronized", "reopened", "assigned"})
     void automaticEventsAreNotExplicit(String action) {
         WebhookPayload payload = new WebhookPayload(); payload.setAction(action);
         assertThat(context(payload, Map.of()).explicitRequest()).isFalse();

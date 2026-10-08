@@ -53,8 +53,9 @@ class AgentReviewWorkflowTest {
     }
 
     @Test
-    void unchangedRevisionSkipsAgentAndFormalDecision() {
+    void explicitUnchangedRevisionSkipsAgentAndFormalDecision() {
         PrWorkflowContext context = context(new Bot());
+        context.payload().setAction("review_requested");
         when(skipService.trySkip(context, AgentReviewWorkflow.KEY)).thenReturn(true);
         assertEquals(WorkflowResultStatus.SKIPPED, workflow().run(context).status());
         org.mockito.Mockito.verifyNoInteractions(serviceFactory);
