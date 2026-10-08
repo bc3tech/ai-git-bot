@@ -438,7 +438,7 @@ GroundingResult {
     - Edge: very long quote → preview truncated, hash recorded.
   - **Verification:** audit tests green; events visible in existing run audit view.
 
-- [ ] **U5. Prior-findings digest and dispute association**
+- [x] **U5. Prior-findings digest and dispute association**
   - **Goal:** Reconcile pending records, build the R2 digest, and associate replies with prior findings. (R2, R10;
     KTD9, KTD13)
   - **Requirements:** R2, R10
@@ -465,7 +465,7 @@ GroundingResult {
     - Edge: no prior findings → empty digest, no prompt block.
   - **Verification:** rendered digest text matches snapshot; association tests green.
 
-- [ ] **U6. Double-check service and per-bot settings**
+- [x] **U6. Double-check service and per-bot settings**
   - **Goal:** Batched AI keep/drop/uncertain pass with per-bot config. (R6, R7; KTD4, KTD5)
   - **Requirements:** R6, R7
   - **Dependencies:** U1, U2, U8
