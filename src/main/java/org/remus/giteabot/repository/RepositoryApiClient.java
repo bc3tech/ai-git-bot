@@ -273,6 +273,11 @@ public interface RepositoryApiClient {
         // no-op by default; override where the provider supports it
     }
 
+    /** Removes the authenticated bot's PR reaction, when supported by the provider. */
+    default void removePullRequestReaction(String owner, String repo, Long pullNumber, String reaction) {
+        // no-op by default; override where the provider supports it
+    }
+
     /**
      * Adds a reaction to a pull request itself, rather than to a comment.
      * Default implementation is a no-op for providers without support.

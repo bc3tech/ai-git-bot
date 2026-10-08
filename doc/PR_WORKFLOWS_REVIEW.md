@@ -25,6 +25,21 @@ beyond connecting the bot to your Git host and AI provider.
 - Optionally, it applies a formal review action (approve / request changes) —
   see below.
 
+## Unchanged revisions
+
+Automatic review triggers may skip a revision already reviewed successfully by the
+same bot and workflow. Both the head SHA and effective diff base must match, the
+last run must not be degraded (including unparseable output), and complete PR and
+inline-comment scans must show no new non-bot comments. Missing comment metadata
+or a failed/incomplete scan causes a full review. A target-branch update alone
+does not force a review when the effective diff base remains unchanged.
+
+Explicit requests (`/review`, natural-language re-review commands, assignment,
+and adding the bot as reviewer) always run a full review. A skipped automatic run
+posts "No changes since last review at `<short-sha>`." and clears its eyes reaction
+where the provider supports reactions. This applies to standard and agentic
+reviews; it takes effect once the grounded pipeline persists revision state.
+
 ## Settings
 
 Set these on **System settings → Workflow configurations → Workflows → PR

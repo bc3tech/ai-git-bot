@@ -115,6 +115,31 @@ public class PriorFindingsService {
                 latest == null ? null : new CommentCursor(latest.createdAt(), latest.id()));
     }
 
+    /** Missing identities, timestamps, or incomplete scans cannot prove comment absence. */
+    public static boolean hasNewComments(RepositoryApiClient api, LeaseToken lease,
+                                         String botLogin, CommentCursor cursor) {
+        if (botLogin == null || botLogin.isBlank()) {
+            return true;
+        }
+        try {
+            CommentScan<ReviewComment> threads = api.listReviewThreadComments(lease.owner(), lease.repo(), lease.prNumber());
+            CommentScan<Map<String, Object>> comments = api.listPullRequestComments(lease.owner(), lease.repo(), lease.prNumber());
+            if (threads == null || comments == null || !threads.complete() || !comments.complete()) {
+                return true;
+            }
+            List<Reply> replies = new ArrayList<>();
+            for (ReviewComment comment : threads.comments()) {
+                replies.add(new Reply(string(comment.getId()), comment.getUserLogin(), nonNull(comment.getBody()),
+                        instant(comment.getCreatedAt())));
+            }
+            comments.comments().forEach(comment -> replies.add(fromMap(comment).reply()));
+            return replies.stream().anyMatch(reply -> !isBot(reply, botLogin)
+                    && (reply.login() == null || cursor.isNew(reply)));
+        } catch (RuntimeException e) {
+            return true;
+        }
+    }
+
     private void reconcile(List<ProviderComment> comments, LeaseToken lease, String workflowKey, String botLogin) {
         List<ProviderComment> own = comments.stream().filter(comment -> isBot(comment.reply(), botLogin)).toList();
         for (ReviewFindingRecord pending : stateService.pendingFindings(lease.botId(), lease.owner(), lease.repo(),

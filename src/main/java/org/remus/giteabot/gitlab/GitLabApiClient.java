@@ -608,6 +608,33 @@ public class GitLabApiClient implements RepositoryApiClient {
     }
 
     @Override
+    public void removePullRequestReaction(String owner, String repo, Long pullNumber, String reaction) {
+        String projectPath = encodeProjectPath(owner, repo);
+        Map<String, Object> user = gitlabRestClient.get().uri("/api/v4/user").retrieve()
+                .body(new ParameterizedTypeReference<>() {});
+        if (user == null || user.get("id") == null) return;
+        int page = 1;
+        while (true) {
+            List<Map<String, Object>> awards = gitlabRestClient.get()
+                    .uri("/api/v4/projects/{project}/merge_requests/{pr}/award_emoji?per_page=100&page={page}",
+                            projectPath, pullNumber, page++)
+                    .retrieve().body(new ParameterizedTypeReference<>() {});
+            if (awards == null) return;
+            for (Map<String, Object> award : awards) {
+                if (reaction.equals(award.get("name")) && award.get("user") instanceof Map<?, ?> author
+                        && java.util.Objects.equals(user.get("id"), author.get("id"))) {
+                    gitlabRestClient.delete()
+                            .uri("/api/v4/projects/{project}/merge_requests/{pr}/award_emoji/{id}",
+                                    projectPath, pullNumber, award.get("id"))
+                            .retrieve().toBodilessEntity();
+                    return;
+                }
+            }
+            if (awards.size() < 100) return;
+        }
+    }
+
+    @Override
     public void addPullRequestReaction(String owner, String repo, Long pullNumber, String reaction) {
         log.info("Adding '{}' award emoji to MR !{} in {}/{}", reaction, pullNumber, owner, repo);
         String projectPath = encodeProjectPath(owner, repo);

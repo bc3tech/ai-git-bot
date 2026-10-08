@@ -131,7 +131,12 @@ public class BotWebhookService {
         boolean reviewFailed;
         boolean agenticReviewFailed;
         try {
-            List<PrWorkflowRun> runs = prWorkflowOrchestrator.runAll(bot, payload);
+            boolean explicitRequest = triggerCommentId != null || "review_requested".equals(payload.getAction())
+                    || "assigned".equals(payload.getAction());
+            List<PrWorkflowRun> runs = explicitRequest
+                    ? prWorkflowOrchestrator.runAll(bot, payload,
+                            Map.of(PrWorkflowContext.HINT_EXPLICIT_REVIEW_REQUEST, "true"))
+                    : prWorkflowOrchestrator.runAll(bot, payload);
             reviewFailed = hasFailedRun(runs, ReviewWorkflow.KEY);
             agenticReviewFailed = hasFailedRun(runs, AgentReviewWorkflow.KEY);
         } catch (Exception e) {

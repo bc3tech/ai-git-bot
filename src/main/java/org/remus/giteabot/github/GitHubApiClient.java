@@ -108,8 +108,20 @@ public class GitHubApiClient implements RepositoryApiClient {
                 break;
             }
             Map<String, Object> after = getPullRequestDetails(owner, repo, pullNumber);
-            if (headSha.equals(nestedString(after, "head", "sha"))) {
-                return new ReviewSnapshot(headSha, baseSha, null, diff, true);
+            if (headSha.equals(nestedString(after, "head", "sha"))
+                    && java.util.Objects.equals(baseSha, nestedString(after, "base", "sha"))) {
+                String mergeBase = null;
+                if (baseSha != null) {
+                    try {
+                        Map<String, Object> comparison = restClient.get()
+                                .uri("/repos/{owner}/{repo}/compare/{base}...{head}", owner, repo, baseSha, headSha)
+                                .retrieve().body(new ParameterizedTypeReference<>() {});
+                        mergeBase = nestedString(comparison, "merge_base_commit", "sha");
+                    } catch (org.springframework.web.client.RestClientException e) {
+                        log.warn("Could not determine merge-base for GitHub PR #{}: {}", pullNumber, e.getMessage());
+                    }
+                }
+                return new ReviewSnapshot(headSha, baseSha, mergeBase, diff, true);
             }
         }
         log.warn("GitHub PR #{} in {}/{} has no stable head; review will be summary-only", pullNumber, owner, repo);
@@ -457,6 +469,32 @@ public class GitHubApiClient implements RepositoryApiClient {
                 .body(new ReactionRequest(reaction))
                 .retrieve()
                 .toBodilessEntity();
+    }
+
+    @Override
+    public void removePullRequestReaction(String owner, String repo, Long pullNumber, String reaction) {
+        Map<String, Object> user = restClient.get().uri("/user").retrieve()
+                .body(new ParameterizedTypeReference<>() {});
+        if (user == null || user.get("id") == null) {
+            return;
+        }
+        int page = 1;
+        while (true) {
+            List<Map<String, Object>> reactions = restClient.get()
+                    .uri("/repos/{owner}/{repo}/issues/{pr}/reactions?per_page=100&page={page}",
+                            owner, repo, pullNumber, page++)
+                    .retrieve().body(new ParameterizedTypeReference<>() {});
+            if (reactions == null) return;
+            for (Map<String, Object> entry : reactions) {
+                if (reaction.equals(entry.get("content")) && entry.get("user") instanceof Map<?, ?> author
+                        && java.util.Objects.equals(user.get("id"), author.get("id"))) {
+                    restClient.delete().uri("/repos/{owner}/{repo}/issues/{pr}/reactions/{id}",
+                            owner, repo, pullNumber, entry.get("id")).retrieve().toBodilessEntity();
+                    return;
+                }
+            }
+            if (reactions.size() < 100) return;
+        }
     }
 
     @Override

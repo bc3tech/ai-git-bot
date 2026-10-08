@@ -577,6 +577,14 @@ public class GiteaApiClient implements RepositoryApiClient {
     }
 
     @Override
+    public void removePullRequestReaction(String owner, String repo, Long pullNumber, String reaction) {
+        giteaRestClient.method(HttpMethod.DELETE)
+                .uri("/api/v1/repos/{owner}/{repo}/issues/{index}/reactions", owner, repo, pullNumber)
+                .body(new ReactionRequest(reaction))
+                .retrieve().toBodilessEntity();
+    }
+
+    @Override
     public void addPullRequestReaction(String owner, String repo, Long pullNumber, String reaction) {
         log.info("Adding '{}' reaction to PR #{} in {}/{}", reaction, pullNumber, owner, repo);
         postIssueResourceReaction(owner, repo, pullNumber, reaction);

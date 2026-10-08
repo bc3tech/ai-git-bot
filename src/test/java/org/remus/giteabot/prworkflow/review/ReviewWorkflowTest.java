@@ -45,6 +45,7 @@ import static org.mockito.Mockito.when;
 @ExtendWith(MockitoExtension.class)
 class ReviewWorkflowTest {
 
+    @Mock private org.remus.giteabot.review.ReviewSkipService skipService;
     @Mock private CodeReviewServiceFactory factory;
     @Mock private GiteaClientFactory giteaClientFactory;
     @Mock private WorkflowSelectionService selectionService;
@@ -60,13 +61,25 @@ class ReviewWorkflowTest {
         lenient().when(chunkingProperties.getMaxDiffChunks()).thenReturn(8);
         lenient().when(chunkingProperties.getRetryTruncatedChunkChars()).thenReturn(60_000);
 
-        workflow = new ReviewWorkflow(factory, giteaClientFactory, selectionService, chunkingProperties);
+        workflow = new ReviewWorkflow(factory, giteaClientFactory, selectionService, chunkingProperties, skipService);
         lenient().when(giteaClientFactory.getApiClient(any())).thenReturn(repoClient);
         lenient().when(factory.create(any(Bot.class), eq(repoClient),
                 anyInt(), anyInt(), anyInt(), any())).thenReturn(codeReviewService);
         lenient().when(factory.create(any(Bot.class), eq(repoClient),
                 anyInt(), anyInt(), anyInt(), any(), any())).thenReturn(codeReviewService);
         lenient().when(selectionService.resolveParams(any(), any())).thenReturn(Map.of());
+    }
+
+    @Test
+    void unchangedRevisionSkipsReviewAndFormalAction() {
+        PrWorkflowContext context = ctx(botWith(PostReviewAction.APPROVE), payloadFor("acme", "web", 7L));
+        when(skipService.trySkip(context, ReviewWorkflow.KEY)).thenReturn(true);
+
+        assertEquals(WorkflowResultStatus.SKIPPED, workflow.run(context).status());
+
+        verify(factory, never()).create(any(), any(), anyInt(), anyInt(), anyInt(), any(), any());
+        verify(codeReviewService, never()).runReview(any(), any(), any());
+        verify(repoClient, never()).postReviewAction(any(), any(), anyLong(), any());
     }
 
     @Test

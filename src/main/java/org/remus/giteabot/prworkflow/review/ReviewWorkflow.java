@@ -14,6 +14,7 @@ import org.remus.giteabot.prworkflow.WorkflowResult;
 import org.remus.giteabot.prworkflow.config.WorkflowSelectionService;
 import org.remus.giteabot.repository.RepositoryApiClient;
 import org.remus.giteabot.review.CodeReviewService;
+import org.remus.giteabot.review.ReviewSkipService;
 import org.remus.giteabot.review.grounding.DoubleCheckSettings;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
@@ -57,6 +58,7 @@ public class ReviewWorkflow implements PrWorkflow {
     public static final String ACTION_REVIEW_SUBMITTED = "reviewSubmitted";
     public static final String ACTION_PR_CLOSED = "prClosed";
 
+    private final ReviewSkipService skipService;
     private final CodeReviewServiceFactory codeReviewServiceFactory;
     private final GiteaClientFactory giteaClientFactory;
     private final WorkflowSelectionService selectionService;
@@ -65,7 +67,8 @@ public class ReviewWorkflow implements PrWorkflow {
     public ReviewWorkflow(CodeReviewServiceFactory codeReviewServiceFactory,
                           GiteaClientFactory giteaClientFactory,
                           @Lazy WorkflowSelectionService selectionService,
-                          ReviewChunkingProperties chunkingProperties) {
+                          ReviewChunkingProperties chunkingProperties, ReviewSkipService skipService) {
+        this.skipService = skipService;
         this.codeReviewServiceFactory = codeReviewServiceFactory;
         this.giteaClientFactory = giteaClientFactory;
         this.selectionService = selectionService;
@@ -187,6 +190,9 @@ public class ReviewWorkflow implements PrWorkflow {
         RepositoryApiClient repositoryClient = giteaClientFactory.getApiClient(bot.getGitIntegration());
 
         context.requireActive("before invoking CodeReviewService.reviewPullRequest");
+        if (skipService.trySkip(context, KEY)) {
+            return WorkflowResult.skipped("No changes since last review");
+        }
 
         CodeReviewService.ReviewRun run = codeReviewServiceFactory.create(bot, repositoryClient,
                         maxDiffCharsPerChunk, maxDiffChunks, retryTruncatedChunkChars, excludedFilePatterns, doubleCheckSettings)

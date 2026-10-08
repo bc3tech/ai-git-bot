@@ -34,6 +34,21 @@ class GitLabApiClientTest {
             RepositoryCredentials.of("https://gitlab.example.com", "https://gitlab.example.com", "glpat-token123");
 
     @Test
+    void removePullRequestReaction_deletesOnlyAuthenticatedBotsReaction() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitLabApiClient client = new GitLabApiClient(builder.build(), CREDS);
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v4/user"))
+                .andRespond(withSuccess("{\"id\":1}", MediaType.APPLICATION_JSON));
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v4/projects/owner%2Frepo/merge_requests/7/award_emoji?per_page=100&page=1"))
+                .andRespond(withSuccess("[{\"id\":10,\"name\":\"eyes\",\"user\":{\"id\":2}},{\"id\":11,\"name\":\"eyes\",\"user\":{\"id\":1}}]", MediaType.APPLICATION_JSON));
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v4/projects/owner%2Frepo/merge_requests/7/award_emoji/11"))
+                .andExpect(method(HttpMethod.DELETE)).andRespond(withSuccess());
+        client.removePullRequestReaction("owner", "repo", 7L, "eyes");
+        server.verify();
+    }
+
+    @Test
     void implementsRepositoryApiClient() {
         GitLabApiClient client = new GitLabApiClient(null, CREDS);
         assertInstanceOf(RepositoryApiClient.class, client);

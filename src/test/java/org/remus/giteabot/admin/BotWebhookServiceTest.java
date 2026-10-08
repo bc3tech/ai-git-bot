@@ -151,7 +151,7 @@ class BotWebhookServiceTest {
         lenient().when(chunkingProperties.getRetryTruncatedChunkChars()).thenReturn(60_000);
         var reviewWorkflow = new org.remus.giteabot.prworkflow.review.ReviewWorkflow(
                 codeReviewServiceFactory, giteaClientFactory, workflowSelectionService,
-                chunkingProperties);
+                chunkingProperties, org.mockito.Mockito.mock(org.remus.giteabot.review.ReviewSkipService.class));
         lenient().when(prWorkflowOrchestrator.run(
                         any(Bot.class), any(WebhookPayload.class), eq("review"), anyMap()))
                 .thenAnswer(invocation -> {
@@ -406,7 +406,7 @@ class BotWebhookServiceTest {
 
         verify(repositoryApiClient).addPullRequestReaction(
                 "Test", "my-repo", 42L, Reactions.EYES);
-        verify(prWorkflowOrchestrator).runAll(bot, payload);
+        verify(prWorkflowOrchestrator).runAll(bot, payload, Map.of(PrWorkflowContext.HINT_EXPLICIT_REVIEW_REQUEST, "true"));
     }
 
     @Test
@@ -1300,7 +1300,7 @@ class BotWebhookServiceTest {
 
             botWebhookService.handlePrComment(bot, payload);
 
-            verify(prWorkflowOrchestrator).runAll(bot, payload);
+            verify(prWorkflowOrchestrator).runAll(bot, payload, Map.of(PrWorkflowContext.HINT_EXPLICIT_REVIEW_REQUEST, "true"));
             verify(prWorkflowOrchestrator, never()).run(any(), any(), any(), anyMap());
             verify(repositoryApiClient).addReaction(OWNER, REPO, COMMENT_ID, Reactions.EYES);
             assertEquals("feature", payload.getPullRequest().getHead().getRef());
@@ -1317,7 +1317,7 @@ class BotWebhookServiceTest {
 
             botWebhookService.handleBotCommand(bot, payload);
 
-            verify(prWorkflowOrchestrator).runAll(bot, payload);
+            verify(prWorkflowOrchestrator).runAll(bot, payload, Map.of(PrWorkflowContext.HINT_EXPLICIT_REVIEW_REQUEST, "true"));
             verify(agentReviewSlashCommandHandler, never()).tryHandle(any(), any());
         }
 
@@ -1329,7 +1329,7 @@ class BotWebhookServiceTest {
             failed.setWorkflowKey(ReviewWorkflow.KEY);
             failed.setStatus(org.remus.giteabot.prworkflow.PrWorkflowRunStatus.FAILED);
             Bot bot = createBot("bot", "claude_bot");
-            when(prWorkflowOrchestrator.runAll(bot, payload)).thenReturn(java.util.List.of(failed));
+            when(prWorkflowOrchestrator.runAll(bot, payload, Map.of(PrWorkflowContext.HINT_EXPLICIT_REVIEW_REQUEST, "true"))).thenReturn(java.util.List.of(failed));
 
             botWebhookService.handlePrComment(bot, payload);
 

@@ -10,6 +10,7 @@ import org.remus.giteabot.prworkflow.WorkflowParamField;
 import org.remus.giteabot.prworkflow.WorkflowParamsSchema;
 import org.remus.giteabot.prworkflow.WorkflowResult;
 import org.remus.giteabot.prworkflow.config.WorkflowSelectionService;
+import org.remus.giteabot.review.ReviewSkipService;
 import org.remus.giteabot.review.grounding.DoubleCheckSettings;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
@@ -45,11 +46,13 @@ public class AgentReviewWorkflow implements PrWorkflow {
             APPROVE, REQUEST_CHANGES, or NONE yourself; only provide the classification
             counts below.""";
 
+    private final ReviewSkipService skipService;
     private final AgentReviewServiceFactory serviceFactory;
     private final WorkflowSelectionService selectionService;
 
     public AgentReviewWorkflow(AgentReviewServiceFactory serviceFactory,
-                               @Lazy WorkflowSelectionService selectionService) {
+                               @Lazy WorkflowSelectionService selectionService, ReviewSkipService skipService) {
+        this.skipService = skipService;
         this.serviceFactory = serviceFactory;
         this.selectionService = selectionService;
     }
@@ -115,6 +118,10 @@ public class AgentReviewWorkflow implements PrWorkflow {
         String clarification = context.hint(PrWorkflowContext.HINT_AGENTIC_REVIEW_CLARIFICATION);
         if (clarification != null && !clarification.isBlank()) {
             return doClarification(context, clarification);
+        }
+
+        if (skipService.trySkip(context, KEY)) {
+            return WorkflowResult.skipped("No changes since last review");
         }
 
         Map<String, Object> params = resolveParams(bot);

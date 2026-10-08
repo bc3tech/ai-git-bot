@@ -5,7 +5,7 @@ package org.remus.giteabot.repository.model;
  *
  * @param headSha         head commit the diff was produced from; {@code null} when unknown
  * @param baseSha         base (or merge-base) commit of the diff; {@code null} when unknown
- * @param startSha        provider-specific start commit (GitLab diff versions); otherwise {@code null}
+ * @param startSha        effective diff origin (Gitea/GitHub merge-base or GitLab start commit); {@code null} when unknown
  * @param diff            unified diff of exactly this revision
  * @param inlineSupported whether the provider can publish comments bound to this revision
  */
@@ -17,6 +17,15 @@ public record ReviewSnapshot(String headSha, String baseSha, String startSha, St
         if (inlineSupported && (headSha == null || headSha.isBlank())) {
             throw new IllegalArgumentException("Inline-capable snapshots require a head commit");
         }
+    }
+
+    /** The diff origin, never the moving target branch tip. */
+    public String effectiveBaseSha() {
+        return startSha == null || startSha.isBlank() ? null : startSha;
+    }
+
+    public boolean pinned() {
+        return headSha != null && !headSha.isBlank() && effectiveBaseSha() != null;
     }
 
     /** A snapshot that can only be published as a summary (no revision-bound inline support). */

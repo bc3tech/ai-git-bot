@@ -31,6 +31,18 @@ class GiteaApiClientTest {
             RepositoryCredentials.of("https://gitea.example.com", "https://gitea.example.com", "gitea-token");
 
     @Test
+    void removePullRequestReaction_usesIssueReactionDeleteEndpoint() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GiteaApiClient client = new GiteaApiClient(builder.build(), CREDS);
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v1/repos/owner/repo/issues/7/reactions"))
+                .andExpect(method(HttpMethod.DELETE)).andExpect(jsonPath("$.content").value("eyes"))
+                .andRespond(withSuccess());
+        client.removePullRequestReaction("owner", "repo", 7L, "eyes");
+        server.verify();
+    }
+
+    @Test
     void implementsRepositoryApiClient() {
         GiteaApiClient client = new GiteaApiClient(null, CREDS);
         assertInstanceOf(RepositoryApiClient.class, client);

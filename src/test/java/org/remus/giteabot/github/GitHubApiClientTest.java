@@ -35,6 +35,21 @@ class GitHubApiClientTest {
             RepositoryCredentials.of("https://api.github.com", "https://github.com", "ghp_token");
 
     @Test
+    void removePullRequestReaction_deletesOnlyAuthenticatedBotsReaction() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitHubApiClient client = new GitHubApiClient(builder.build(), CREDS);
+        server.expect(requestTo(CREDS.baseUrl() + "/user"))
+                .andRespond(withSuccess("{\"id\":1}", MediaType.APPLICATION_JSON));
+        server.expect(requestTo(CREDS.baseUrl() + "/repos/owner/repo/issues/7/reactions?per_page=100&page=1"))
+                .andRespond(withSuccess("[{\"id\":10,\"content\":\"eyes\",\"user\":{\"id\":2}},{\"id\":11,\"content\":\"eyes\",\"user\":{\"id\":1}}]", MediaType.APPLICATION_JSON));
+        server.expect(requestTo(CREDS.baseUrl() + "/repos/owner/repo/issues/7/reactions/11"))
+                .andExpect(method(HttpMethod.DELETE)).andRespond(withSuccess());
+        client.removePullRequestReaction("owner", "repo", 7L, "eyes");
+        server.verify();
+    }
+
+    @Test
     void implementsRepositoryApiClient() {
         GitHubApiClient client = new GitHubApiClient(null, CREDS);
         assertInstanceOf(RepositoryApiClient.class, client);
@@ -169,6 +184,27 @@ class GitHubApiClientTest {
     }
 
     @Test
+    void getReviewSnapshot_missingMergeBaseDoesNotPinToTargetTip() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitHubApiClient client = new GitHubApiClient(builder.build(), CREDS);
+        String details = "{\"head\":{\"sha\":\"head\"},\"base\":{\"sha\":\"base\"}}";
+        server.expect(requestTo(CREDS.baseUrl() + "/repos/owner/repo/pulls/7"))
+                .andRespond(withSuccess(details, MediaType.APPLICATION_JSON));
+        server.expect(requestTo(CREDS.baseUrl() + "/repos/owner/repo/pulls/7"))
+                .andRespond(withSuccess("diff", MediaType.TEXT_PLAIN));
+        server.expect(requestTo(CREDS.baseUrl() + "/repos/owner/repo/pulls/7"))
+                .andRespond(withSuccess(details, MediaType.APPLICATION_JSON));
+        server.expect(requestTo(CREDS.baseUrl() + "/repos/owner/repo/compare/base...head"))
+                .andRespond(withStatus(HttpStatus.SERVICE_UNAVAILABLE));
+        ReviewSnapshot snapshot = client.getReviewSnapshot("owner", "repo", 7L);
+        assertNull(snapshot.effectiveBaseSha());
+        assertFalse(snapshot.pinned());
+        assertEquals("diff", snapshot.diff());
+        server.verify();
+    }
+
+    @Test
     void getReviewSnapshot_retriesChangedHeadAndReturnsConsistentSnapshot() {
         RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
@@ -197,11 +233,16 @@ class GitHubApiClientTest {
                 .andRespond(withSuccess("{\"head\":{\"sha\":\"new-head\"},\"base\":{\"sha\":\"base\"}}",
                         MediaType.APPLICATION_JSON));
 
+        server.expect(requestTo("https://api.github.com/repos/owner/repo/compare/base...new-head"))
+                .andRespond(withSuccess("{\"merge_base_commit\":{\"sha\":\"merge-base\"}}", MediaType.APPLICATION_JSON));
+
         ReviewSnapshot snapshot = client.getReviewSnapshot("owner", "repo", 7L);
 
         server.verify();
         assertEquals("new-head", snapshot.headSha());
         assertEquals("base", snapshot.baseSha());
+        assertEquals("merge-base", snapshot.effectiveBaseSha());
+        assertTrue(snapshot.pinned());
         assertTrue(snapshot.inlineSupported());
         assertEquals("diff --git a/a b/a\n", snapshot.diff());
     }

@@ -46,6 +46,10 @@ public class PrWorkflowOrchestrator {
     private final AiIntegrationConcurrencyLimiter concurrencyLimiter;
 
     public List<PrWorkflowRun> runAll(Bot bot, WebhookPayload payload) {
+        return runAll(bot, payload, Map.of());
+    }
+
+    public List<PrWorkflowRun> runAll(Bot bot, WebhookPayload payload, Map<String, String> hints) {
         if (bot == null) throw new IllegalArgumentException("bot must not be null");
         List<String> workflowKeys = preferAgenticReview(enabledWorkflowKeys(bot, workflowSelectionService));
         if (workflowKeys.isEmpty()) {
@@ -59,7 +63,7 @@ public class PrWorkflowOrchestrator {
                 continue;
             }
             try {
-                runs.add(run(bot, payload, key));
+                runs.add(run(bot, payload, key, hints));
             } catch (RuntimeException e) {
                 log.error("[Bot '{}'] Workflow '{}' failed: {}", bot.getName(), key, e.getMessage(), e);
             }

@@ -35,18 +35,29 @@ import static org.mockito.Mockito.when;
 class AgentReviewWorkflowTest {
 
     @Mock
+    private org.remus.giteabot.review.ReviewSkipService skipService;
+
+    @Mock
     private AgentReviewServiceFactory serviceFactory;
 
     @Mock
     private WorkflowSelectionService selectionService;
 
     private AgentReviewWorkflow workflow() {
-        return new AgentReviewWorkflow(serviceFactory, selectionService);
+        return new AgentReviewWorkflow(serviceFactory, selectionService, skipService);
     }
 
     private PrWorkflowContext context(Bot bot) {
         return new PrWorkflowContext(bot, new WebhookPayload(), 1L,
                 (name, log) -> { }, () -> false);
+    }
+
+    @Test
+    void unchangedRevisionSkipsAgentAndFormalDecision() {
+        PrWorkflowContext context = context(new Bot());
+        when(skipService.trySkip(context, AgentReviewWorkflow.KEY)).thenReturn(true);
+        assertEquals(WorkflowResultStatus.SKIPPED, workflow().run(context).status());
+        org.mockito.Mockito.verifyNoInteractions(serviceFactory);
     }
 
     @Test
