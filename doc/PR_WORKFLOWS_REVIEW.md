@@ -61,6 +61,11 @@ requires the grounding publication integration. Disputed or
 context-changed prior findings are checked regardless of enablement or severity.
 An unknown integration ID falls back to the review integration with an audit warning.
 
+Before relying on the same-model default, run the opt-in
+[live double-check evaluation](LOCAL_DEVELOPMENT.md#opt-in-live-double-check-evaluation).
+If rejection is below 90% or valid retention below 95%, use a separate
+`doubleCheckAiIntegrationId` and evaluate that integration before adopting it.
+
 Large PRs are automatically split into chunks and reviewed piece by piece, so a
 big diff never silently fails.
 

@@ -1,0 +1,41 @@
+diff --git a/EvalExamples.java b/EvalExamples.java
+new file mode 100644
+--- /dev/null
++++ b/EvalExamples.java
+@@ -0,0 +1,36 @@
++import java.util.List;
++
++class EvalExamples {
++    int divide() {
++        int divisor = 0;
++        return 42 / divisor;
++    }
++
++    int last(int[] values) {
++        return values[values.length];
++    }
++
++    String trim() {
++        String value = null;
++        return value.trim();
++    }
++
++    List<String> append() {
++        List<String> values = List.of("first");
++        values.add("second");
++        return values;
++    }
++
++    int sum(int[] values) {
++        int result = 0;
++        for (int i = 0; i <= values.length; i++) {
++            result += values[i];
++        }
++        return result;
++    }
++
++    int firstNonempty(int[] values) {
++        if (values == null || values.length == 0) return -1;
++        return values[0];
++    }
++}

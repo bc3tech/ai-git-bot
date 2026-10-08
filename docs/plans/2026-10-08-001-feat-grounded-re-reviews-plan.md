@@ -650,7 +650,7 @@ GroundingResult {
   - **Verification:** 16 replay cases green across both paths; ArchitectureTest, related service tests, and the full Maven suite pass.
   - **Regression fixes:** Guard a missing human-comment cursor when recording an agentic revision. Exclude command-only review requests from the new-comment skip check; requests with additional commentary still force a review.
 
-- [ ] **U13. Live double-check evaluation harness (opt-in)**
+- [x] **U13. Live double-check evaluation harness (opt-in)**
   - **Goal:** Measure whether the real double-check prompt and configured model actually make the right calls,
     which canned fakes cannot show. (Key decision: "regression set decides whether the default is good enough")
   - **Requirements:** R6 (verification of the default), success criteria
@@ -668,7 +668,14 @@ GroundingResult {
   - **Test scenarios:**
     - Happy: harness runs all labeled cases and prints a metrics table.
     - Edge: missing endpoint env vars → tests skipped, not failed.
-  - **Verification:** one recorded run against the user's Gitea bot integration attached to the PR description.
+  - **Implementation:** `live-eval` tag excluded by default; opt-in Maven profile plus endpoint/key/model assumptions.
+    Twelve quote-grounded labeled cases run three times each through the real service and OpenAI-compatible client.
+    Exact keep/drop rates, dispute accuracy, agreement, and held/failed counts are reported to
+    `target/double-check-live-eval.txt`; usage and separate-integration guidance are in `doc/LOCAL_DEVELOPMENT.md`.
+  - **Verification:** 34 targeted tests pass (including six evaluation-helper tests and nine architecture checks);
+    default selection excludes the live class; explicit opt-in without environment variables skips one test;
+    the full Maven suite passes. A recorded live run against the user's Gitea bot integration and PR-description
+    attachment remain pending because endpoint credentials were not supplied; no live accuracy claim is made.
 
 ## Dependency Graph
 

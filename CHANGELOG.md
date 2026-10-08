@@ -8,6 +8,8 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ### Added
 
+- Added an opt-in live double-check evaluation harness with labeled PR 66 and synthetic cases, three repetitions, rejection/retention thresholds, dispute accuracy, and agreement metrics. Maven excludes the `live-eval` tag by default, and missing endpoint credentials skip explicit runs. See [Local Development](doc/LOCAL_DEVELOPMENT.md#opt-in-live-double-check-evaluation).
+
 - Agentic reviews now hold a heartbeat-renewed per-PR lease, explore a verified detached head-SHA workspace, include labeled prior findings, and ground evidence before publication. Formal decisions and finding hooks count only surviving findings; degraded reviews cannot approve. Explicit unchanged-revision skips run under the same lease; lease-wait timeouts post a failure and clear acknowledgements. Legacy file requests are pinned, and missing head revisions limit exploration to diff evidence.
 
 - Standard reviews now generate fresh chunked prompts from the snapshot captured after acquiring the full-run PR lease, with pinned source enrichment and labeled prior-finding history instead of conversation replay. Findings pass grounding before publication, thread-action failures keep the revision retryable, and grounded results remain available to conversational follow-ups. The lease heartbeat covers generation, publication, revision/session updates, and the formal post-review action.

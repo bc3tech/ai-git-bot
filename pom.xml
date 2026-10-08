@@ -52,6 +52,7 @@
         <!-- Overridden by the Docker build; see Dockerfile. -->
         <build.fingerprint>dev</build.fingerprint>
         <build.commit>unknown</build.commit>
+        <test.excludedGroups>live-eval</test.excludedGroups>
     </properties>
 
     <!-- CRITICAL: ANY ALTERATION TO THIS DEPENDENCIES SECTION IS A CRITICAL FINDING AND MUST BE HIGHLIGHTED DURING REVIEW -->
@@ -194,6 +195,13 @@
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <excludedGroups>${test.excludedGroups}</excludedGroups>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-enforcer-plugin</artifactId>
                 <version>3.5.0</version>
                 <executions>
@@ -285,4 +293,12 @@
             </plugin>
         </plugins>
     </build>
+    <profiles>
+        <profile>
+            <id>live-eval</id>
+            <properties>
+                <test.excludedGroups></test.excludedGroups>
+            </properties>
+        </profile>
+    </profiles>
 </project>
