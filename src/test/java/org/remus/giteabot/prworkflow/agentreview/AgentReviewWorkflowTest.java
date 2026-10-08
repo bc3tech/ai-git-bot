@@ -54,7 +54,7 @@ class AgentReviewWorkflowTest {
         AgentReviewWorkflow wf = workflow();
         assertEquals("agentic-review", wf.key());
         assertEquals(PrWorkflowCategory.REVIEW, wf.category());
-        assertEquals(6, wf.paramsSchema().fields().size());
+        assertEquals(9, wf.paramsSchema().fields().size());
         assertFalse(wf.paramsSchema().isEmpty());
     }
 

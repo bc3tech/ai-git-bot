@@ -47,6 +47,14 @@ PR Review**.
 | `blockerThreshold` | integer | *(empty)* | Maximum allowed `BLOCKER` findings for a formal `APPROVE`. Empty means ignored. |
 | `mediumThreshold` | integer | *(empty)* | Maximum allowed `MEDIUM` findings for a formal `APPROVE`. Empty means ignored. |
 | `lowThreshold` | integer | *(empty)* | Maximum allowed `LOW` findings for a formal `APPROVE`. Empty means ignored. |
+| `doubleCheckEnabled` | boolean | `true` | Select new findings for independent AI verification. |
+| `doubleCheckMinSeverity` | enum | `LOW` | Check new findings at or above `LOW`, `MEDIUM`, `HIGH`, or `BLOCKER`. |
+| `doubleCheckAiIntegrationId` | integer | `0` | Optional second AI integration ID; blank or `0` uses the review integration. |
+
+Double-check settings are exposed for the grounded-review pipeline; enforcement
+requires the grounding publication integration. Disputed or
+context-changed prior findings are checked regardless of enablement or severity.
+An unknown integration ID falls back to the review integration with an audit warning.
 
 ### Formal review decision
 

@@ -10,6 +10,7 @@ import org.remus.giteabot.prworkflow.WorkflowParamField;
 import org.remus.giteabot.prworkflow.WorkflowParamsSchema;
 import org.remus.giteabot.prworkflow.WorkflowResult;
 import org.remus.giteabot.prworkflow.config.WorkflowSelectionService;
+import org.remus.giteabot.review.grounding.DoubleCheckSettings;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
@@ -100,7 +101,10 @@ public class AgentReviewWorkflow implements PrWorkflow {
                         "Low must be less or equal",
                         WorkflowParamField.ParamType.INTEGER, false,
                         null,
-                        "Maximum allowed LOW findings for a formal APPROVE. Leave empty to ignore."));
+                        "Maximum allowed LOW findings for a formal APPROVE. Leave empty to ignore."),
+                DoubleCheckSettings.enabledField(AgentReviewParam.DOUBLE_CHECK_ENABLED),
+                DoubleCheckSettings.severityField(AgentReviewParam.DOUBLE_CHECK_MIN_SEVERITY),
+                DoubleCheckSettings.integrationField(AgentReviewParam.DOUBLE_CHECK_AI_INTEGRATION_ID));
     }
 
     @Override

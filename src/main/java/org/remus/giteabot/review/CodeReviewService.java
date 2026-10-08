@@ -14,6 +14,7 @@ import org.remus.giteabot.repository.model.ReviewComment;
 import org.remus.giteabot.repository.model.ReviewPublicationResult;
 import org.remus.giteabot.repository.model.ReviewSnapshot;
 import org.remus.giteabot.review.enrichment.PrContextEnricher;
+import org.remus.giteabot.review.grounding.DoubleCheckSettings;
 import org.remus.giteabot.session.ReviewSession;
 import org.remus.giteabot.session.SessionService;
 import org.springframework.web.client.HttpClientErrorException;
@@ -42,18 +43,30 @@ public class CodeReviewService {
     private final int maxDiffChunks;
     private final int retryTruncatedChunkChars;
     private final List<String> excludedFilePatterns;
+    private final DoubleCheckSettings doubleCheckSettings;
 
     public CodeReviewService(RepositoryApiClient repositoryClient, AiClient aiClient,
                              SessionService sessionService, String botUsername, ReviewConfigProperties reviewConfig,
                              String sessionPromptKey, String reviewSystemPrompt,
                              int maxDiffCharsPerChunk, int maxDiffChunks, int retryTruncatedChunkChars,
                              String excludedFilePatterns) {
+        this(repositoryClient, aiClient, sessionService, botUsername, reviewConfig, sessionPromptKey,
+                reviewSystemPrompt, maxDiffCharsPerChunk, maxDiffChunks, retryTruncatedChunkChars,
+                excludedFilePatterns, DoubleCheckSettings.defaults());
+    }
+
+    public CodeReviewService(RepositoryApiClient repositoryClient, AiClient aiClient,
+                             SessionService sessionService, String botUsername, ReviewConfigProperties reviewConfig,
+                             String sessionPromptKey, String reviewSystemPrompt,
+                             int maxDiffCharsPerChunk, int maxDiffChunks, int retryTruncatedChunkChars,
+                             String excludedFilePatterns, DoubleCheckSettings doubleCheckSettings) {
         if (sessionPromptKey == null || sessionPromptKey.isBlank()) {
             throw new IllegalArgumentException("Session prompt key is required");
         }
         if (reviewSystemPrompt == null || reviewSystemPrompt.isBlank()) {
             throw new IllegalArgumentException("Review system prompt is required");
         }
+        this.doubleCheckSettings = java.util.Objects.requireNonNull(doubleCheckSettings);
         this.repositoryClient = repositoryClient;
         this.aiClient = aiClient;
         this.sessionService = sessionService;
@@ -65,6 +78,10 @@ public class CodeReviewService {
         this.maxDiffChunks = maxDiffChunks;
         this.retryTruncatedChunkChars = retryTruncatedChunkChars;
         this.excludedFilePatterns = DiffFileFilter.parsePatterns(excludedFilePatterns);
+    }
+
+    public DoubleCheckSettings doubleCheckSettings() {
+        return doubleCheckSettings;
     }
 
     /**

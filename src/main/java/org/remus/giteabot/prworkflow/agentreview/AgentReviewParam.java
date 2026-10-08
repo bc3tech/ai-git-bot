@@ -23,7 +23,11 @@ public enum AgentReviewParam implements WorkflowParamName {
     MEDIUM_THRESHOLD("mediumThreshold"),
 
     /** Maximum allowed number of LOW findings for a formal APPROVE decision. */
-    LOW_THRESHOLD("lowThreshold");
+    LOW_THRESHOLD("lowThreshold"),
+
+    DOUBLE_CHECK_ENABLED("doubleCheckEnabled"),
+    DOUBLE_CHECK_MIN_SEVERITY("doubleCheckMinSeverity"),
+    DOUBLE_CHECK_AI_INTEGRATION_ID("doubleCheckAiIntegrationId");
 
     private final String key;
 

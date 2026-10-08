@@ -64,6 +64,8 @@ class ReviewWorkflowTest {
         lenient().when(giteaClientFactory.getApiClient(any())).thenReturn(repoClient);
         lenient().when(factory.create(any(Bot.class), eq(repoClient),
                 anyInt(), anyInt(), anyInt(), any())).thenReturn(codeReviewService);
+        lenient().when(factory.create(any(Bot.class), eq(repoClient),
+                anyInt(), anyInt(), anyInt(), any(), any())).thenReturn(codeReviewService);
         lenient().when(selectionService.resolveParams(any(), any())).thenReturn(Map.of());
     }
 
@@ -136,6 +138,23 @@ class ReviewWorkflowTest {
                 () -> workflow.run(context));
 
         assertEquals(writeFailure, thrown);
+    }
+
+    @Test
+    void forwardsDoubleCheckSettingsToReviewFactory() {
+        Bot bot = botWith(PostReviewAction.NONE);
+        org.remus.giteabot.prworkflow.config.WorkflowConfiguration config =
+                new org.remus.giteabot.prworkflow.config.WorkflowConfiguration();
+        config.setId(42L);
+        bot.setWorkflowConfiguration(config);
+        when(selectionService.resolveParams(42L, "review")).thenReturn(Map.of(
+                "doubleCheckEnabled", false, "doubleCheckMinSeverity", "HIGH", "doubleCheckAiIntegrationId", 7));
+        WebhookPayload payload = payloadFor("acme", "web", 7L);
+        when(codeReviewService.runReview(eq(payload), eq(null), any())).thenReturn(new CodeReviewService.ReviewRun(false, false));
+        workflow.run(ctx(bot, payload));
+        verify(factory).create(eq(bot), eq(repoClient), anyInt(), anyInt(), anyInt(), any(),
+                eq(new org.remus.giteabot.review.grounding.DoubleCheckSettings(false,
+                        org.remus.giteabot.review.grounding.DoubleCheckSettings.Severity.HIGH, 7L)));
     }
 
     private static PrWorkflowContext ctx(Bot bot, WebhookPayload payload) {

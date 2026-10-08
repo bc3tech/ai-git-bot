@@ -14,6 +14,7 @@ import org.remus.giteabot.prworkflow.WorkflowResult;
 import org.remus.giteabot.prworkflow.config.WorkflowSelectionService;
 import org.remus.giteabot.repository.RepositoryApiClient;
 import org.remus.giteabot.review.CodeReviewService;
+import org.remus.giteabot.review.grounding.DoubleCheckSettings;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
@@ -118,7 +119,10 @@ public class ReviewWorkflow implements PrWorkflow {
                         "Comma-separated glob or filename patterns for files to exclude from the "
                                 + "review diff (e.g. *.lock, *.min.js, package-lock.json, **/generated/**). "
                                 + "Matching file sections are stripped before the diff is sent to the AI, "
-                                + "reducing token usage and noise. Leave blank to review all files."));
+                                + "reducing token usage and noise. Leave blank to review all files."),
+                DoubleCheckSettings.enabledField(ReviewParam.DOUBLE_CHECK_ENABLED),
+                DoubleCheckSettings.severityField(ReviewParam.DOUBLE_CHECK_MIN_SEVERITY),
+                DoubleCheckSettings.integrationField(ReviewParam.DOUBLE_CHECK_AI_INTEGRATION_ID));
     }
 
     @Override
@@ -153,7 +157,7 @@ public class ReviewWorkflow implements PrWorkflow {
 
         return switch (action) {
             case ACTION_REVIEW -> doReview(context, maxDiffCharsPerChunk, maxDiffChunks,
-                    retryTruncatedChunkChars, excludedFilePatterns);
+                    retryTruncatedChunkChars, excludedFilePatterns, DoubleCheckSettings.fromParams(params));
             case ACTION_BOT_COMMAND -> doBotCommand(context, maxDiffCharsPerChunk, maxDiffChunks,
                     retryTruncatedChunkChars, excludedFilePatterns);
             case ACTION_INLINE_COMMENT -> doInlineComment(context, maxDiffCharsPerChunk, maxDiffChunks,
@@ -176,7 +180,8 @@ public class ReviewWorkflow implements PrWorkflow {
     /** Automated PR diff review on open/update. */
     private WorkflowResult doReview(PrWorkflowContext context,
                                     int maxDiffCharsPerChunk, int maxDiffChunks,
-                                    int retryTruncatedChunkChars, String excludedFilePatterns) {
+                                    int retryTruncatedChunkChars, String excludedFilePatterns,
+                                    DoubleCheckSettings doubleCheckSettings) {
         Bot bot = context.bot();
         WebhookPayload payload = context.payload();
         RepositoryApiClient repositoryClient = giteaClientFactory.getApiClient(bot.getGitIntegration());
@@ -184,7 +189,7 @@ public class ReviewWorkflow implements PrWorkflow {
         context.requireActive("before invoking CodeReviewService.reviewPullRequest");
 
         CodeReviewService.ReviewRun run = codeReviewServiceFactory.create(bot, repositoryClient,
-                        maxDiffCharsPerChunk, maxDiffChunks, retryTruncatedChunkChars, excludedFilePatterns)
+                        maxDiffCharsPerChunk, maxDiffChunks, retryTruncatedChunkChars, excludedFilePatterns, doubleCheckSettings)
                 .runReview(payload, null, context::requireActive);
         boolean reviewed = run.reviewed();
 

@@ -36,6 +36,14 @@ small or large context window.
 | `maxDiffCharsPerChunk` | `120000` | How large a diff can be before it is split into chunks for review. |
 | `maxDiffChunks` | `8` | Maximum number of chunks reviewed for one PR. Extra chunks are skipped. |
 | `retryTruncatedChunkChars` | `60000` | If a chunk is too big for the model, it is truncated to this size and retried once. |
+| `doubleCheckEnabled` | `true` | Select new findings for independent AI verification. |
+| `doubleCheckMinSeverity` | `LOW` | Check new findings at or above `LOW`, `MEDIUM`, `HIGH`, or `BLOCKER`. |
+| `doubleCheckAiIntegrationId` | `0` | Optional second AI integration ID; blank or `0` uses the review integration. |
+
+Double-check settings are exposed for the grounded-review pipeline; enforcement
+requires the grounding publication integration. Disputed or
+context-changed prior findings are checked regardless of enablement or severity.
+An unknown integration ID falls back to the review integration with an audit warning.
 
 Large PRs are automatically split into chunks and reviewed piece by piece, so a
 big diff never silently fails.

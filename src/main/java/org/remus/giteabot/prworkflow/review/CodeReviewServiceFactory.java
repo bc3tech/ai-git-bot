@@ -7,6 +7,7 @@ import org.remus.giteabot.ai.AiClient;
 import org.remus.giteabot.config.ReviewConfigProperties;
 import org.remus.giteabot.repository.RepositoryApiClient;
 import org.remus.giteabot.review.CodeReviewService;
+import org.remus.giteabot.review.grounding.DoubleCheckSettings;
 import org.remus.giteabot.session.SessionService;
 import org.springframework.stereotype.Component;
 
@@ -40,6 +41,14 @@ public class CodeReviewServiceFactory {
     public CodeReviewService create(Bot bot, RepositoryApiClient repoClient,
                                     int maxDiffCharsPerChunk, int maxDiffChunks,
                                     int retryTruncatedChunkChars, String excludedFilePatterns) {
+        return create(bot, repoClient, maxDiffCharsPerChunk, maxDiffChunks,
+                retryTruncatedChunkChars, excludedFilePatterns, DoubleCheckSettings.defaults());
+    }
+
+    public CodeReviewService create(Bot bot, RepositoryApiClient repoClient,
+                                    int maxDiffCharsPerChunk, int maxDiffChunks,
+                                    int retryTruncatedChunkChars, String excludedFilePatterns,
+                                    DoubleCheckSettings doubleCheckSettings) {
         if (bot.getSystemPrompt() == null) {
             throw new IllegalStateException("Bot must have a system prompt assigned");
         }
@@ -50,6 +59,6 @@ public class CodeReviewServiceFactory {
         String sessionPromptKey = "system-prompt:" + bot.getSystemPrompt().getId();
         return new CodeReviewService(repoClient, aiClient, sessionService, bot.getUsername(),
                 reviewConfig, sessionPromptKey, bot.getSystemPrompt().getReviewSystemPrompt(),
-                maxDiffCharsPerChunk, maxDiffChunks, retryTruncatedChunkChars, excludedFilePatterns);
+                maxDiffCharsPerChunk, maxDiffChunks, retryTruncatedChunkChars, excludedFilePatterns, doubleCheckSettings);
     }
 }
