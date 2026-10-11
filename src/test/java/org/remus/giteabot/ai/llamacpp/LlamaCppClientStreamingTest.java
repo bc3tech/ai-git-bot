@@ -11,9 +11,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.remus.giteabot.admin.AiIntegration;
 import org.remus.giteabot.ai.AiAuditRecorder;
 import org.remus.giteabot.ai.ChatTurn;
 import org.remus.giteabot.ai.StopReason;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
@@ -24,12 +26,16 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Streaming merge behaviour of {@link LlamaCppClient}: it now sends
@@ -162,6 +168,48 @@ class LlamaCppClientStreamingTest {
     // SSE merge — content concatenated, grammar output intact, with usage
     // counters and finish reason from the final chunks.
     // -----------------------------------------------------------------
+
+    @Test
+    void providerClosesConnectionsBetweenReviewAndChatRequests() throws Exception {
+        List<String> connectionHeaders = new CopyOnWriteArrayList<>();
+        List<Integer> clientPorts = new CopyOnWriteArrayList<>();
+        server.createContext("/v1/completions", exchange -> {
+            try {
+                drain(exchange);
+                connectionHeaders.add(exchange.getRequestHeaders().getFirst("Connection"));
+                clientPorts.add(exchange.getRemoteAddress().getPort());
+                exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
+                exchange.getResponseHeaders().set("Keep-Alive", "timeout=5, max=100");
+                exchange.sendResponseHeaders(200, 0);
+                exchange.getResponseBody().write(
+                        ("data: {\"choices\":[{\"text\":\"OK\",\"finish_reason\":\"stop\"}]}\n\n"
+                                + "data: [DONE]\n\n").getBytes(StandardCharsets.UTF_8));
+            } finally {
+                exchange.close();
+            }
+        });
+        server.start();
+
+        try (CloseableHttpClient httpClient = HttpClients.createDefault()) {
+            @SuppressWarnings("unchecked")
+            ObjectProvider<RestClient.Builder> builders = mock(ObjectProvider.class);
+            when(builders.getObject()).thenAnswer(invocation -> RestClient.builder()
+                    .requestFactory(new HttpComponentsClientHttpRequestFactory(httpClient)));
+            LlamaCppProviderMetadata provider = new LlamaCppProviderMetadata(builders);
+            AiIntegration integration = new AiIntegration();
+            integration.setApiUrl("http://localhost:" + server.getAddress().getPort());
+            integration.setModel("qwen2.5-coder");
+            integration.setMaxTokens(4096);
+            LlamaCppClient client = (LlamaCppClient) provider.createClient(
+                    provider.buildRestClient(integration, null), integration);
+
+            assertEquals("OK", client.submitReviewPrompt("Review the code.", null, "review"));
+            assertEquals("OK", client.chat(List.of(), "Write tests.", "Write focused tests.", null, 8192));
+            assertEquals(List.of("close", "close"), connectionHeaders);
+            assertEquals(2, clientPorts.size());
+            assertNotEquals(clientPorts.get(0), clientPorts.get(1));
+        }
+    }
 
     @Test
     void sseMerge_concatenatesGrammarJsonAndTakesCountersFromFinalChunk() throws Exception {

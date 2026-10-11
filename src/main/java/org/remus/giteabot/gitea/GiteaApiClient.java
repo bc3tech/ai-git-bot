@@ -31,11 +31,14 @@ import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Objects;
+import java.util.Set;
+import java.util.function.Supplier;
 
 /**
  * Gitea-specific implementation of {@link RepositoryApiClient}.
@@ -43,6 +46,8 @@ import java.util.Objects;
  */
 @Slf4j
 public class GiteaApiClient implements RepositoryApiClient {
+
+    private static final int MAX_REVIEW_SCAN_PAGES = 100;
 
     private final RestClient giteaRestClient;
     private final RepositoryCredentials credentials;
@@ -443,10 +448,14 @@ public class GiteaApiClient implements RepositoryApiClient {
 
     @Override
     public List<Map<String, Object>> getIssueComments(String owner, String repo, Long issueNumber) {
-        return fetchPages(page -> giteaRestClient.get()
-                .uri(uriBuilder -> uriBuilder.path("/api/v1/repos/{owner}/{repo}/issues/{index}/comments")
-                        .queryParam("limit", 50).queryParam("page", page).build(owner, repo, issueNumber))
-                .retrieve().body(new ParameterizedTypeReference<List<Map<String, Object>>>() {}), 50).items();
+        return scanIssueComments(owner, repo, issueNumber).items();
+    }
+
+    private PageScan<Map<String, Object>> scanIssueComments(String owner, String repo, Long issueNumber) {
+        // Gitea returns all issue comments; this endpoint ignores page and limit.
+        return fetchAll(() -> giteaRestClient.get()
+                .uri("/api/v1/repos/{owner}/{repo}/issues/{index}/comments", owner, repo, issueNumber)
+                .retrieve().body(new ParameterizedTypeReference<List<Map<String, Object>>>() {}));
     }
 
     @Override
@@ -464,11 +473,11 @@ public class GiteaApiClient implements RepositoryApiClient {
         boolean complete = reviews.complete();
         for (GiteaReview review : reviews.items()) {
             if (review.getId() == null) { complete = false; continue; }
-            PageScan<GiteaReviewComment> scan = fetchPages(page -> giteaRestClient.get()
-                    .uri(uriBuilder -> uriBuilder.path("/api/v1/repos/{owner}/{repo}/pulls/{index}/reviews/{id}/comments")
-                            .queryParam("limit", 50).queryParam("page", page)
-                            .build(owner, repo, pullNumber, review.getId()))
-                    .retrieve().body(new ParameterizedTypeReference<List<GiteaReviewComment>>() {}), 50);
+            // Review-comment lists are also unpaginated, unlike the review list itself.
+            PageScan<GiteaReviewComment> scan = fetchAll(() -> giteaRestClient.get()
+                    .uri("/api/v1/repos/{owner}/{repo}/pulls/{index}/reviews/{id}/comments",
+                            owner, repo, pullNumber, review.getId())
+                    .retrieve().body(new ParameterizedTypeReference<List<GiteaReviewComment>>() {}));
             comments.addAll(scan.items());
             complete &= scan.complete();
         }
@@ -477,10 +486,7 @@ public class GiteaApiClient implements RepositoryApiClient {
 
     @Override
     public CommentScan<Map<String, Object>> listPullRequestComments(String owner, String repo, Long pullNumber) {
-        PageScan<Map<String, Object>> issue = fetchPages(page -> giteaRestClient.get()
-                .uri(uriBuilder -> uriBuilder.path("/api/v1/repos/{owner}/{repo}/issues/{index}/comments")
-                        .queryParam("limit", 50).queryParam("page", page).build(owner, repo, pullNumber))
-                .retrieve().body(new ParameterizedTypeReference<List<Map<String, Object>>>() {}), 50);
+        PageScan<Map<String, Object>> issue = scanIssueComments(owner, repo, pullNumber);
         CommentScan<ReviewComment> reviews = listReviewThreadComments(owner, repo, pullNumber);
         List<Map<String, Object>> all = new ArrayList<>(issue.items());
         for (ReviewComment comment : reviews.comments()) {
@@ -505,18 +511,43 @@ public class GiteaApiClient implements RepositoryApiClient {
         return new CommentScan<>(all, issue.complete() && reviews.complete() && allReviews.complete());
     }
 
+    private static <T> PageScan<T> fetchAll(Supplier<List<T>> fetch) {
+        try {
+            List<T> items = fetch.get();
+            if (items == null) {
+                log.warn("Gitea comment scan returned no response body; scan is incomplete");
+                return new PageScan<>(List.of(), false);
+            }
+            return new PageScan<>(items, true);
+        } catch (RestClientException e) {
+            log.warn("Gitea comment scan failed; scan is incomplete: {}", e.getMessage());
+            return new PageScan<>(List.of(), false);
+        }
+    }
+
     private static <T> PageScan<T> fetchPages(java.util.function.Function<Integer, List<T>> fetch, int pageSize) {
         List<T> items = new ArrayList<>();
-        for (int page = 1; ; page++) {
+        Set<List<T>> seenPages = new HashSet<>();
+        for (int page = 1; page <= MAX_REVIEW_SCAN_PAGES; page++) {
             try {
                 List<T> next = fetch.apply(page);
-                if (next == null) return new PageScan<>(items, false);
+                if (next == null) {
+                    log.warn("Gitea review scan returned no body on page {}; scan is incomplete", page);
+                    return new PageScan<>(items, false);
+                }
+                if (!next.isEmpty() && !seenPages.add(next)) {
+                    log.warn("Gitea review scan repeated a page at page {}; scan is incomplete", page);
+                    return new PageScan<>(items, false);
+                }
                 items.addAll(next);
                 if (next.size() < pageSize) return new PageScan<>(items, true);
             } catch (RestClientException e) {
+                log.warn("Gitea review scan failed on page {}; scan is incomplete: {}", page, e.getMessage());
                 return new PageScan<>(items, false);
             }
         }
+        log.warn("Gitea review scan reached the {}-page limit; scan is incomplete", MAX_REVIEW_SCAN_PAGES);
+        return new PageScan<>(items, false);
     }
 
     private static Optional<String> remoteId(Map<String, Object> response) {

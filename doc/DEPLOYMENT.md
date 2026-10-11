@@ -319,9 +319,14 @@ The published image is a **multi-arch manifest** covering `linux/amd64` and
 automatically — including on Apple Silicon, AWS Graviton and Raspberry Pi 4/5
 (64-bit OS).
 
-Both variants ship the same agent toolchain (JDK/Maven, Node.js 22, Python,
-Go, Rust, .NET SDK, C/C++, Ruby, k6, Playwright and Cypress). Two
-architecture-specific details are worth knowing:
+Both variants ship the same agent toolchain (JDK/Maven, Node.js 22 with npm and pnpm, Python,
+Go, Rust, .NET SDK, C/C++, Ruby, k6, Playwright and Cypress).
+
+pnpm is installed globally and available to the non-root app user, including when
+called by a repository's `npm test` script. Its version is pinned by the
+`PNPM_VERSION` Docker build argument (default `10.11.0`).
+
+Two architecture-specific details are worth knowing:
 
 - **k6** is installed from the Grafana APT repository on `amd64` and from the
   official release tarball on `arm64`, because that repository publishes no

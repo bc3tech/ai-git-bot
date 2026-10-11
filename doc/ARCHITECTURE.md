@@ -171,6 +171,11 @@ pending markers and deleted comments only when both provider scans are complete;
 incomplete scans leave stored state unchanged. Reconciliation is independent of
 source revision pinning, so unpinned runs can also recover pending publications.
 
+Gitea issue comments and individual review comments use unpaginated endpoints,
+so each list is fetched once regardless of its length. Review lists are paginated;
+repeated pages, missing bodies, request failures, or the 100-page ceiling mark a
+scan incomplete rather than allowing unlimited requests or unsafe reconciliation.
+
 Non-bot replies associate first by thread, then by finding marker or remote
 comment link, then by a quoted line unique to one active finding. The digest
 labels prior code as history rather than current evidence, treats replies as

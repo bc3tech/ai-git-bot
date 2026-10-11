@@ -227,6 +227,8 @@ INFO: llama.cpp chat request: GBNF grammar enabled for structured JSON output
 
 ## Server Configuration
 
+The bot sends `Connection: close` on every llama.cpp request. Each completion uses a fresh HTTP connection because some server builds advertise keep-alive but close the connection after streaming, causing the next request to fail with `Broken pipe` or `failed to respond`. This does not disable streaming or change the configured HTTP timeouts.
+
 ### Context Size
 
 Adjust `--ctx-size` based on your needs and available memory:

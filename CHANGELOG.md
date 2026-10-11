@@ -44,6 +44,12 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ### Fixed
 
+- Gitea issue-comment and per-review comment scans now fetch each unpaginated endpoint once, fixing an infinite request loop and memory exhaustion on PRs with 50 or more comments. Review-list pagination stops on repeated pages or after 100 pages and marks the scan incomplete, preventing unsafe approval or prior-finding reconciliation.
+
+- The runtime image now includes pinned pnpm, available to the non-root app user, so repository test scripts invoking pnpm no longer fail with `pnpm: not found`. Override its version with the `PNPM_VERSION` Docker build argument.
+
+- llama.cpp requests now send `Connection: close`, preventing broken-pipe and missing-response failures when a server advertises keep-alive but closes the connection after a streamed completion. The workaround applies to all llama.cpp review and agent workflows without changing other providers.
+
 - AI integration token/worker-limit binding errors now show a safe validation flash message instead of a bare HTTP 400. Malformed routing/privacy values still return HTTP 400. Provider changes now require a new API key or explicit **Clear** for every provider, including switching to keyless Ollama or llama.cpp; saves also reject missing or unknown provider types. See [Editing an AI Integration](doc/USER_GUIDE.md#editing-an-ai-integration).
 
 - **README Sync** now rechecks the original PR's state and workflow cancellation immediately before Git push, stopping publication when the PR is closed, merged, or cannot be confirmed open. Both `commit-to-pr` and `offer-as-pr` use this check; follow-up PR creation checks again. When publication stops or fails after the documentation diff has been captured, the workflow attempts to post that diff in a normal comment on the original PR, with an explicit notice for truncated previews. Providers must supply the required open-state information; missing state stops publication. The state check and push are not atomic, and comment delivery is best-effort. See [`doc/PR_WORKFLOWS_README_SYNC.md`](doc/PR_WORKFLOWS_README_SYNC.md).
@@ -60,5 +66,3 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 - Historical release notes before the introduction of this changelog were tracked through repository commits, pull requests, and releases.
 - See the README and documentation in `doc/` for the current feature set, including reviewer-triggered PR reviews, coding-agent workflows, writer-agent workflows, MCP handling, and local LLM support.
-
-
