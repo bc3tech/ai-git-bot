@@ -351,3 +351,10 @@ review artifacts rather than adding unrelated hook tooling.
 - Regression assertions must prove application-owned coverage disclosure, not
   merely match wording already present in a model summary. Historical fenced
   envelopes with trailing classification remain accepted for compatibility.
+- Bounded second review confirmed six of seven findings resolved. Source
+  splitting was corrected, but numbered tool-line regex matching also needs
+  DOTALL to preserve Unicode separators inside source lines without falsely
+  reporting truncation.
+- Conservative cleanup moved the generic exchange-compaction comment into its
+  actual branch. The compatibility diagnostic constructor is intentionally
+  retained because preserving callers is an explicit scope invariant.
