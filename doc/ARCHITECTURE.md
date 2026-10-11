@@ -163,6 +163,98 @@ Access control is checked before expensive work. Bots can allow everyone or
 restrict interactions to configured users, with PR-author handling for PR
 comment flows.
 
+## Prior-findings history
+
+`PriorFindingsService` builds review history from stored published findings and
+live provider comments, without reading conversation transcripts. It reconciles
+pending markers and deleted comments only when both provider scans are complete;
+incomplete scans leave stored state unchanged. Reconciliation is independent of
+source revision pinning, so unpinned runs can also recover pending publications.
+
+Gitea issue comments and individual review comments use unpaginated endpoints,
+so each list is fetched once regardless of its length. Review lists are paginated;
+repeated pages, missing bodies, request failures, or the 100-page ceiling mark a
+scan incomplete rather than allowing unlimited requests or unsafe reconciliation.
+
+Non-bot replies associate first by thread, then by finding marker or remote
+comment link, then by a quoted line unique to one active finding. The digest
+labels prior code as history rather than current evidence, treats replies as
+claims to verify, and retains the first and latest replies when trimming prompt
+history. Timestamp ties and missing timestamps are conservatively new; the
+latest answered comment ID prevents repeating replies to the same dispute.
+This service is a grounding foundation; review workflows wire it in separately.
+
+## Standard grounded reviews
+
+`ReviewWorkflow` passes the run identity, explicit-request flag, and configured
+formal action to `CodeReviewService`. The service acquires the per-PR lease before
+reading a current snapshot and renews it on a heartbeat until the entire run ends.
+Pending findings are reconciled before checking for an unchanged explicit request.
+A lease wait timeout propagates through the existing webhook failure-notice path;
+the workflow also removes the PR acknowledgement.
+
+Every generation uses fresh diff chunks and labeled prior-findings history, never
+the stored chat transcript. Changed-file enrichment reads the head SHA through a
+cached `PinnedSourceReader`; unreadable pinned text stops the run rather than
+falling back to a branch. Deleted and binary files are not requested for text
+enrichment. Unpinned reviews use diff-only evidence and summary publication.
+
+Grounded publication records findings before provider writes. Thread actions run
+under the same fencing token, then successful delivery updates `review_revision`
+with the effective base, head, comment cursor, and degraded state. Failed thread
+actions and incomplete comment scans force a later explicit request to retry.
+Only the safe grounded rendering is appended to the chat session. The configured
+post-review action runs before lease release and is suppressed on pending-review
+conflicts. Conversational handlers continue to use session history independently.
+Disposition and warning audits copy the run context into a fresh event entity so
+multiple findings cannot overwrite one another through an assigned database ID.
+
+## Finding grounding and thread actions
+
+`FindingGroundingService.ground` verifies structured finding quotes and citations,
+then batches eligible findings and disputed/context-changed priors through
+`DoubleCheckService`. The result carries publishable findings, summary notes,
+thread actions, audited drop/hold dispositions, evidence fingerprints, and a
+revision-degraded flag. Pinned-read failures abort rather than silently changing
+revisions. Unpinned runs use only diff evidence, remove inline anchors, and never
+re-evaluate or action prior findings. Incomplete history scans leave priors alone.
+
+The grounded `ReviewPublicationService.publish` overload writes each finding as
+`PENDING` before provider delivery and embeds its UUID marker in inline or summary
+text. Only confirmed deliveries become `PUBLISHED`; failed/unknown writes remain
+recoverable by the next complete marker scan. Replacement findings supersede old
+records only after delivery succeeds. Review-wide citations are stored as JSON in
+the finding's existing quote field; anchored quotes remain verbatim text. Shared
+summary comments are identified by marker and never edited for one finding.
+
+`ThreadActionExecutor.execute` replies in a native thread when supported and uses
+a linked PR comment otherwise (always for summary-only findings). Withdrawals are
+recorded only after successful communication; failed replies leave findings active
+for retry (callers mark the revision degraded when actions fail). It re-reads thread replies immediately before resolving and skips
+resolution when the scan is incomplete or a new non-bot reply appeared. Lease-token
+checks precede every provider mutation and state write; lease loss aborts and emits
+a grounding warning. Workflow integration remains separate from these services.
+
+
+### Agentic review integration
+
+`AgentReviewService` holds the shared per-PR lease from before snapshot capture
+through revision persistence, renews it on a heartbeat, and releases it in
+`finally`. Its explicit-request skip guard runs inside that same lease. The
+workspace fetches and checks out the head SHA detached, verifies `HEAD`, and API
+file requests use a cached `PinnedSourceReader`. Missing head SHA limits the
+agent to diff tools rather than branch-based source reads.
+
+The kickoff includes `PriorFindingsDigest.promptBlock()`. The final structured
+output goes through grounding, lease-fenced publication, and prior thread actions.
+Only surviving findings determine the formal action and finding hook events;
+degraded output cannot approve. After confirmed summary delivery, the service
+updates `review_revision` with the snapshot, degradation status, and observed
+non-bot comment cursor. Failed prior thread actions mark the revision degraded.
+Lease loss aborts writes; a lease-wait timeout posts a failure and clears eyes
+reactions. Clarification conversations keep their existing behavior.
+
+
 ## Persistence and secrets
 
 The database stores durable configuration and run state rather than transient

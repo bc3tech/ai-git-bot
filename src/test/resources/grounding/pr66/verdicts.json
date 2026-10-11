@@ -1,0 +1,18 @@
+{
+  "intended-fix": {
+    "verdict": "drop",
+    "reason": "The 409 to 428 selection is the intended fix, not a defect in current code."
+  },
+  "valid": {
+    "verdict": "keep",
+    "reason": "Synthetic positive control remains valid in the pinned source."
+  },
+  "valid-dispute": {
+    "verdict": "drop",
+    "reason": "The supplied dispute refutes the synthetic positive control."
+  },
+  "false-dispute": {
+    "verdict": "keep",
+    "reason": "The supplied dispute does not refute the synthetic positive control."
+  }
+}

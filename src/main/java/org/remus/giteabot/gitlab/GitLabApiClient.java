@@ -9,7 +9,13 @@ import org.remus.giteabot.repository.PostReviewAction;
 import org.remus.giteabot.repository.RepositoryApiClient;
 import org.remus.giteabot.repository.WorkflowDispatchRequest;
 import org.remus.giteabot.repository.WorkflowRunStatus;
+import org.remus.giteabot.repository.model.DiffSide;
+import org.remus.giteabot.repository.model.CommentScan;
+import org.remus.giteabot.repository.model.ThreadCapabilities;
 import org.remus.giteabot.repository.model.RepositoryCredentials;
+import org.remus.giteabot.repository.model.ReviewAnchorComment;
+import org.remus.giteabot.repository.model.ReviewPublicationResult;
+import org.remus.giteabot.repository.model.ReviewSnapshot;
 import org.remus.giteabot.repository.model.Review;
 import org.remus.giteabot.repository.model.ReviewComment;
 import org.springframework.core.ParameterizedTypeReference;
@@ -18,11 +24,14 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
+import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.RestClient;
+import org.springframework.web.client.RestClientException;
 
-import java.util.Base64;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Optional;
 import java.util.Map;
 import java.util.stream.Collectors;
 
@@ -58,6 +67,18 @@ public class GitLabApiClient implements RepositoryApiClient {
     }
 
     @Override
+    public boolean isPullRequestOpen(String owner, String repo, Long pullNumber) {
+        Map<String, Object> mr = gitlabRestClient.get()
+                .uri("/api/v4/projects/{projectPath}/merge_requests/{iid}",
+                        encodeProjectPath(owner, repo), pullNumber)
+                .retrieve()
+                .body(new ParameterizedTypeReference<>() {});
+        // The transitional "locked" state deliberately denies workflow writes;
+        // this does not mean the MR is closed. Only "opened" permits a write.
+        return mr != null && "opened".equals(mr.get("state"));
+    }
+
+    @Override
     public String getPullRequestDiff(String owner, String repo, Long pullNumber) {
         log.info("Fetching diff for MR !{} in {}/{}", pullNumber, owner, repo);
         String projectPath = encodeProjectPath(owner, repo);
@@ -90,10 +111,242 @@ public class GitLabApiClient implements RepositoryApiClient {
     }
 
     @Override
+    public ReviewSnapshot getReviewSnapshot(String owner, String repo, Long pullNumber) {
+        String projectPath = encodeProjectPath(owner, repo);
+        List<Map<String, Object>> versions = gitlabRestClient.get()
+                .uri("/api/v4/projects/{projectPath}/merge_requests/{iid}/versions", projectPath, pullNumber)
+                .retrieve()
+                .body(new ParameterizedTypeReference<>() {});
+        if (versions == null || versions.isEmpty()) {
+            throw new IllegalStateException("GitLab returned no merge request diff versions");
+        }
+
+        Map<String, Object> latest = versions.getFirst();
+        String versionId = requiredString(latest, "id");
+        String baseSha = requiredString(latest, "base_commit_sha");
+        String startSha = requiredString(latest, "start_commit_sha");
+        String headSha = requiredString(latest, "head_commit_sha");
+        Map<String, Object> version = gitlabRestClient.get()
+                .uri("/api/v4/projects/{projectPath}/merge_requests/{iid}/versions/{versionId}",
+                        projectPath, pullNumber, versionId)
+                .retrieve()
+                .body(new ParameterizedTypeReference<>() {});
+        if (version == null || !(version.get("diffs") instanceof List<?> rawDiffs)) {
+            throw new IllegalStateException("GitLab returned no diffs for the latest merge request version");
+        }
+
+        List<Map<String, Object>> diffs = rawDiffs.stream()
+                .filter(Map.class::isInstance)
+                .map(value -> (Map<String, Object>) value)
+                .toList();
+        if (diffs.size() != rawDiffs.size()) {
+            throw new IllegalStateException("GitLab returned an invalid merge request diff version");
+        }
+        return new ReviewSnapshot(headSha, baseSha, startSha, buildVersionDiff(diffs), true);
+    }
+
+    @Override
+    public ReviewPublicationResult publishInlineReview(String owner, String repo, Long pullNumber,
+                                                       ReviewSnapshot snapshot, String body,
+                                                       List<ReviewAnchorComment> comments,
+                                                       PostReviewAction action) {
+        List<ReviewAnchorComment> requested = comments == null ? List.of() : List.copyOf(comments);
+        String projectPath = encodeProjectPath(owner, repo);
+        List<ReviewPublicationResult.CommentOutcome> outcomes = new java.util.ArrayList<>();
+        ReviewPublicationResult.Delivery firstFailure = null;
+
+        for (ReviewAnchorComment comment : requested) {
+            try {
+                Map<String, Object> response = gitlabRestClient.post()
+                        .uri("/api/v4/projects/{projectPath}/merge_requests/{iid}/discussions",
+                                projectPath, pullNumber)
+                        .body(Map.of("body", comment.body(), "position", gitLabPosition(snapshot, comment)))
+                        .retrieve()
+                        .body(new ParameterizedTypeReference<>() {});
+                String discussionId = response == null ? null : String.valueOf(response.get("id"));
+                if (discussionId != null && "null".equals(discussionId)) {
+                    discussionId = null;
+                }
+                ReviewPublicationResult.Delivery delivery = hasFirstNotePosition(response)
+                        ? ReviewPublicationResult.Delivery.CONFIRMED
+                        : ReviewPublicationResult.Delivery.MISPLACED;
+                outcomes.add(new ReviewPublicationResult.CommentOutcome(comment, delivery, discussionId));
+            } catch (HttpStatusCodeException e) {
+                ReviewPublicationResult.Delivery failure = e.getStatusCode().is4xxClientError()
+                        ? ReviewPublicationResult.Delivery.FAILED : ReviewPublicationResult.Delivery.UNKNOWN;
+                if (firstFailure == null) {
+                    firstFailure = failure;
+                }
+                outcomes.add(new ReviewPublicationResult.CommentOutcome(comment, failure, null));
+            } catch (RestClientException e) {
+                if (firstFailure == null) {
+                    firstFailure = ReviewPublicationResult.Delivery.UNKNOWN;
+                }
+                outcomes.add(new ReviewPublicationResult.CommentOutcome(
+                        comment, ReviewPublicationResult.Delivery.UNKNOWN, null));
+            }
+        }
+
+        ReviewPublicationResult.Delivery summaryDelivery = attemptSummary(owner, repo, pullNumber, body);
+        if (firstFailure == null && (summaryDelivery == ReviewPublicationResult.Delivery.FAILED
+                || summaryDelivery == ReviewPublicationResult.Delivery.UNKNOWN)) {
+            firstFailure = summaryDelivery;
+        }
+        ReviewPublicationResult.Delivery actionDelivery = attemptAction(owner, repo, pullNumber, action);
+        if (firstFailure == null && (actionDelivery == ReviewPublicationResult.Delivery.FAILED
+                || actionDelivery == ReviewPublicationResult.Delivery.UNKNOWN)) {
+            firstFailure = actionDelivery;
+        }
+        ReviewPublicationResult.Delivery reviewDelivery = combine(summaryDelivery, actionDelivery);
+
+        boolean allConfirmed = reviewDelivery == ReviewPublicationResult.Delivery.CONFIRMED
+                && outcomes.stream().allMatch(outcome -> outcome.delivery() == ReviewPublicationResult.Delivery.CONFIRMED);
+        if (allConfirmed) {
+            return new ReviewPublicationResult(ReviewPublicationResult.Status.PUBLISHED, reviewDelivery,
+                    outcomes, null);
+        }
+
+        boolean actionDidNotWrite = action == null || action == PostReviewAction.NONE;
+        boolean nothingWritten = summaryDelivery == ReviewPublicationResult.Delivery.FAILED
+                && (actionDelivery == ReviewPublicationResult.Delivery.FAILED || actionDidNotWrite)
+                && outcomes.stream().allMatch(outcome -> outcome.delivery() == ReviewPublicationResult.Delivery.FAILED);
+        if (nothingWritten && firstFailure == ReviewPublicationResult.Delivery.FAILED) {
+            return new ReviewPublicationResult(ReviewPublicationResult.Status.REJECTED, reviewDelivery,
+                    outcomes, "GitLab rejected review publication before any component was written");
+        }
+
+        boolean actionWasRequested = action != null && action != PostReviewAction.NONE;
+        boolean hasConfirmedWrite = summaryDelivery == ReviewPublicationResult.Delivery.CONFIRMED
+                || (actionWasRequested && actionDelivery == ReviewPublicationResult.Delivery.CONFIRMED)
+                || outcomes.stream().anyMatch(outcome -> outcome.delivery() == ReviewPublicationResult.Delivery.CONFIRMED
+                        || outcome.delivery() == ReviewPublicationResult.Delivery.MISPLACED);
+        boolean hasFailedWrite = summaryDelivery == ReviewPublicationResult.Delivery.FAILED
+                || actionDelivery == ReviewPublicationResult.Delivery.FAILED
+                || outcomes.stream().anyMatch(outcome -> outcome.delivery() == ReviewPublicationResult.Delivery.FAILED);
+        boolean hasUnknownWrite = summaryDelivery == ReviewPublicationResult.Delivery.UNKNOWN
+                || actionDelivery == ReviewPublicationResult.Delivery.UNKNOWN
+                || outcomes.stream().anyMatch(outcome -> outcome.delivery() == ReviewPublicationResult.Delivery.UNKNOWN);
+        return new ReviewPublicationResult(hasUnknownWrite && !hasConfirmedWrite && !hasFailedWrite
+                ? ReviewPublicationResult.Status.UNKNOWN : ReviewPublicationResult.Status.PARTIAL,
+                reviewDelivery, outcomes,
+                "GitLab review publication was only partially confirmed");
+    }
+
+    private Map<String, Object> gitLabPosition(ReviewSnapshot snapshot, ReviewAnchorComment comment) {
+        Map<String, Object> position = new LinkedHashMap<>();
+        position.put("position_type", "text");
+        position.put("base_sha", snapshot.baseSha());
+        position.put("start_sha", snapshot.startSha());
+        position.put("head_sha", snapshot.headSha());
+        position.put("old_path", comment.oldPath());
+        position.put("new_path", comment.path());
+        if (comment.oldLine() != null && comment.newLine() != null) {
+            position.put("old_line", comment.oldLine());
+            position.put("new_line", comment.newLine());
+        } else if (comment.side() == DiffSide.NEW) {
+            position.put("new_line", comment.newLine() == null ? comment.line() : comment.newLine());
+        } else {
+            position.put("old_line", comment.oldLine() == null ? comment.line() : comment.oldLine());
+        }
+        return position;
+    }
+
+    private boolean hasFirstNotePosition(Map<String, Object> discussion) {
+        if (discussion == null || !(discussion.get("notes") instanceof List<?> notes) || notes.isEmpty()) {
+            return false;
+        }
+        Object first = notes.getFirst();
+        return first instanceof Map<?, ?> note && note.get("position") instanceof Map<?, ?>;
+    }
+
+    private ReviewPublicationResult.Delivery attemptSummary(String owner, String repo, Long pullNumber,
+                                                            String body) {
+        try {
+            postPullRequestComment(owner, repo, pullNumber, body);
+            return ReviewPublicationResult.Delivery.CONFIRMED;
+        } catch (HttpStatusCodeException e) {
+            return e.getStatusCode().is4xxClientError() ? ReviewPublicationResult.Delivery.FAILED
+                    : ReviewPublicationResult.Delivery.UNKNOWN;
+        } catch (RestClientException e) {
+            return ReviewPublicationResult.Delivery.UNKNOWN;
+        }
+    }
+
+    private ReviewPublicationResult.Delivery attemptAction(String owner, String repo, Long pullNumber,
+                                                           PostReviewAction action) {
+        try {
+            postReviewAction(owner, repo, pullNumber, action);
+            return ReviewPublicationResult.Delivery.CONFIRMED;
+        } catch (HttpStatusCodeException e) {
+            return e.getStatusCode().is4xxClientError() ? ReviewPublicationResult.Delivery.FAILED
+                    : ReviewPublicationResult.Delivery.UNKNOWN;
+        } catch (RestClientException e) {
+            return ReviewPublicationResult.Delivery.UNKNOWN;
+        }
+    }
+
+    private static ReviewPublicationResult.Delivery combine(ReviewPublicationResult.Delivery first,
+                                                             ReviewPublicationResult.Delivery second) {
+        if (first == ReviewPublicationResult.Delivery.FAILED || second == ReviewPublicationResult.Delivery.FAILED) {
+            return ReviewPublicationResult.Delivery.FAILED;
+        }
+        if (first == ReviewPublicationResult.Delivery.UNKNOWN || second == ReviewPublicationResult.Delivery.UNKNOWN) {
+            return ReviewPublicationResult.Delivery.UNKNOWN;
+        }
+        return ReviewPublicationResult.Delivery.CONFIRMED;
+    }
+
+    private static String requiredString(Map<String, Object> value, String key) {
+        Object result = value == null ? null : value.get(key);
+        if (result == null || result.toString().isBlank()) {
+            throw new IllegalStateException("GitLab diff version is missing " + key);
+        }
+        return result.toString();
+    }
+
+    private String buildVersionDiff(List<Map<String, Object>> diffs) {
+        StringBuilder unified = new StringBuilder();
+        for (Map<String, Object> fileDiff : diffs) {
+            String oldPath = requiredString(fileDiff, "old_path");
+            String newPath = requiredString(fileDiff, "new_path");
+            String diff = (String) fileDiff.get("diff");
+            boolean newFile = Boolean.TRUE.equals(fileDiff.get("new_file"));
+            boolean deletedFile = Boolean.TRUE.equals(fileDiff.get("deleted_file"));
+            boolean renamed = Boolean.TRUE.equals(fileDiff.get("renamed_file"));
+
+            unified.append("diff --git a/").append(oldPath).append(" b/").append(newPath).append("\n");
+            if (renamed) {
+                unified.append("rename from ").append(oldPath).append("\n");
+                unified.append("rename to ").append(newPath).append("\n");
+            }
+            unified.append("--- ").append(newFile ? "/dev/null" : "a/" + oldPath).append("\n");
+            unified.append("+++ ").append(deletedFile ? "/dev/null" : "b/" + newPath).append("\n");
+            if (diff != null) {
+                unified.append(diff);
+                if (!diff.endsWith("\n")) {
+                    unified.append("\n");
+                }
+            }
+        }
+        return unified.toString();
+    }
+
+    @Override
     public void postReviewComment(String owner, String repo, Long pullNumber, String body) {
-        log.info("Posting note on MR !{} in {}/{}", pullNumber, owner, repo);
-        postPullRequestComment(owner, repo, pullNumber, body);
-        log.info("Note posted successfully");
+        postReviewCommentReturningId(owner, repo, pullNumber, body);
+    }
+
+    @Override
+    public Optional<String> postReviewCommentReturningId(String owner, String repo, Long pullNumber, String body) {
+        return postPullRequestCommentReturningId(owner, repo, pullNumber, body);
+    }
+
+    @Override
+    public Optional<String> postReviewReturningId(String owner, String repo, Long pullNumber,
+                                                  String body, PostReviewAction action) {
+        Optional<String> id = postPullRequestCommentReturningId(owner, repo, pullNumber, body);
+        postReviewAction(owner, repo, pullNumber, action);
+        return id;
     }
 
     @Override
@@ -120,13 +373,17 @@ public class GitLabApiClient implements RepositoryApiClient {
 
     @Override
     public void postPullRequestComment(String owner, String repo, Long pullNumber, String body) {
-        log.info("Posting merge request note on MR !{} in {}/{}", pullNumber, owner, repo);
+        postPullRequestCommentReturningId(owner, repo, pullNumber, body);
+    }
+
+    @Override
+    public Optional<String> postPullRequestCommentReturningId(String owner, String repo, Long pullNumber, String body) {
         String projectPath = encodeProjectPath(owner, repo);
-        gitlabRestClient.post()
+        Map<String, Object> response = gitlabRestClient.post()
                 .uri("/api/v4/projects/{projectPath}/merge_requests/{iid}/notes", projectPath, pullNumber)
                 .body(Map.of("body", body))
-                .retrieve()
-                .toBodilessEntity();
+                .retrieve().body(new ParameterizedTypeReference<>() {});
+        return remoteId(response);
     }
 
     /**
@@ -233,17 +490,113 @@ public class GitLabApiClient implements RepositoryApiClient {
 
     @Override
     public List<Map<String, Object>> getIssueComments(String owner, String repo, Long issueNumber) {
-        log.info("Fetching notes for issue #{} in {}/{}", issueNumber, owner, repo);
         String projectPath = encodeProjectPath(owner, repo);
-        List<Map<String, Object>> notes = gitlabRestClient.get()
-                .uri(uriBuilder -> uriBuilder
-                        .path("/api/v4/projects/{projectPath}/issues/{iid}/notes")
-                        .queryParam("per_page", 50)
-                        .build(projectPath, issueNumber))
-                .retrieve()
-                .body(new ParameterizedTypeReference<>() {});
-        return notes != null ? notes : List.of();
+        return fetchPages(page -> gitlabRestClient.get()
+                .uri(uriBuilder -> uriBuilder.path("/api/v4/projects/{projectPath}/issues/{iid}/notes")
+                        .queryParam("per_page", 100).queryParam("page", page).build(projectPath, issueNumber))
+                .retrieve().body(new ParameterizedTypeReference<List<Map<String, Object>>>() {})).items();
     }
+
+    @Override
+    public ThreadCapabilities threadCapabilities() {
+        return new ThreadCapabilities(true, true, true);
+    }
+
+    @Override
+    public Optional<String> replyToReviewThread(String owner, String repo, Long pullNumber,
+                                                String threadId, String body) {
+        String projectPath = encodeProjectPath(owner, repo);
+        Map<String, Object> response = gitlabRestClient.post()
+                .uri("/api/v4/projects/{projectPath}/merge_requests/{iid}/discussions/{discussionId}/notes",
+                        projectPath, pullNumber, threadId)
+                .body(Map.of("body", body)).retrieve().body(new ParameterizedTypeReference<>() {});
+        return remoteId(response);
+    }
+
+    @Override
+    public void editReviewComment(String owner, String repo, Long pullNumber, String commentId, String body) {
+        String projectPath = encodeProjectPath(owner, repo);
+        String threadId = listReviewThreadComments(owner, repo, pullNumber).comments().stream()
+                .filter(comment -> commentId.equals(String.valueOf(comment.getId())))
+                .map(ReviewComment::getThreadId).findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("GitLab discussion for note was not found"));
+        gitlabRestClient.put()
+                .uri("/api/v4/projects/{projectPath}/merge_requests/{iid}/discussions/{discussionId}/notes/{noteId}",
+                        projectPath, pullNumber, threadId, commentId)
+                .body(Map.of("body", body)).retrieve().toBodilessEntity();
+    }
+
+    @Override
+    public void resolveReviewThread(String owner, String repo, Long pullNumber, String threadId) {
+        String projectPath = encodeProjectPath(owner, repo);
+        gitlabRestClient.put()
+                .uri("/api/v4/projects/{projectPath}/merge_requests/{iid}/discussions/{discussionId}",
+                        projectPath, pullNumber, threadId)
+                .body(Map.of("resolved", true)).retrieve().toBodilessEntity();
+    }
+
+    @Override
+    public CommentScan<ReviewComment> listReviewThreadComments(String owner, String repo, Long pullNumber) {
+        String projectPath = encodeProjectPath(owner, repo);
+        PageScan<GitLabReview> scan = fetchPages(page -> gitlabRestClient.get()
+                .uri(uriBuilder -> uriBuilder.path("/api/v4/projects/{projectPath}/merge_requests/{iid}/discussions")
+                        .queryParam("per_page", 100).queryParam("page", page).build(projectPath, pullNumber))
+                .retrieve().body(new ParameterizedTypeReference<List<GitLabReview>>() {}));
+        List<ReviewComment> comments = new ArrayList<>();
+        for (GitLabReview discussion : scan.items()) {
+            if (discussion.getNotes() == null) continue;
+            Long rootNoteId = discussion.getNotes().isEmpty() ? null : discussion.getNotes().getFirst().getId();
+            for (GitLabReview.GitLabNote note : discussion.getNotes()) {
+                GitLabReviewComment comment = new GitLabReviewComment();
+                comment.setId(note.getId()); comment.setBody(note.getBody()); comment.setCreatedAt(note.getCreatedAt());
+                comment.setAuthor(note.getAuthor()); comment.setThreadId(discussion.getDiscussionId());
+                comment.setParentId(rootNoteId != null && !rootNoteId.equals(note.getId()) ? rootNoteId.toString() : null);
+                comment.setResolved(note.getResolved());
+                comments.add(comment);
+            }
+        }
+        return new CommentScan<>(comments, scan.complete());
+    }
+
+    @Override
+    public CommentScan<Map<String, Object>> listPullRequestComments(String owner, String repo, Long pullNumber) {
+        String projectPath = encodeProjectPath(owner, repo);
+        PageScan<Map<String, Object>> issue = fetchPages(page -> gitlabRestClient.get()
+                .uri(uriBuilder -> uriBuilder.path("/api/v4/projects/{projectPath}/merge_requests/{iid}/notes")
+                        .queryParam("per_page", 100).queryParam("page", page).build(projectPath, pullNumber))
+                .retrieve().body(new ParameterizedTypeReference<List<Map<String, Object>>>() {}));
+        CommentScan<ReviewComment> discussions = listReviewThreadComments(owner, repo, pullNumber);
+        List<Map<String, Object>> all = new ArrayList<>(issue.items());
+        for (ReviewComment comment : discussions.comments()) {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("id", comment.getId()); item.put("body", comment.getBody());
+            item.put("created_at", comment.getCreatedAt()); item.put("discussion_id", comment.getThreadId());
+            item.put("resolved", comment.getResolved()); item.put("author", Map.of("username", comment.getUserLogin() == null ? "" : comment.getUserLogin()));
+            all.add(item);
+        }
+        return new CommentScan<>(all, issue.complete() && discussions.complete());
+    }
+
+    private static <T> PageScan<T> fetchPages(java.util.function.Function<Integer, List<T>> fetch) {
+        List<T> items = new ArrayList<>();
+        for (int page = 1; ; page++) {
+            try {
+                List<T> next = fetch.apply(page);
+                if (next == null) return new PageScan<>(items, false);
+                items.addAll(next);
+                if (next.size() < 100) return new PageScan<>(items, true);
+            } catch (RestClientException e) {
+                return new PageScan<>(items, false);
+            }
+        }
+    }
+
+    private static Optional<String> remoteId(Map<String, Object> response) {
+        Object id = response == null ? null : response.get("id");
+        return id == null ? Optional.empty() : Optional.of(String.valueOf(id));
+    }
+
+    private record PageScan<T>(List<T> items, boolean complete) { }
 
     @Override
     public void addReaction(String owner, String repo, Long commentId, String reaction) {
@@ -252,6 +605,57 @@ public class GitLabApiClient implements RepositoryApiClient {
         // This is a known limitation — reactions are best-effort and non-critical.
         log.debug("Skipping reaction '{}' on note #{} in {}/{}: GitLab requires MR IID which is not available",
                 reaction, commentId, owner, repo);
+    }
+
+    @Override
+    public void removePullRequestReaction(String owner, String repo, Long pullNumber, String reaction) {
+        String projectPath = encodeProjectPath(owner, repo);
+        Map<String, Object> user = gitlabRestClient.get().uri("/api/v4/user").retrieve()
+                .body(new ParameterizedTypeReference<>() {});
+        if (user == null || user.get("id") == null) return;
+        int page = 1;
+        while (true) {
+            List<Map<String, Object>> awards = gitlabRestClient.get()
+                    .uri("/api/v4/projects/{project}/merge_requests/{pr}/award_emoji?per_page=100&page={page}",
+                            projectPath, pullNumber, page++)
+                    .retrieve().body(new ParameterizedTypeReference<>() {});
+            if (awards == null) return;
+            for (Map<String, Object> award : awards) {
+                if (reaction.equals(award.get("name")) && award.get("user") instanceof Map<?, ?> author
+                        && java.util.Objects.equals(user.get("id"), author.get("id"))) {
+                    gitlabRestClient.delete()
+                            .uri("/api/v4/projects/{project}/merge_requests/{pr}/award_emoji/{id}",
+                                    projectPath, pullNumber, award.get("id"))
+                            .retrieve().toBodilessEntity();
+                    return;
+                }
+            }
+            if (awards.size() < 100) return;
+        }
+    }
+
+    @Override
+    public void addPullRequestReaction(String owner, String repo, Long pullNumber, String reaction) {
+        log.info("Adding '{}' award emoji to MR !{} in {}/{}", reaction, pullNumber, owner, repo);
+        String projectPath = encodeProjectPath(owner, repo);
+        gitlabRestClient.post()
+                .uri("/api/v4/projects/{projectPath}/merge_requests/{iid}/award_emoji",
+                        projectPath, pullNumber)
+                .body(Map.of("name", reaction))
+                .retrieve()
+                .toBodilessEntity();
+    }
+
+    @Override
+    public void addIssueReaction(String owner, String repo, Long issueNumber, String reaction) {
+        log.info("Adding '{}' award emoji to issue #{} in {}/{}", reaction, issueNumber, owner, repo);
+        String projectPath = encodeProjectPath(owner, repo);
+        gitlabRestClient.post()
+                .uri("/api/v4/projects/{projectPath}/issues/{iid}/award_emoji",
+                        projectPath, issueNumber)
+                .body(Map.of("name", reaction))
+                .retrieve()
+                .toBodilessEntity();
     }
 
     @Override
@@ -296,6 +700,13 @@ public class GitLabApiClient implements RepositoryApiClient {
                 .retrieve()
                 .toBodilessEntity();
         log.info("Inline note posted successfully");
+    }
+
+
+    @Override
+    public Optional<String> pullRequestCommentLink(String owner, String repo, Long pullNumber, String remoteId) {
+        return Optional.of(credentials.cloneUrl().replaceAll("/+$", "") + "/-/merge_requests/"
+                + pullNumber + "#note_" + remoteId);
     }
 
     @Override
@@ -481,42 +892,6 @@ public class GitLabApiClient implements RepositoryApiClient {
     }
 
 
-
-    @Override
-    public void createOrUpdateFile(String owner, String repo, String path, String content,
-                                   String message, String branch, String sha) {
-        log.info("Creating/updating file {} on branch '{}' in {}/{}", path, branch, owner, repo);
-        String projectPath = encodeProjectPath(owner, repo);
-        String base64Content = Base64.getEncoder().encodeToString(content.getBytes());
-
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("branch", branch);
-        body.put("content", base64Content);
-        body.put("commit_message", message);
-        body.put("encoding", "base64");
-        if (sha != null) {
-            body.put("last_commit_id", sha);
-        }
-
-        if (sha != null) {
-            // Update existing file
-            gitlabRestClient.put()
-                    .uri("/api/v4/projects/{projectPath}/repository/files/{filePath}",
-                            projectPath, path)
-                    .body(body)
-                    .retrieve()
-                    .toBodilessEntity();
-        } else {
-            // Create new file
-            gitlabRestClient.post()
-                    .uri("/api/v4/projects/{projectPath}/repository/files/{filePath}",
-                            projectPath, path)
-                    .body(body)
-                    .retrieve()
-                    .toBodilessEntity();
-        }
-        log.info("File {} committed successfully", path);
-    }
 
     @Override
     public Long createPullRequest(String owner, String repo, String title, String body,

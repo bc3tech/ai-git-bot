@@ -2,6 +2,7 @@ package org.remus.giteabot.ai.google;
 
 import org.junit.jupiter.api.Test;
 import org.remus.giteabot.ai.AiMessage;
+import org.remus.giteabot.ai.ToolCall;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatusCode;
@@ -9,14 +10,22 @@ import org.springframework.http.MediaType;
 import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClient;
+import tools.jackson.databind.ObjectMapper;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 import static org.hamcrest.Matchers.containsString;
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.client.ExpectedCount.once;
-import static org.springframework.test.web.client.match.MockRestRequestMatchers.*;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.content;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.header;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.jsonPath;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withBadRequest;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 
@@ -115,9 +124,47 @@ class GoogleAiClientTest {
         server.verify();
     }
 
+    @Test
+    void legacyRequest_namesTheToolCallsOfAToolOnlyTurn() {
+        // Same replay, native tools off: the prompt-based shape has no place for the tool
+        // exchange, but Gemini still rejects an empty text part.
+        RestClient.Builder builder = RestClient.builder()
+                .baseUrl("https://generativelanguage.googleapis.com");
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GoogleAiClient client = new GoogleAiClient(builder.build(), "gemini-2.5-flash", 1024, false);
+
+        server.expect(once(), requestTo("https://generativelanguage.googleapis.com"
+                        + "/v1beta/models/gemini-2.5-flash:generateContent"))
+                .andExpect(jsonPath("$.contents[0].role").value("model"))
+                .andExpect(jsonPath("$.contents[0].parts[0].text").value("[called cat]"))
+                .andRespond(withSuccess("""
+                        {"candidates": [{"content": {"parts": [{"text": "Answer"}]}}]}
+                        """, MediaType.APPLICATION_JSON));
+
+        client.chat(toolOnlyHistory(), "Answer now.", "System", null);
+
+        server.verify();
+    }
+
     private GoogleAiClient createClient() {
         return new GoogleAiClient(RestClient.builder().build(), "gemini-2.5-flash", 1024, true);
     }
+
+    /** A replayed native round: an assistant turn whose only content is the tool call. */
+    private static List<AiMessage> toolOnlyHistory() {
+        return List.of(
+                AiMessage.builder()
+                        .role("assistant")
+                        .toolCalls(List.of(new ToolCall("call-1", "cat",
+                                new ObjectMapper().createObjectNode())))
+                        .build(),
+                AiMessage.builder()
+                        .role("tool")
+                        .toolCallId("call-1")
+                        .toolResult("result 1")
+                        .build());
+    }
+
 
     @Test
     void supportsNativeTools_defaultsToTrue() {

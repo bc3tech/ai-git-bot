@@ -1,0 +1,34 @@
+          persist-credentials: false
+
+      - name: Preflight release state
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ github.event.inputs.version }}
+          RELEASE_FORCE: ${{ github.event.inputs.force }}
+          GITEA_TOKEN: [redacted]
+          PLUGIN_PUBLISH_TOKEN: [redacted]
+        run: |
+          set -euo pipefail
+          force_args=()
+          if [ "$RELEASE_FORCE" = "true" ]; then
+            force_args=(-Force -Confirm)
+          fi
+          pwsh -NoProfile -File eng/Publish-Plugin.ps1 -Preflight "${force_args[@]}"
+
+      - name: Install release dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Gate the plugin artifact and publish or resume the release
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ github.event.inputs.version }}
+          RELEASE_FORCE: ${{ github.event.inputs.force }}
+          GITEA_TOKEN: [redacted]
+          PLUGIN_PUBLISH_TOKEN: [redacted]
+        run: |
+          set -euo pipefail
+          force_args=()
+          if [ "$RELEASE_FORCE" = "true" ]; then
+            force_args=(-Force -Confirm)
+          fi
+          pwsh -NoProfile -File eng/Publish-Plugin.ps1 "${force_args[@]}"

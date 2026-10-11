@@ -1,0 +1,41 @@
+{
+  "origin": "Gitea bc3tech/sessionregistry PR 66 captured evidence",
+  "revisions": [
+    "a74d5ad4e7fe98dad4e2d0f12e4ad779bb72961a",
+    "bbc69deedfbe7aa8979f696b567a6bb79f2df91f",
+    "3c6f17c58b73f10979eda99e8ff88cee6c803a9e"
+  ],
+  "base": "dca0b26b956803ba2ec8fc65ad2faa7a8b769fdb",
+  "paths": {
+    "workflow.source": ".gitea/workflows/publish-plugin.yml",
+    "viewer.source": "apps/web/test/auth/viewerSignIn.integration.test.ts"
+  },
+  "sources": [
+    "pr.diff",
+    "bbc69deedfbe7aa8979f696b567a6bb79f2df91f.diff",
+    "3c6f17c58b73f10979eda99e8ff88cee6c803a9e.diff",
+    "pulls_66_commits.json",
+    "rc_55.json",
+    "pulls_66.json"
+  ],
+  "scope": "Minimal source excerpts reconstructed from diff context and changed lines. sourceStartLines restores original line numbers in the fake pinned reader; missing full-file regions are not modeled. Base SHA is the captured PR merge_base. Secret expressions are redacted.",
+  "labels": "absent and intended-fix bodies are historical PR 66 claims. Misattributed, stale-409, valid and failure-severity cases and valid/false disputes are synthetic pipeline controls, not claims about actual repository defects. Double-check verdicts are canned; this does not evaluate a live model.",
+  "sourceStartLines": {
+    "3c6f17c58b73f10979eda99e8ff88cee6c803a9e": {
+      "viewer.source": 385,
+      "workflow.source": 66
+    },
+    "a74d5ad4e7fe98dad4e2d0f12e4ad779bb72961a": {
+      "viewer.source": 385,
+      "workflow.source": 61
+    },
+    "bbc69deedfbe7aa8979f696b567a6bb79f2df91f": {
+      "viewer.source": 385,
+      "workflow.source": 68
+    },
+    "dca0b26b956803ba2ec8fc65ad2faa7a8b769fdb": {
+      "viewer.source": 385,
+      "workflow.source": 61
+    }
+  }
+}

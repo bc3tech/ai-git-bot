@@ -1,12 +1,16 @@
 package org.remus.giteabot.agent.session;
 
 import org.junit.jupiter.api.Test;
+import org.remus.giteabot.ai.AiMessage;
+import org.remus.giteabot.ai.ToolCall;
+import org.remus.giteabot.session.ConversationMessage;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -81,5 +85,51 @@ class AgentSessionCompactionIntegrationTest {
 
         // Replay view is well-formed and ordered (no exception, no deleted-row refs).
         assertThat(service.toAiMessages(reloaded)).isNotEmpty();
+    }
+
+    @Test
+    void compaction_neverKeepsAToolRowWithoutTheAssistantTurnThatAnnouncedIt() {
+        Long id = tx.execute(s -> service.createSession(
+                "owner", "repo", 9_000_002L, "Tool exchange session").getId());
+        String big = "y".repeat(17_000); // five of these exceed the 80k compaction threshold
+        ToolCall call = new ToolCall("call_1", "cat", null, null);
+
+        // Ten messages whose 8-message window would start on the first tool row.
+        tx.executeWithoutResult(s -> service.flushMessages(id, List.of(
+                new PendingMessage("user", big),
+                new PendingMessage("assistant", "reading",
+                        new PendingMessage.ToolPayload(List.of(call), null)),
+                new PendingMessage("tool", "[call_1] first body",
+                        new PendingMessage.ToolPayload(null, "call_1")),
+                new PendingMessage("tool", "[call_1] second body",
+                        new PendingMessage.ToolPayload(null, "call_1")),
+                new PendingMessage("assistant", big),
+                new PendingMessage("user", big),
+                new PendingMessage("assistant", big),
+                new PendingMessage("user", big),
+                new PendingMessage("assistant", big),
+                new PendingMessage("user", big)), 0L, 0L));
+
+        AgentSession compacted = tx.execute(s -> service.compactContextWindow(id));
+
+        List<ConversationMessage> kept = compacted.getMessages().stream()
+                .filter(message -> !message.getContent().startsWith("[Previous agent session context"))
+                .sorted(Comparator.comparing(ConversationMessage::getCreatedAt))
+                .toList();
+        // The compaction ran (it replaced the removed prefix with a summary) ...
+        assertThat(compacted.getMessages()).anySatisfy(message ->
+                assertThat(message.getContent()).contains("compacted to save space"));
+        // ... and the window was widened back onto the announcing assistant turn rather
+        // than starting on the tool row, which would have kept a result without its call.
+        assertThat(kept.get(0).getRole()).isEqualTo("assistant");
+        assertThat(kept.get(0).getToolCalls()).contains("call_1");
+        assertThat(kept).extracting(ConversationMessage::getRole).contains("tool");
+
+        List<AiMessage> replay = service.toAiMessages(compacted);
+        assertThat(replay).isNotEmpty();
+        assertThat(replay.get(0).getRole()).isEqualTo("assistant");
+        assertThat(replay.get(0).getToolCalls()).extracting(ToolCall::id).containsExactly("call_1");
+        assertThat(replay.get(1).getRole()).isEqualTo("tool");
+        assertThat(replay.get(1).getToolCallId()).isEqualTo("call_1");
     }
 }

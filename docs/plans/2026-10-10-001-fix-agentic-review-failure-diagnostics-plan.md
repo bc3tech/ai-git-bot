@@ -22,6 +22,14 @@ The deployed client used /v1/completions, unlike this checkout's /completion.
 Target this checkout; deployment reconciliation is a release prerequisite, not
 permission to change the live server.
 
+After implementation, the user identified
+`brandonh-msft/review-stale-diff-awareness` as the deployed source branch and
+requested its merge. The merged implementation preserves that branch's pinned
+revision, read-only review policy, lease/cancellation fencing, grounded
+publication, degraded-approval guard, and unchanged-review skip behavior.
+Repetition diagnostics now use the pinned revision; branch-switch requests
+cannot change it. The live deployment remains unchanged.
+
 Origin: `docs/brainstorms/2026-10-10-local-agentic-review-requirements.md`.
 Operators get actionable failure information; PR readers see a notice rather
 than silence or authoritative-looking partial findings.

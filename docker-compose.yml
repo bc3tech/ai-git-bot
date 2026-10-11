@@ -13,7 +13,7 @@ services:
       # Encryption key for API keys and SSH private keys stored in the database
       # (optional for tokens, required for SSH private keys)
       APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:-}
-      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-https://github-bot.gitbot.eu}
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:8080}
       # Web UI login: native (default) or oauth (OAuth/OIDC discovery).
       GITEABOT_SECURITY_LOGIN_METHOD: ${GITEABOT_SECURITY_LOGIN_METHOD:-native}
       GITEABOT_SECURITY_OAUTH_CLIENT_ID: ${GITEABOT_SECURITY_OAUTH_CLIENT_ID:-}
@@ -29,6 +29,12 @@ services:
       AGENT_BUDGET_MAX_CONTENT_ROUNDS: 20
       AGENT_BUDGET_MAX_ROUNDS: 20
       AGENT_BUDGET_MAX_CONTEXT_TOOL_REQUESTS_PER_ROUND: 20
+      # Technical-writer agent: repository-context rounds per run; the round after
+      # them is the wrap-up round (tools refused, the writer must answer).
+      AGENT_WRITER_MAX_TOOL_ROUNDS: ${AGENT_WRITER_MAX_TOOL_ROUNDS:-5}
+      # Timeout (seconds) for each validation command the coding agent runs: the
+      # build/test tools and any repository-provided `execute` script.
+      AGENT_VALIDATION_TOOL_TIMEOUT_SECONDS: ${AGENT_VALIDATION_TOOL_TIMEOUT_SECONDS:-300}
       # Optional: capture raw AI request/response payloads in the usage audit log.
       # Disabled by default because payloads can be large and may contain sensitive prompts.
       AI_USAGE_RAW_PAYLOADS_ENABLED: ${AI_USAGE_RAW_PAYLOADS_ENABLED:-false}

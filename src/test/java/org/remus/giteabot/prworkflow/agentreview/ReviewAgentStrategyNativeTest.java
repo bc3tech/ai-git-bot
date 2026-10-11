@@ -39,30 +39,29 @@ import static org.mockito.Mockito.when;
 class ReviewAgentStrategyNativeTest {
 
     private static final ToolResult READ = new ToolResult(true, 0, "file contents", "");
-    private static final ToolResult SWITCH = new ToolResult(true, 0,
-            "Switched workspace branch to: refs/heads/other", "");
+    private static final ToolResult SWITCH = new ToolResult(false, -1, "", "Denied in review mode");
 
     @Mock
     private AgentToolRouter toolRouter;
 
     @Test
-    void successfulSwitchChangesOnlyDiagnosticRefAcrossTurns() {
+    void deniedSwitchKeepsDiagnosticRefAcrossTurns() {
         var diagnostics = collector();
         var strategy = strategy(diagnostics);
         var context = context();
-        when(toolRouter.execute(eq(AgentToolRouter.Mode.WRITER), any()))
+        when(toolRouter.execute(eq(AgentToolRouter.Mode.REVIEW), any()))
                 .thenReturn(READ, SWITCH, READ, READ);
 
         strategy.step(context, turn(read("read-1")), 1);
         strategy.step(context, turn(switchBranch()), 2);
         strategy.step(context, turn(read("read-2")), 3);
-        assertThat(snapshot(diagnostics).repeatedRequestOccurrences()).isZero();
+        assertThat(snapshot(diagnostics).repeatedRequestOccurrences()).isEqualTo(1);
         strategy.step(context, turn(read("read-3")), 4);
 
         assertThat(snapshot(diagnostics).requestOccurrences()).isEqualTo(4);
         assertThat(snapshot(diagnostics).contextRounds()).isEqualTo(4);
-        assertThat(snapshot(diagnostics).repeatedRequestOccurrences()).isEqualTo(1);
-        assertThat(snapshot(diagnostics).repeatedRequestRounds()).isEqualTo(1);
+        assertThat(snapshot(diagnostics).repeatedRequestOccurrences()).isEqualTo(2);
+        assertThat(snapshot(diagnostics).repeatedRequestRounds()).isEqualTo(2);
         assertThat(context.baseBranch()).isEqualTo("refs/heads/main");
         assertThat(strategy.onBudgetExhausted(context).selectedBranch()).isEqualTo("refs/heads/main");
         assertDispatch("cat", "branch-switcher", "cat", "cat");
@@ -70,12 +69,12 @@ class ReviewAgentStrategyNativeTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void switchAndReadsInSameBatchAreObservedInExecutionOrder(boolean readBeforeSwitch) {
+    void deniedSwitchAndReadsInSameBatchStayOnReviewedRevision(boolean readBeforeSwitch) {
         var diagnostics = collector();
         var strategy = strategy(diagnostics);
         var context = context();
         List<String> executed = new ArrayList<>();
-        when(toolRouter.execute(eq(AgentToolRouter.Mode.WRITER), any()))
+        when(toolRouter.execute(eq(AgentToolRouter.Mode.REVIEW), any()))
                 .thenAnswer(invocation -> {
                     ToolCallContext call = invocation.getArgument(1);
                     executed.add(call.tool());
@@ -94,7 +93,7 @@ class ReviewAgentStrategyNativeTest {
                 new ChatTurn("", batch, StopReason.TOOL_USE, 100, 10), 2);
 
         assertThat(snapshot(diagnostics).requestOccurrences()).isEqualTo(readBeforeSwitch ? 4 : 3);
-        assertThat(snapshot(diagnostics).repeatedRequestOccurrences()).isEqualTo(readBeforeSwitch ? 1 : 0);
+        assertThat(snapshot(diagnostics).repeatedRequestOccurrences()).isEqualTo(readBeforeSwitch ? 2 : 1);
         assertThat(decision.results()).extracting(StepDecision.ToolCallResult::toolCallId)
                 .containsExactlyElementsOf(batch.stream().map(ToolCall::id).toList());
         assertThat(decision.results()).extracting(StepDecision.ToolCallResult::resultText)
@@ -103,8 +102,8 @@ class ReviewAgentStrategyNativeTest {
                         .map(ToolResult::formatForAi).toList());
         strategy.step(context, turn(read("repeat-after-switch")), 3);
         assertThat(snapshot(diagnostics).requestOccurrences()).isEqualTo(readBeforeSwitch ? 5 : 4);
-        assertThat(snapshot(diagnostics).repeatedRequestOccurrences()).isEqualTo(readBeforeSwitch ? 2 : 1);
-        assertThat(snapshot(diagnostics).repeatedRequestRounds()).isEqualTo(readBeforeSwitch ? 2 : 1);
+        assertThat(snapshot(diagnostics).repeatedRequestOccurrences()).isEqualTo(readBeforeSwitch ? 3 : 2);
+        assertThat(snapshot(diagnostics).repeatedRequestRounds()).isEqualTo(2);
         assertThat(context.baseBranch()).isEqualTo("refs/heads/main");
         assertThat(executed).containsExactlyElementsOf(readBeforeSwitch
                 ? List.of("cat", "cat", "branch-switcher", "cat", "cat")
@@ -121,7 +120,7 @@ class ReviewAgentStrategyNativeTest {
         ToolResult switchResult = successful
                 ? new ToolResult(true, 0, "No branch announcement", "")
                 : new ToolResult(false, 1, SWITCH.output(), "Switch failed");
-        when(toolRouter.execute(eq(AgentToolRouter.Mode.WRITER), any()))
+        when(toolRouter.execute(eq(AgentToolRouter.Mode.REVIEW), any()))
                 .thenReturn(READ, switchResult, READ);
 
         strategy.step(context, turn(read("initial")), 1);
@@ -138,7 +137,7 @@ class ReviewAgentStrategyNativeTest {
     void disabledDiagnosticsPreserveNativeDispatchAndBranchSemantics() {
         var strategy = strategy(null);
         var context = context();
-        when(toolRouter.execute(eq(AgentToolRouter.Mode.WRITER), any())).thenReturn(SWITCH, READ);
+        when(toolRouter.execute(eq(AgentToolRouter.Mode.REVIEW), any())).thenReturn(SWITCH, READ);
 
         var decision = (StepDecision.ContinueWithToolResults) strategy.step(context,
                 turn(switchBranch(), read("after-switch")), 1);
@@ -151,7 +150,7 @@ class ReviewAgentStrategyNativeTest {
 
     private void assertDispatch(String... tools) {
         var calls = ArgumentCaptor.forClass(ToolCallContext.class);
-        verify(toolRouter, times(tools.length)).execute(eq(AgentToolRouter.Mode.WRITER), calls.capture());
+        verify(toolRouter, times(tools.length)).execute(eq(AgentToolRouter.Mode.REVIEW), calls.capture());
         assertThat(calls.getAllValues()).extracting(ToolCallContext::tool).containsExactly(tools);
         assertThat(calls.getAllValues()).allSatisfy(call -> {
             assertThat(call.workspaceDir()).isEqualTo(Path.of("workspace"));

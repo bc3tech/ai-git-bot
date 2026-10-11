@@ -83,6 +83,19 @@ class ReviewAgentStrategyLegacyTest {
         return new AgentRunContext(null, "octo", "repo", 1L, Path.of("/tmp/ws"), "main");
     }
 
+    @Test
+    void legacyBranchRequestGoesThroughReviewRouterWithoutSwitchingRevision() {
+        when(toolRouter.execute(eq(AgentToolRouter.Mode.REVIEW), any()))
+                .thenReturn(new org.remus.giteabot.agent.validation.ToolResult(false, -1, "", "Denied"));
+        var context = ctx();
+        var decision = strategy().step(context,
+                "{\"runTools\":[{\"tool\":\"branch-switcher\",\"args\":[\"other\"]}]}", 1);
+        assertInstanceOf(StepDecision.Continue.class, decision);
+        assertEquals("main", context.baseBranch());
+        verifyNoInteractions(toolExecutionService);
+        verify(toolRouter).execute(eq(AgentToolRouter.Mode.REVIEW), any());
+    }
+
     @ParameterizedTest
     @NullSource
     @ValueSource(strings = {"length", "unknown", "tool_calls"})
@@ -209,10 +222,8 @@ class ReviewAgentStrategyLegacyTest {
     }
 
     @Test
-    void legacySwitchUsesSelectedRefWithoutObservingDispatchedToolsTwice() {
+    void legacySwitchIsDeniedWithoutChangingDiagnosticRefOrDoubleCountingTools() {
         when(toolRouter.execute(any(), any())).thenReturn(new ToolResult(true, 0, "tool output", ""));
-        when(toolExecutionService.executeContextTool(any(), eq("branch-switcher"), anyList()))
-                .thenReturn(new ToolResult(true, 0, "Switched workspace branch to: other", ""));
         var diagnostics = new ReviewDiagnostics.Collector(5, 10, 4096,
                 1L, "octo", "repo", 1L, null, null);
         var strategy = new ReviewAgentStrategy("system", toolRouter,
@@ -230,18 +241,18 @@ class ReviewAgentStrategyLegacyTest {
 
         strategy.stepLegacy(context, ChatTurn.text(read), 1);
         strategy.stepLegacy(context, ChatTurn.text(switchAndRead), 2);
-        assertEquals("other", context.baseBranch());
-        assertEquals(0, diagnostics.snapshot(ReviewDiagnostics.Category.LOOP_ROUND_LIMIT)
+        assertEquals("main", context.baseBranch());
+        assertEquals(1, diagnostics.snapshot(ReviewDiagnostics.Category.LOOP_ROUND_LIMIT)
                 .repeatedRequestOccurrences());
         strategy.stepLegacy(context, ChatTurn.text(read), 3);
 
         var snapshot = diagnostics.snapshot(ReviewDiagnostics.Category.LOOP_ROUND_LIMIT);
         assertEquals(4, snapshot.requestOccurrences());
         assertEquals(3, snapshot.contextRounds());
-        assertEquals(1, snapshot.repeatedRequestOccurrences());
-        assertEquals(1, snapshot.repeatedRequestRounds());
-        verify(toolRouter, times(3)).execute(any(), any());
-        verify(toolExecutionService).executeContextTool(any(), eq("branch-switcher"), eq(List.of("other")));
+        assertEquals(2, snapshot.repeatedRequestOccurrences());
+        assertEquals(2, snapshot.repeatedRequestRounds());
+        verify(toolRouter, times(4)).execute(eq(AgentToolRouter.Mode.REVIEW), any());
+        verifyNoInteractions(toolExecutionService);
     }
 
     @Test

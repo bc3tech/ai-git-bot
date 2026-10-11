@@ -1,7 +1,10 @@
 package org.remus.giteabot.prworkflow.agentreview;
 
 import lombok.extern.slf4j.Slf4j;
+import org.remus.giteabot.prworkflow.WorkflowCancelledException;
 import org.remus.giteabot.repository.RepositoryApiClient;
+import org.remus.giteabot.review.ReviewFence;
+import org.remus.giteabot.review.state.ReviewRunLeaseService.LeaseLostException;
 
 /** Publishes one bounded, plain PR comment for an agentic-review failure. */
 @Slf4j
@@ -11,6 +14,11 @@ public final class ReviewFailureReporter {
 
     public Delivery report(RepositoryApiClient client, String owner, String repo, Long pullRequestNumber,
                            ReviewDiagnostics.Snapshot failure, boolean clarification) {
+        return report(client, owner, repo, pullRequestNumber, failure, clarification, ReviewFence.NONE);
+    }
+
+    public Delivery report(RepositoryApiClient client, String owner, String repo, Long pullRequestNumber,
+                           ReviewDiagnostics.Snapshot failure, boolean clarification, ReviewFence fence) {
         if (owner == null || owner.isBlank() || repo == null || repo.isBlank()
                 || pullRequestNumber == null || pullRequestNumber <= 0) {
             return unavailable("pull-request-identity-unavailable");
@@ -21,9 +29,12 @@ public final class ReviewFailureReporter {
 
         String body = notice(failure, clarification);
         try {
+            fence.requireActive("before agentic review failure notice");
             client.postPullRequestComment(owner, repo, pullRequestNumber, body);
             log.info("Agentic review failure notice delivered: {}", failure.details());
             return new Delivery(ReviewDiagnostics.NoticeStatus.DELIVERED, null);
+        } catch (WorkflowCancelledException | LeaseLostException e) {
+            throw e;
         } catch (RuntimeException e) {
             log.warn("Agentic review failure notice delivery failed: {}", failure.details());
             return new Delivery(ReviewDiagnostics.NoticeStatus.FAILED, "delivery-failed");

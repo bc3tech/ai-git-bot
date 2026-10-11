@@ -31,5 +31,14 @@ public interface PrWorkflow extends WorkflowDescriptor {
      * @return a non-{@code null} {@link WorkflowResult}; never {@code null}
      */
     WorkflowResult run(PrWorkflowContext context);
+
+    /**
+     * Whether a run with these hints produces a full pull-request review that should supersede
+     * active runs of every other REVIEW-category workflow on the same pull request. Conversational
+     * follow-ups and clarifications return {@code false}.
+     */
+    default boolean supersedesReviews(java.util.Map<String, String> hints) {
+        return false;
+    }
 }
 

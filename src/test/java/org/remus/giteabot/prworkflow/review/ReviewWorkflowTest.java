@@ -22,8 +22,11 @@ import org.remus.giteabot.review.CodeReviewService;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
@@ -62,7 +65,35 @@ class ReviewWorkflowTest {
         lenient().when(giteaClientFactory.getApiClient(any())).thenReturn(repoClient);
         lenient().when(factory.create(any(Bot.class), eq(repoClient),
                 anyInt(), anyInt(), anyInt(), any())).thenReturn(codeReviewService);
+        lenient().when(factory.create(any(Bot.class), eq(repoClient),
+                anyInt(), anyInt(), anyInt(), any(), any())).thenReturn(codeReviewService);
         lenient().when(selectionService.resolveParams(any(), any())).thenReturn(Map.of());
+    }
+
+    @Test
+    void explicitUnchangedRevisionSkipsReviewAndFormalAction() {
+        PrWorkflowContext context = ctx(botWith(PostReviewAction.APPROVE), payloadFor("acme", "web", 7L));
+        context.payload().setAction("review_requested");
+        when(codeReviewService.runReview(eq(context.payload()), eq(null), eq(1L), eq(true),
+                eq(PostReviewAction.APPROVE), any())).thenReturn(new CodeReviewService.ReviewRun(false, false));
+
+        assertEquals(WorkflowResultStatus.SKIPPED, workflow.run(context).status());
+
+        verify(codeReviewService).runReview(eq(context.payload()), eq(null), eq(1L), eq(true),
+                eq(PostReviewAction.APPROVE), any());
+        verify(repoClient, never()).postReviewAction(any(), any(), anyLong(), any());
+    }
+
+    @Test
+    void leaseWaitTimeoutClearsPrAcknowledgementAndPropagatesFailure() {
+        PrWorkflowContext context = ctx(botWith(PostReviewAction.APPROVE), payloadFor("acme", "web", 7L));
+        org.remus.giteabot.review.state.ReviewRunLeaseService.LeaseAcquisitionTimeoutException timeout =
+                new org.remus.giteabot.review.state.ReviewRunLeaseService.LeaseAcquisitionTimeoutException(
+                        1L, "acme", "web", 7L, java.time.Duration.ZERO);
+        when(codeReviewService.runReview(any(), any(), any(), anyBoolean(), any(), any())).thenThrow(timeout);
+        assertEquals(timeout, assertThrows(RuntimeException.class, () -> workflow.run(context)));
+        verify(repoClient).removePullRequestReaction("acme", "web", 7L, "eyes");
+        verify(repoClient, never()).postReviewAction(any(), any(), anyLong(), any());
     }
 
     @Test
@@ -73,22 +104,31 @@ class ReviewWorkflowTest {
     }
 
     @Test
+    void onlyFullReviewsSupersedeOtherReviews() {
+        assertTrue(workflow.supersedesReviews(java.util.Map.of()));
+        assertTrue(workflow.supersedesReviews(java.util.Map.of(ReviewWorkflow.HINT_REVIEW_ACTION, ReviewWorkflow.ACTION_REVIEW)));
+        assertFalse(workflow.supersedesReviews(java.util.Map.of(ReviewWorkflow.HINT_REVIEW_ACTION, ReviewWorkflow.ACTION_BOT_COMMAND)));
+        assertFalse(workflow.supersedesReviews(java.util.Map.of(ReviewWorkflow.HINT_REVIEW_ACTION, ReviewWorkflow.ACTION_PR_CLOSED)));
+    }
+
+    @Test
     void successWhenCodeReviewServicePostedReview() {
         Bot bot = botWith(PostReviewAction.NONE);
         WebhookPayload payload = payloadFor("acme", "web", 7L);
-        when(codeReviewService.reviewPullRequest(eq(payload), eq(null))).thenReturn(true);
+        when(codeReviewService.runReview(eq(payload), eq(null), eq(1L), anyBoolean(), any(), any())).thenReturn(new CodeReviewService.ReviewRun(true, true));
 
         WorkflowResult result = workflow.run(ctx(bot, payload));
 
         assertEquals(WorkflowResultStatus.SUCCESS, result.status());
-        verify(repoClient).postReviewAction(eq("acme"), eq("web"), eq(7L), eq(PostReviewAction.NONE));
+        verify(codeReviewService).runReview(eq(payload), eq(null), eq(1L), eq(false), eq(PostReviewAction.NONE), any());
+        verify(repoClient, never()).postReviewAction(any(), any(), anyLong(), any());
     }
 
     @Test
     void skippedWhenCodeReviewServiceReportedNoReview() {
         Bot bot = botWith(PostReviewAction.APPROVE);
         WebhookPayload payload = payloadFor("acme", "web", 8L);
-        when(codeReviewService.reviewPullRequest(eq(payload), eq(null))).thenReturn(false);
+        when(codeReviewService.runReview(eq(payload), eq(null), eq(1L), anyBoolean(), any(), any())).thenReturn(new CodeReviewService.ReviewRun(false, false));
 
         WorkflowResult result = workflow.run(ctx(bot, payload));
 
@@ -97,8 +137,20 @@ class ReviewWorkflowTest {
     }
 
     @Test
-    void botCommandFailureIsExposedInsteadOfReturningSuccess() {
-        Bot bot = botWith(PostReviewAction.NONE);
+    void skipsPostReviewActionWhenPendingReviewBlocksIt() {
+        Bot bot = botWith(PostReviewAction.APPROVE);
+        WebhookPayload payload = payloadFor("acme", "web", 11L);
+        when(codeReviewService.runReview(eq(payload), eq(null), eq(1L), anyBoolean(), any(), any()))
+                .thenReturn(new CodeReviewService.ReviewRun(true, false));
+
+        WorkflowResult result = workflow.run(ctx(bot, payload));
+
+        assertEquals(WorkflowResultStatus.SUCCESS, result.status());
+        verify(repoClient, never()).postReviewAction(any(), any(), anyLong(), any());
+    }
+
+    @Test
+    void botCommandFailureIsExposedInsteadOfReturningSuccess() {        Bot bot = botWith(PostReviewAction.NONE);
         WebhookPayload payload = payloadFor("acme", "web", 10L);
         IllegalStateException writeFailure = new IllegalStateException("comment write failed");
         doThrow(writeFailure).when(codeReviewService).handleBotCommand(payload, null);
@@ -114,6 +166,23 @@ class ReviewWorkflowTest {
                 () -> workflow.run(context));
 
         assertEquals(writeFailure, thrown);
+    }
+
+    @Test
+    void forwardsDoubleCheckSettingsToReviewFactory() {
+        Bot bot = botWith(PostReviewAction.NONE);
+        org.remus.giteabot.prworkflow.config.WorkflowConfiguration config =
+                new org.remus.giteabot.prworkflow.config.WorkflowConfiguration();
+        config.setId(42L);
+        bot.setWorkflowConfiguration(config);
+        when(selectionService.resolveParams(42L, "review")).thenReturn(Map.of(
+                "doubleCheckEnabled", false, "doubleCheckMinSeverity", "HIGH", "doubleCheckAiIntegrationId", 7));
+        WebhookPayload payload = payloadFor("acme", "web", 7L);
+        when(codeReviewService.runReview(eq(payload), eq(null), eq(1L), anyBoolean(), any(), any())).thenReturn(new CodeReviewService.ReviewRun(false, false));
+        workflow.run(ctx(bot, payload));
+        verify(factory).create(eq(bot), eq(repoClient), anyInt(), anyInt(), anyInt(), any(),
+                eq(new org.remus.giteabot.review.grounding.DoubleCheckSettings(false,
+                        org.remus.giteabot.review.grounding.DoubleCheckSettings.Severity.HIGH, 7L)));
     }
 
     private static PrWorkflowContext ctx(Bot bot, WebhookPayload payload) {
@@ -135,7 +204,7 @@ class ReviewWorkflowTest {
                 () -> workflow.run(cancelledCtx(bot, payload)));
 
         // CodeReviewService must not even be invoked when the run is already superseded.
-        verify(codeReviewService, never()).reviewPullRequest(any(), any());
+        verify(codeReviewService, never()).runReview(any(), any(), any(), anyBoolean(), any(), any());
         verify(repoClient, never()).postReviewAction(any(), any(), anyLong(), any());
     }
 

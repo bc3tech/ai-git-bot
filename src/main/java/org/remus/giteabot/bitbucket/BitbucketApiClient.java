@@ -8,6 +8,8 @@ import org.remus.giteabot.repository.RepositoryApiClient;
 import org.remus.giteabot.repository.WorkflowDispatchRequest;
 import org.remus.giteabot.repository.WorkflowRunStatus;
 import org.remus.giteabot.repository.model.RepositoryCredentials;
+import org.remus.giteabot.repository.model.CommentScan;
+import org.remus.giteabot.repository.model.ThreadCapabilities;
 import org.remus.giteabot.repository.model.Review;
 import org.remus.giteabot.repository.model.ReviewComment;
 import org.springframework.core.ParameterizedTypeReference;
@@ -20,8 +22,11 @@ import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.RestClient;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Bitbucket Cloud implementation of {@link RepositoryApiClient}.
@@ -54,6 +59,15 @@ public class BitbucketApiClient implements RepositoryApiClient {
     // ---- Pull request operations ----
 
     @Override
+    public boolean isPullRequestOpen(String owner, String repo, Long pullNumber) {
+        Map<String, Object> pr = restClient.get()
+                .uri("/repositories/{workspace}/{repo}/pullrequests/{pr_id}", owner, repo, pullNumber)
+                .retrieve()
+                .body(new ParameterizedTypeReference<>() {});
+        return pr != null && "OPEN".equals(pr.get("state"));
+    }
+
+    @Override
     public String getPullRequestDiff(String owner, String repo, Long pullNumber) {
         log.info("Fetching diff for PR #{} in {}/{} from baseUrl={}", pullNumber, owner, repo, credentials.baseUrl());
         try {
@@ -76,26 +90,32 @@ public class BitbucketApiClient implements RepositoryApiClient {
 
     @Override
     public void postReviewComment(String owner, String repo, Long pullNumber, String body) {
-        log.info("Posting review comment on PR #{} in {}/{}", pullNumber, owner, repo);
-        restClient.post()
-                .uri("/repositories/{workspace}/{repo}/pullrequests/{pr_id}/comments",
-                        owner, repo, pullNumber)
-                .body(Map.of("content", Map.of("raw", body)))
-                .retrieve()
-                .toBodilessEntity();
-        log.info("Review comment posted successfully");
+        postReviewCommentReturningId(owner, repo, pullNumber, body);
+    }
+
+    @Override
+    public Optional<String> postReviewCommentReturningId(String owner, String repo, Long pullNumber, String body) {
+        return postPullRequestCommentReturningId(owner, repo, pullNumber, body);
+    }
+
+    @Override
+    public Optional<String> postReviewReturningId(String owner, String repo, Long pullNumber,
+                                                  String body, org.remus.giteabot.repository.PostReviewAction action) {
+        return postPullRequestCommentReturningId(owner, repo, pullNumber, body);
     }
 
     @Override
     public void postPullRequestComment(String owner, String repo, Long pullNumber, String body) {
-        log.info("Posting comment on PR #{} in {}/{}", pullNumber, owner, repo);
-        restClient.post()
-                .uri("/repositories/{workspace}/{repo}/pullrequests/{pr_id}/comments",
-                        owner, repo, pullNumber)
+        postPullRequestCommentReturningId(owner, repo, pullNumber, body);
+    }
+
+    @Override
+    public Optional<String> postPullRequestCommentReturningId(String owner, String repo, Long pullNumber, String body) {
+        Map<String, Object> response = restClient.post()
+                .uri("/repositories/{workspace}/{repo}/pullrequests/{pr_id}/comments", owner, repo, pullNumber)
                 .body(Map.of("content", Map.of("raw", body)))
-                .retrieve()
-                .toBodilessEntity();
-        log.info("Comment posted successfully");
+                .retrieve().body(new ParameterizedTypeReference<>() {});
+        return remoteId(response);
     }
 
     /**
@@ -204,21 +224,115 @@ public class BitbucketApiClient implements RepositoryApiClient {
     @Override
     @SuppressWarnings("unchecked")
     public List<Map<String, Object>> getIssueComments(String owner, String repo, Long issueNumber) {
-        log.info("Fetching comments for issue #{} in {}/{}", issueNumber, owner, repo);
-        Map<String, Object> result = restClient.get()
-                .uri(uriBuilder -> uriBuilder
-                        .path("/repositories/{workspace}/{repo}/issues/{issue_id}/comments")
-                        .queryParam("pagelen", 50)
-                        .build(owner, repo, issueNumber))
-                .retrieve()
-                .body(new ParameterizedTypeReference<>() {});
-        if (result != null && result.get("values") instanceof List<?> values) {
-            return values.stream()
-                    .filter(Map.class::isInstance)
-                    .map(value -> (Map<String, Object>) value)
-                    .toList();
+        List<Map<String, Object>> all = new ArrayList<>();
+        String next = "/repositories/" + owner + "/" + repo + "/issues/" + issueNumber + "/comments?pagelen=50";
+        while (next != null) {
+            Map<String, Object> page = restClient.get().uri(next).retrieve().body(new ParameterizedTypeReference<>() {});
+            if (page == null || !(page.get("values") instanceof List<?> values)) break;
+            all.addAll(values.stream().filter(Map.class::isInstance).map(value -> (Map<String, Object>) value).toList());
+            next = page.get("next") instanceof String value ? safeNext(value) : null;
         }
-        return List.of();
+        return List.copyOf(all);
+    }
+
+    @Override
+    public ThreadCapabilities threadCapabilities() {
+        return new ThreadCapabilities(true, true, false);
+    }
+
+    @Override
+    public Optional<String> replyToReviewThread(String owner, String repo, Long pullNumber,
+                                                String threadId, String body) {
+        Map<String, Object> response = restClient.post()
+                .uri("/repositories/{workspace}/{repo}/pullrequests/{pr_id}/comments", owner, repo, pullNumber)
+                .body(Map.of("content", Map.of("raw", body), "parent", Map.of("id", Long.parseLong(threadId))))
+                .retrieve().body(new ParameterizedTypeReference<>() {});
+        return remoteId(response);
+    }
+
+    @Override
+    public void editReviewComment(String owner, String repo, Long pullNumber, String commentId, String body) {
+        restClient.put()
+                .uri("/repositories/{workspace}/{repo}/pullrequests/{pr_id}/comments/{comment_id}",
+                        owner, repo, pullNumber, Long.parseLong(commentId))
+                .body(Map.of("content", Map.of("raw", body))).retrieve().toBodilessEntity();
+    }
+
+    @Override
+    public CommentScan<ReviewComment> listReviewThreadComments(String owner, String repo, Long pullNumber) {
+        CommentScan<Map<String, Object>> scan = scanPullRequestComments(owner, repo, pullNumber);
+        List<ReviewComment> comments = new ArrayList<>();
+        var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        Map<String, Map<String, Object>> byId = new LinkedHashMap<>();
+        for (Map<String, Object> value : scan.comments()) {
+            byId.put(String.valueOf(value.get("id")), value);
+        }
+        for (Map<String, Object> value : scan.comments()) {
+            try {
+                BitbucketReviewComment comment = mapper.convertValue(value, BitbucketReviewComment.class);
+                String parentId = comment.getParentId();
+                while (parentId != null && byId.containsKey(parentId)) {
+                    Map<String, Object> parent = byId.get(parentId);
+                    Object parentValue = parent.get("parent");
+                    if (!(parentValue instanceof Map<?, ?> parentMap) || parentMap.get("id") == null) break;
+                    parentId = String.valueOf(parentMap.get("id"));
+                }
+                if (parentId != null) comment.setThreadId(parentId);
+                comments.add(comment);
+            } catch (IllegalArgumentException e) {
+                return new CommentScan<>(comments, false);
+            }
+        }
+        return new CommentScan<>(comments, scan.complete());
+    }
+
+    @Override
+    public CommentScan<Map<String, Object>> listPullRequestComments(String owner, String repo, Long pullNumber) {
+        return scanPullRequestComments(owner, repo, pullNumber);
+    }
+
+    @SuppressWarnings("unchecked")
+    private CommentScan<Map<String, Object>> scanPullRequestComments(String owner, String repo, Long pullNumber) {
+        List<Map<String, Object>> all = new ArrayList<>();
+        String next = "/repositories/" + owner + "/" + repo + "/pullrequests/" + pullNumber + "/comments?pagelen=50";
+        java.util.Set<String> visited = new java.util.HashSet<>();
+        while (next != null) {
+            if (!visited.add(next)) return new CommentScan<>(all, false);
+            try {
+                Map<String, Object> page = restClient.get().uri(next).retrieve().body(new ParameterizedTypeReference<>() {});
+                if (page == null || !(page.get("values") instanceof List<?> values)) return new CommentScan<>(all, false);
+                all.addAll(values.stream().filter(Map.class::isInstance).map(value -> (Map<String, Object>) value).toList());
+                boolean hasNext = page.get("next") instanceof String;
+                next = hasNext ? safeNext((String) page.get("next")) : null;
+                if (hasNext && next == null) return new CommentScan<>(all, false);
+            } catch (org.springframework.web.client.RestClientException e) {
+                return new CommentScan<>(all, false);
+            }
+        }
+        return new CommentScan<>(all, true);
+    }
+
+    private String safeNext(String next) {
+        try {
+            java.net.URI candidate = java.net.URI.create(next);
+            java.net.URI base = java.net.URI.create(credentials.baseUrl());
+            if (!java.util.Objects.equals(candidate.getScheme(), base.getScheme())
+                    || !java.util.Objects.equals(candidate.getAuthority(), base.getAuthority())) return null;
+            return next;
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    private static Optional<String> remoteId(Map<String, Object> response) {
+        Object id = response == null ? null : response.get("id");
+        return id == null ? Optional.empty() : Optional.of(String.valueOf(id));
+    }
+
+    @Override
+    public Optional<String> pullRequestCommentLink(String owner, String repo, Long pullNumber, String remoteId) {
+        return Optional.of(credentials.cloneUrl().replaceAll("/+$", "") + "/" + owner + "/" + repo
+                + "/pull-requests/" + pullNumber);
     }
 
     @Override
@@ -344,22 +458,6 @@ public class BitbucketApiClient implements RepositoryApiClient {
 
 
     @Override
-    public void createOrUpdateFile(String owner, String repo, String path, String content,
-                                   String message, String branch, String sha) {
-        log.info("Creating/updating file {} on branch '{}' in {}/{}", path, branch, owner, repo);
-        // Bitbucket uses the src endpoint with form data for file operations.
-        // Use a multipart-like approach with the commit endpoint.
-        restClient.post()
-                .uri("/repositories/{workspace}/{repo}/src", owner, repo)
-                .header("Content-Type", "application/x-www-form-urlencoded")
-                .body(String.format("message=%s&branch=%s&%s=%s",
-                        urlEncode(message), urlEncode(branch), urlEncode(path), urlEncode(content)))
-                .retrieve()
-                .toBodilessEntity();
-        log.info("File {} committed successfully", path);
-    }
-
-    @Override
     public Long createPullRequest(String owner, String repo, String title, String body,
                                   String head, String base) {
         log.info("Creating pull request '{}' in {}/{} from {} to {}", title, owner, repo, head, base);
@@ -457,9 +555,5 @@ public class BitbucketApiClient implements RepositoryApiClient {
                     : WorkflowRunStatus.COMPLETED_FAILURE;
             default -> WorkflowRunStatus.IN_PROGRESS;
         };
-    }
-
-    private String urlEncode(String value) {
-        return java.net.URLEncoder.encode(value, java.nio.charset.StandardCharsets.UTF_8);
     }
 }

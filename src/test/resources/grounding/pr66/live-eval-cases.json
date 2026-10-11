@@ -1,0 +1,160 @@
+{
+  "scope": "PR 66 historical intended-fix claims plus complete synthetic Java controls. Unlike U12 canned verdict controls, KEEP labels describe concrete runtime defects. All candidates must pass QuoteVerifier before any live request. Expected labels and case metadata are never sent to the model.",
+  "cases": [
+    {
+      "id": "case-01",
+      "evidence": "pr66",
+      "findingRef": "intended-fix",
+      "expected": "DROP"
+    },
+    {
+      "id": "case-02",
+      "evidence": "pr66",
+      "findingRef": "old-side-fix",
+      "expected": "DROP"
+    },
+    {
+      "id": "case-03",
+      "evidence": "synthetic",
+      "expected": "KEEP",
+      "finding": {
+        "path": "EvalExamples.java",
+        "line": 6,
+        "side": "NEW",
+        "quote": "return 42 / divisor;",
+        "body": "divide always divides by zero and throws ArithmeticException instead of returning an integer.",
+        "severity": "HIGH",
+        "category": "correctness"
+      }
+    },
+    {
+      "id": "case-04",
+      "evidence": "synthetic",
+      "expected": "KEEP",
+      "finding": {
+        "path": "EvalExamples.java",
+        "line": 10,
+        "side": "NEW",
+        "quote": "return values[values.length];",
+        "body": "last indexes one past the end of every non-null array, throwing ArrayIndexOutOfBoundsException. Use length minus one for nonempty arrays.",
+        "severity": "HIGH",
+        "category": "correctness"
+      }
+    },
+    {
+      "id": "case-05",
+      "evidence": "synthetic",
+      "expected": "KEEP",
+      "finding": {
+        "path": "EvalExamples.java",
+        "line": 15,
+        "side": "NEW",
+        "quote": "return value.trim();",
+        "body": "trim dereferences value after assigning it null; every call throws NullPointerException.",
+        "severity": "HIGH",
+        "category": "correctness"
+      }
+    },
+    {
+      "id": "case-06",
+      "evidence": "synthetic",
+      "expected": "KEEP",
+      "finding": {
+        "path": "EvalExamples.java",
+        "line": 20,
+        "side": "NEW",
+        "quote": "values.add(\"second\");",
+        "body": "append attempts to add to the immutable list created by List.of and always throws UnsupportedOperationException.",
+        "severity": "HIGH",
+        "category": "correctness"
+      }
+    },
+    {
+      "id": "case-07",
+      "evidence": "synthetic",
+      "expected": "KEEP",
+      "finding": {
+        "path": "EvalExamples.java",
+        "line": 26,
+        "side": "NEW",
+        "quote": "for (int i = 0; i <= values.length; i++) {",
+        "body": "sum includes index values.length and therefore throws ArrayIndexOutOfBoundsException for any non-null array instead of returning its sum.",
+        "severity": "HIGH",
+        "category": "correctness"
+      }
+    },
+    {
+      "id": "case-08",
+      "evidence": "synthetic",
+      "expected": "DROP",
+      "finding": {
+        "path": "EvalExamples.java",
+        "line": 33,
+        "side": "NEW",
+        "quote": "if (values == null || values.length == 0) return -1;",
+        "body": "firstNonempty dereferences a null array in values.length despite checking values == null. This guard throws NullPointerException.",
+        "severity": "HIGH",
+        "category": "correctness"
+      }
+    },
+    {
+      "id": "case-09",
+      "evidence": "synthetic",
+      "expected": "DROP",
+      "finding": {
+        "path": "EvalExamples.java",
+        "line": 34,
+        "side": "NEW",
+        "quote": "return values[0];",
+        "body": "firstNonempty reads index zero of an empty array without checking its length, so empty arrays throw ArrayIndexOutOfBoundsException.",
+        "severity": "HIGH",
+        "category": "correctness"
+      }
+    },
+    {
+      "id": "case-10",
+      "evidence": "synthetic",
+      "expected": "KEEP",
+      "finding": {
+        "path": "EvalExamples.java",
+        "line": 15,
+        "side": "NEW",
+        "quote": "return value.trim();",
+        "body": "trim dereferences value after assigning it null; every call throws NullPointerException.",
+        "severity": "HIGH",
+        "category": "correctness"
+      },
+      "disputeText": "This is not a bug. Java automatically converts a null String to an empty string before trim() is invoked."
+    },
+    {
+      "id": "case-11",
+      "evidence": "synthetic",
+      "expected": "DROP",
+      "finding": {
+        "path": "EvalExamples.java",
+        "line": 33,
+        "side": "NEW",
+        "quote": "if (values == null || values.length == 0) return -1;",
+        "body": "firstNonempty dereferences a null array in values.length despite checking values == null. This guard throws NullPointerException.",
+        "severity": "HIGH",
+        "category": "correctness"
+      },
+      "disputeText": "The logical OR short-circuits when values is null, so values.length is never evaluated and the method returns -1."
+    },
+    {
+      "id": "case-12",
+      "evidence": "synthetic",
+      "expected": "DROP",
+      "finding": {
+        "path": "EvalExamples.java",
+        "line": 34,
+        "side": "NEW",
+        "quote": "return values[0];",
+        "body": "firstNonempty reads index zero of an empty array without checking its length, so empty arrays throw ArrayIndexOutOfBoundsException.",
+        "severity": "HIGH",
+        "category": "correctness"
+      },
+      "disputeText": "The preceding guard returns -1 for empty arrays before this index access is reached."
+    }
+  ]
+}

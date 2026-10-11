@@ -4,6 +4,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.remus.giteabot.config.ReviewConfigProperties;
 import org.remus.giteabot.repository.RepositoryApiClient;
 
+import org.remus.giteabot.review.grounding.PinnedSourceReader;
+
 import java.util.List;
 
 /**
@@ -49,15 +51,24 @@ public class PrContextEnricher {
      */
     public String buildEnrichedContext(String owner, String repo, Long prNumber,
                                        String diff, String headRef, String prBody) {
+        return buildEnrichedContext(owner, repo, prNumber, diff, headRef, prBody, null);
+    }
+
+    /** Uses the cached pinned head reader for changed-file text; unreadable revisions fail closed. */
+    public String buildEnrichedContext(String owner, String repo, Long prNumber,
+                                       String diff, String headRef, String prBody, PinnedSourceReader source) {
         var context = new EnrichmentContext(owner, repo, prNumber, diff, headRef, prBody);
         StringBuilder result = new StringBuilder();
 
         for (ContextEnricher enricher : enrichers) {
             try {
-                String section = enricher.enrich(context);
+                String section = enricher instanceof ChangedFileContentsEnricher files
+                        ? files.enrich(context, source) : enricher.enrich(context);
                 if (section != null && !section.isEmpty()) {
                     result.append(section).append("\n");
                 }
+            } catch (PinnedSourceReader.RevisionUnavailableException e) {
+                throw e;
             } catch (Exception e) {
                 log.warn("Enricher {} failed: {}", enricher.getClass().getSimpleName(), e.getMessage());
             }

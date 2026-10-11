@@ -3,9 +3,14 @@ package org.remus.giteabot.gitlab;
 import org.junit.jupiter.api.Test;
 import org.remus.giteabot.repository.PostReviewAction;
 import org.remus.giteabot.repository.RepositoryApiClient;
+import org.remus.giteabot.repository.model.DiffSide;
 import org.remus.giteabot.repository.model.RepositoryCredentials;
+import org.remus.giteabot.repository.model.ReviewAnchorComment;
+import org.remus.giteabot.repository.model.ReviewPublicationResult;
+import org.remus.giteabot.repository.model.ReviewSnapshot;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
+import org.springframework.http.HttpStatus;
 import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestClient;
 
@@ -17,6 +22,7 @@ import static org.springframework.test.web.client.match.MockRestRequestMatchers.
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
+import static org.springframework.test.web.client.response.MockRestResponseCreators.withStatus;
 
 /**
  * Unit tests for {@link GitLabApiClient} verifying that it correctly implements
@@ -26,6 +32,21 @@ class GitLabApiClientTest {
 
     private static final RepositoryCredentials CREDS =
             RepositoryCredentials.of("https://gitlab.example.com", "https://gitlab.example.com", "glpat-token123");
+
+    @Test
+    void removePullRequestReaction_deletesOnlyAuthenticatedBotsReaction() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitLabApiClient client = new GitLabApiClient(builder.build(), CREDS);
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v4/user"))
+                .andRespond(withSuccess("{\"id\":1}", MediaType.APPLICATION_JSON));
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v4/projects/owner%2Frepo/merge_requests/7/award_emoji?per_page=100&page=1"))
+                .andRespond(withSuccess("[{\"id\":10,\"name\":\"eyes\",\"user\":{\"id\":2}},{\"id\":11,\"name\":\"eyes\",\"user\":{\"id\":1}}]", MediaType.APPLICATION_JSON));
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v4/projects/owner%2Frepo/merge_requests/7/award_emoji/11"))
+                .andExpect(method(HttpMethod.DELETE)).andRespond(withSuccess());
+        client.removePullRequestReaction("owner", "repo", 7L, "eyes");
+        server.verify();
+    }
 
     @Test
     void implementsRepositoryApiClient() {
@@ -64,6 +85,40 @@ class GitLabApiClientTest {
     void encodeProjectPath_buildsProjectPath() {
         assertEquals("owner/repo", GitLabApiClient.encodeProjectPath("owner", "repo"));
         assertEquals("my-org/my-project", GitLabApiClient.encodeProjectPath("my-org", "my-project"));
+    }
+
+    @Test
+    void addPullRequestReaction_postsEyesToMergeRequestAwardEndpoint() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitLabApiClient client = new GitLabApiClient(builder.build(), CREDS);
+
+        server.expect(requestTo(
+                        "https://gitlab.example.com/api/v4/projects/owner%2Frepo/merge_requests/42/award_emoji"))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(jsonPath("$.name").value("eyes"))
+                .andRespond(withSuccess());
+
+        client.addPullRequestReaction("owner", "repo", 42L, "eyes");
+
+        server.verify();
+    }
+
+    @Test
+    void addIssueReaction_postsEyesToIssueAwardEndpoint() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitLabApiClient client = new GitLabApiClient(builder.build(), CREDS);
+
+        server.expect(requestTo(
+                        "https://gitlab.example.com/api/v4/projects/owner%2Frepo/issues/12/award_emoji"))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(jsonPath("$.name").value("eyes"))
+                .andRespond(withSuccess());
+
+        client.addIssueReaction("owner", "repo", 12L, "eyes");
+
+        server.verify();
     }
 
     @Test
@@ -125,7 +180,7 @@ class GitLabApiClientTest {
         GitLabApiClient client = new GitLabApiClient(builder.build(), CREDS);
 
         server.expect(requestTo(
-                        "https://gitlab.example.com/api/v4/projects/owner%2Frepo/issues/42/notes?per_page=50"))
+                        "https://gitlab.example.com/api/v4/projects/owner%2Frepo/issues/42/notes?per_page=100&page=1"))
                 .andExpect(method(HttpMethod.GET))
                 .andRespond(withSuccess("[{\"id\":201,\"body\":\"First note\"}]", MediaType.APPLICATION_JSON));
 
@@ -190,4 +245,232 @@ class GitLabApiClientTest {
 
         server.verify();
     }
+
+    @Test
+    void getReviewSnapshot_usesLatestVersionDiffsAndCommitRefs() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitLabApiClient client = new GitLabApiClient(builder.build(), CREDS);
+
+        server.expect(requestTo("https://gitlab.example.com/api/v4/projects/owner%2Frepo/merge_requests/7/versions"))
+                .andExpect(method(HttpMethod.GET))
+                .andRespond(withSuccess("[{\"id\":12,\"base_commit_sha\":\"base\","
+                        + "\"start_commit_sha\":\"start\",\"head_commit_sha\":\"head\"}]",
+                        MediaType.APPLICATION_JSON));
+        server.expect(requestTo("https://gitlab.example.com/api/v4/projects/owner%2Frepo/merge_requests/7/versions/12"))
+                .andExpect(method(HttpMethod.GET))
+                .andRespond(withSuccess("{\"diffs\":["
+                        + "{\"old_path\":\"new.txt\",\"new_path\":\"new.txt\","
+                        + "\"diff\":\"@@ -0,0 +1 @@\\n+hello\\n\",\"new_file\":true},"
+                        + "{\"old_path\":\"gone.txt\",\"new_path\":\"gone.txt\","
+                        + "\"diff\":\"@@ -1 +0,0 @@\\n-old\\n\",\"deleted_file\":true}]}"
+                        , MediaType.APPLICATION_JSON));
+
+        ReviewSnapshot snapshot = client.getReviewSnapshot("owner", "repo", 7L);
+
+        server.verify();
+        assertEquals("head", snapshot.headSha());
+        assertEquals("base", snapshot.baseSha());
+        assertEquals("start", snapshot.startSha());
+        assertTrue(snapshot.inlineSupported());
+        assertTrue(snapshot.diff().contains("--- /dev/null\n+++ b/new.txt\n"));
+        assertTrue(snapshot.diff().contains("--- a/gone.txt\n+++ /dev/null\n"));
+    }
+
+    @Test
+    void publishInlineReview_postsDiscussionWithContextPositionThenSummaryAndAction() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitLabApiClient client = new GitLabApiClient(builder.build(), CREDS);
+        ReviewSnapshot snapshot = new ReviewSnapshot("head", "base", "start", "diff", true);
+        ReviewAnchorComment comment = new ReviewAnchorComment("finding-1", "new/A.java", "old/A.java",
+                DiffSide.NEW, 8, 3, 8, "Review this context");
+
+        server.expect(requestTo("https://gitlab.example.com/api/v4/projects/owner%2Frepo/merge_requests/7/discussions"))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(jsonPath("$.body").value("Review this context"))
+                .andExpect(jsonPath("$.position.position_type").value("text"))
+                .andExpect(jsonPath("$.position.base_sha").value("base"))
+                .andExpect(jsonPath("$.position.start_sha").value("start"))
+                .andExpect(jsonPath("$.position.head_sha").value("head"))
+                .andExpect(jsonPath("$.position.old_path").value("old/A.java"))
+                .andExpect(jsonPath("$.position.new_path").value("new/A.java"))
+                .andExpect(jsonPath("$.position.old_line").value(3))
+                .andExpect(jsonPath("$.position.new_line").value(8))
+                .andRespond(withSuccess("{\"id\":\"discussion-1\",\"notes\":[{\"position\":{}}]}",
+                        MediaType.APPLICATION_JSON));
+        server.expect(requestTo("https://gitlab.example.com/api/v4/projects/owner%2Frepo/merge_requests/7/notes"))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(jsonPath("$.body").value("Summary"))
+                .andRespond(withSuccess());
+        server.expect(requestTo("https://gitlab.example.com/api/v4/projects/owner%2Frepo/merge_requests/7/request_changes"))
+                .andExpect(method(HttpMethod.POST))
+                .andRespond(withSuccess());
+
+        ReviewPublicationResult result = client.publishInlineReview("owner", "repo", 7L, snapshot,
+                "Summary", List.of(comment), PostReviewAction.REQUEST_CHANGES);
+
+        server.verify();
+        assertEquals(ReviewPublicationResult.Status.PUBLISHED, result.status());
+        assertEquals(ReviewPublicationResult.Delivery.CONFIRMED, result.review());
+        assertEquals("discussion-1", result.comments().getFirst().remoteId());
+    }
+
+    @Test
+    void publishInlineReview_returnsRejectedWhenAllWritesAreRejected() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitLabApiClient client = new GitLabApiClient(builder.build(), CREDS);
+        ReviewAnchorComment comment = new ReviewAnchorComment("finding-1", "src/A.java", null,
+                DiffSide.NEW, 2, null, 2, "Comment");
+        server.expect(requestTo("https://gitlab.example.com/api/v4/projects/owner%2Frepo/merge_requests/7/discussions"))
+                .andExpect(method(HttpMethod.POST))
+                .andRespond(withStatus(HttpStatus.UNPROCESSABLE_ENTITY));
+        server.expect(requestTo("https://gitlab.example.com/api/v4/projects/owner%2Frepo/merge_requests/7/notes"))
+                .andExpect(method(HttpMethod.POST))
+                .andRespond(withStatus(HttpStatus.BAD_REQUEST));
+
+        ReviewPublicationResult result = client.publishInlineReview("owner", "repo", 7L,
+                new ReviewSnapshot("head", "base", "start", "diff", true), "Summary",
+                List.of(comment), PostReviewAction.NONE);
+
+        server.verify();
+        assertEquals(ReviewPublicationResult.Status.REJECTED, result.status());
+        assertTrue(result.nothingWritten());
+    }
+
+    @Test
+    void publishInlineReview_marksCommentMisplacedWhenResponseOmitsPosition() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitLabApiClient client = new GitLabApiClient(builder.build(), CREDS);
+        ReviewAnchorComment comment = new ReviewAnchorComment("finding-1", "src/A.java", null,
+                DiffSide.NEW, 2, null, 2, "Comment");
+        server.expect(requestTo("https://gitlab.example.com/api/v4/projects/owner%2Frepo/merge_requests/7/discussions"))
+                .andExpect(method(HttpMethod.POST))
+                .andRespond(withSuccess("{\"id\":\"discussion-2\",\"notes\":[{\"id\":99}]}",
+                        MediaType.APPLICATION_JSON));
+        server.expect(requestTo("https://gitlab.example.com/api/v4/projects/owner%2Frepo/merge_requests/7/notes"))
+                .andExpect(method(HttpMethod.POST))
+                .andRespond(withSuccess());
+
+        ReviewPublicationResult result = client.publishInlineReview("owner", "repo", 7L,
+                new ReviewSnapshot("head", "base", "start", "diff", true), "Summary",
+                List.of(comment), PostReviewAction.NONE);
+
+        server.verify();
+        assertEquals(ReviewPublicationResult.Status.PARTIAL, result.status());
+        assertEquals(ReviewPublicationResult.Delivery.MISPLACED, result.comments().getFirst().delivery());
+    }
+
+    @Test
+    void publishInlineReview_returnsUnknownWhenOnlyWritesHaveUncertainOutcomes() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitLabApiClient client = new GitLabApiClient(builder.build(), CREDS);
+        ReviewAnchorComment comment = new ReviewAnchorComment("finding-1", "src/A.java", null,
+                DiffSide.NEW, 2, null, 2, "Comment");
+        server.expect(requestTo("https://gitlab.example.com/api/v4/projects/owner%2Frepo/merge_requests/7/discussions"))
+                .andExpect(method(HttpMethod.POST))
+                .andRespond(withStatus(HttpStatus.INTERNAL_SERVER_ERROR));
+        server.expect(requestTo("https://gitlab.example.com/api/v4/projects/owner%2Frepo/merge_requests/7/notes"))
+                .andExpect(method(HttpMethod.POST))
+                .andRespond(withStatus(HttpStatus.INTERNAL_SERVER_ERROR));
+
+        ReviewPublicationResult result = client.publishInlineReview("owner", "repo", 7L,
+                new ReviewSnapshot("head", "base", "start", "diff", true), "Summary",
+                List.of(comment), PostReviewAction.NONE);
+
+        server.verify();
+        assertEquals(ReviewPublicationResult.Status.UNKNOWN, result.status());
+        assertFalse(result.nothingWritten());
+    }
+
+    @Test
+    void replyToReviewThread_postsIntoDiscussionAndReturnsId() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitLabApiClient client = new GitLabApiClient(builder.build(), CREDS);
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v4/projects/owner%2Frepo/merge_requests/7/discussions/thread-1/notes"))
+                .andExpect(method(HttpMethod.POST)).andExpect(jsonPath("$.body").value("reply"))
+                .andRespond(withSuccess("{\"id\":12}", MediaType.APPLICATION_JSON));
+        assertEquals(java.util.Optional.of("12"),
+                client.replyToReviewThread("owner", "repo", 7L, "thread-1", "reply"));
+        server.verify();
+    }
+
+    @Test
+    void resolveReviewThread_sendsResolvedBody() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitLabApiClient client = new GitLabApiClient(builder.build(), CREDS);
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v4/projects/owner%2Frepo/merge_requests/7/discussions/thread-1"))
+                .andExpect(method(HttpMethod.PUT)).andExpect(jsonPath("$.resolved").value(true))
+                .andRespond(withSuccess());
+        client.resolveReviewThread("owner", "repo", 7L, "thread-1");
+        server.verify();
+    }
+
+    @Test
+    void listReviewThreadComments_preservesDiscussionIdentity() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitLabApiClient client = new GitLabApiClient(builder.build(), CREDS);
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v4/projects/owner%2Frepo/merge_requests/7/discussions?per_page=100&page=1"))
+                .andRespond(withSuccess("[{\"id\":\"thread-1\",\"notes\":[{\"id\":12,\"body\":\"note\",\"created_at\":\"2026-10-08T10:00:00Z\",\"author\":{\"username\":\"alice\"},\"resolved\":false}]}]",
+                        MediaType.APPLICATION_JSON));
+        var scan = client.listReviewThreadComments("owner", "repo", 7L);
+        assertTrue(scan.complete());
+        assertEquals("thread-1", scan.comments().getFirst().getThreadId());
+        assertEquals("2026-10-08T10:00:00Z", scan.comments().getFirst().getCreatedAt());
+        server.verify();
+    }
+
+
+    @Test
+    void listReviewThreadComments_pageFailureIsIncomplete() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitLabApiClient client = new GitLabApiClient(builder.build(), CREDS);
+        String fullPage = "[" + String.join(",", java.util.Collections.nCopies(100, "{\"id\":\"thread\",\"notes\":[]}")) + "]";
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v4/projects/owner%2Frepo/merge_requests/7/discussions?per_page=100&page=1"))
+                .andRespond(withSuccess(fullPage, MediaType.APPLICATION_JSON));
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v4/projects/owner%2Frepo/merge_requests/7/discussions?per_page=100&page=2"))
+                .andRespond(withStatus(HttpStatus.INTERNAL_SERVER_ERROR));
+        var scan = client.listReviewThreadComments("owner", "repo", 7L);
+        assertFalse(scan.complete());
+        server.verify();
+    }
+
+    @Test
+    void postPullRequestCommentReturningId_returnsNoteId() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitLabApiClient client = new GitLabApiClient(builder.build(), CREDS);
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v4/projects/owner%2Frepo/merge_requests/7/notes"))
+                .andRespond(withSuccess("{\"id\":91}", MediaType.APPLICATION_JSON));
+        assertEquals(java.util.Optional.of("91"),
+                client.postPullRequestCommentReturningId("owner", "repo", 7L, "summary"));
+        server.verify();
+    }
+
+
+    @Test
+    void listPullRequestComments_readsAllPagesAndDiscussionSurface() {
+        RestClient.Builder builder = RestClient.builder().baseUrl(CREDS.baseUrl());
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        GitLabApiClient client = new GitLabApiClient(builder.build(), CREDS);
+        String fullPage = "[" + String.join(",", java.util.Collections.nCopies(100, "{\"id\":1,\"body\":\"note\"}")) + "]";
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v4/projects/owner%2Frepo/merge_requests/7/notes?per_page=100&page=1"))
+                .andRespond(withSuccess(fullPage, MediaType.APPLICATION_JSON));
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v4/projects/owner%2Frepo/merge_requests/7/notes?per_page=100&page=2"))
+                .andRespond(withSuccess("[]", MediaType.APPLICATION_JSON));
+        server.expect(requestTo(CREDS.baseUrl() + "/api/v4/projects/owner%2Frepo/merge_requests/7/discussions?per_page=100&page=1"))
+                .andRespond(withSuccess("[]", MediaType.APPLICATION_JSON));
+        var scan = client.listPullRequestComments("owner", "repo", 7L);
+        assertTrue(scan.complete());
+        assertEquals(100, scan.comments().size());
+        server.verify();
+    }
+
 }

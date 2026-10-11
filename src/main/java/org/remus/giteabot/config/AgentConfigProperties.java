@@ -271,7 +271,9 @@ public class AgentConfigProperties {
 
         /**
          * List of available build/validation tools the AI can use.
-         * These tools must be installed in the Docker image.
+         * These tools must be installed in the Docker image — the one exception
+         * is {@code execute}, which runs a script committed inside the
+         * repository instead of a binary from {@code PATH}.
          */
         private List<String> availableTools = List.of(
                 "mvn",      // Java/Maven
@@ -286,7 +288,8 @@ public class AgentConfigProperties {
                 "g++",      // C++ compiler
                 "ruby",     // Ruby
                 "bundle",   // Ruby Bundler
-                "dotnet"    // .NET
+                "dotnet",   // .NET
+                "execute"   // repository-provided validation script (repo-relative path)
         );
     }
 }

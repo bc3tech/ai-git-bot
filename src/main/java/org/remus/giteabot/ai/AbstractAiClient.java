@@ -195,7 +195,7 @@ public abstract class AbstractAiClient implements AiClient {
         return response;
     }
 
-    private String resolveModel(String modelOverride) {
+    protected String resolveModel(String modelOverride) {
         return (modelOverride != null && !modelOverride.isBlank()) ? modelOverride : model;
     }
 

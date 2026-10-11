@@ -19,6 +19,59 @@ mvn test                # Run tests only
 mvn clean package -DskipTests   # Package without running tests
 ```
 
+### Opt-in live double-check evaluation
+
+Normal `mvn test` excludes the JUnit `live-eval` tag, even when credentials are
+present. To evaluate the real `DoubleCheckService` prompt, explicitly activate
+both the Maven profile and tag selector. An additional JUnit assumption skips
+the test when any required environment variable is absent or blank.
+
+| Environment variable | Required | Value |
+|---|---|---|
+| `DOUBLE_CHECK_EVAL_ENDPOINT` | Yes | OpenAI-compatible API origin, without `/v1/chat/completions`; the production `OpenAiClient` appends that path. |
+| `DOUBLE_CHECK_EVAL_API_KEY` | Yes | Bearer API key, supplied through your secret manager or shell environment; never commit it. |
+| `DOUBLE_CHECK_EVAL_MODEL` | Yes | The model used by the bot's review AI integration. |
+| `DOUBLE_CHECK_EVAL_MODEL_FLAVOR` | No | The integration's OpenAI flavor; defaults to `standard`. |
+
+With those variables exported into the Maven process, run in the supported
+Linux build environment:
+
+```bash
+mvn -Plive-eval -Dgroups=live-eval -Dtest=DoubleCheckLiveEvalTest test
+```
+
+If using a build container, explicitly forward the environment variables into
+it; the default local test helper intentionally does not forward credentials.
+Use a trusted endpoint: running this test sends the redacted PR 66 fixture
+excerpts and synthetic Java controls to that endpoint. It never contacts Gitea,
+loads persisted integrations, or publishes review comments. No credentials or
+endpoint URLs are included in the evaluation report. The harness uses the real
+OpenAI-compatible client, a 4,096-token output budget, and the same-model
+`doubleCheckAiIntegrationId=0` default (no separate checker integration).
+
+The 12 labeled cases run independently three times each (36 API requests,
+provider charges apply). Historical intended-fix claims reuse PR 66 evidence;
+complete synthetic controls cover actual runtime defects, false findings, and
+both valid and false disputes. U12's canned positive controls are deliberately
+not treated as valid live labels. Every quote must pass the production quote
+verifier before requests begin; labels are never sent to the model.
+
+The harness prints per-case verdicts and a metrics table and writes
+`target/double-check-live-eval.txt`, including date, model, and flavor. It asserts
+**>=90% false-finding/intended-fix rejection** and **>=95% valid retention**.
+Only exact `drop` and `keep` verdicts count as correct; `uncertain`, failed calls,
+and skipped outcomes do not. New-finding metrics exclude disputes; dispute
+accuracy and run-to-run unanimous agreement are reported separately. Failed
+calls remain in the denominator. This small regression sample is a release
+signal, not a statistical guarantee or a broader model-quality benchmark.
+
+If either threshold is missed, preserve the report and configure a separate
+`doubleCheckAiIntegrationId` (`DOUBLE_CHECK_AI_INTEGRATION_ID`) in the bot's
+[PR Review settings](PR_WORKFLOWS_REVIEW.md#settings). Re-run against that
+integration's endpoint/model/flavor before adopting it. Attach the report to
+the PR description for the release evaluation. No live result is recorded at
+implementation time: the required endpoint credentials were not provided.
+
 ## Running Natively
 
 ```bash

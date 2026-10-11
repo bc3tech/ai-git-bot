@@ -108,15 +108,7 @@ public class BitbucketWebhookHandler {
             return ResponseEntity.ok("inline comment response triggered");
         }
 
-        if (botWebhookService.isReviewAgainRequest(payload, botAlias)) {
-            if (botWebhookService.isReviewAgainRequestFromPullRequestAuthor(payload, botAlias)) {
-                botWebhookService.reviewPullRequest(bot, payload);
-                return ResponseEntity.ok("review triggered");
-            }
-            return ResponseEntity.ok("ignored");
-        }
-
-        // General PR comment mentioning the bot
+        // General PR comment mentioning the bot; review requests are routed to a review run there.
         botWebhookService.handleBotCommand(bot, payload);
         return ResponseEntity.ok("command received");
     }

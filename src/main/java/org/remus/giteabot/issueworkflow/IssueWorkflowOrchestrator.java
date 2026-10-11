@@ -2,6 +2,7 @@ package org.remus.giteabot.issueworkflow;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.remus.giteabot.admin.AiIntegrationConcurrencyLimiter;
 import org.remus.giteabot.admin.Bot;
 import org.remus.giteabot.admin.BotService;
 import org.remus.giteabot.ai.AiRetryContext;
@@ -10,6 +11,7 @@ import org.remus.giteabot.eventhook.EventHookPublisher;
 import org.remus.giteabot.gitea.model.WebhookPayload;
 import org.remus.giteabot.notification.IssueCommentAcknowledgement;
 import org.remus.giteabot.notification.WorkflowRetryNotices;
+import org.remus.giteabot.prworkflow.WorkflowCancelledException;
 import org.remus.giteabot.prworkflow.config.WorkflowConfiguration;
 import org.remus.giteabot.prworkflow.config.WorkflowSelectionService;
 import org.springframework.stereotype.Service;
@@ -54,6 +56,7 @@ public class IssueWorkflowOrchestrator {
     private final EventHookPublisher eventHookPublisher;
     private final WorkflowRetryNotices retryNotices;
     private final IssueCommentAcknowledgement commentAcknowledgement;
+    private final AiIntegrationConcurrencyLimiter concurrencyLimiter;
 
     /**
      * Runs every issue workflow enabled on the bot's issue-assigned
@@ -66,9 +69,16 @@ public class IssueWorkflowOrchestrator {
         for (IssueWorkflow workflow : resolveWorkflows(bot)) {
             try {
                 retryNotices.installForIssue(bot, workflow.key(), issue.owner(), issue.repo(), issue.number());
-                publishIssueEvent(EventHookEventType.ISSUE_ASSIGNMENT_STARTED, bot, payload, null, true);
-                workflow.onIssueAssigned(context(bot, payload, workflow.key()));
+                // The slot is taken before the STARTED event goes out, so a job that has
+                // to wait behind the limit is not reported as started.
+                concurrencyLimiter.runWithPermit(bot.getAiIntegration(), () -> {
+                    publishIssueEvent(EventHookEventType.ISSUE_ASSIGNMENT_STARTED, bot, payload, null, true);
+                    workflow.onIssueAssigned(context(bot, payload, workflow.key()));
+                });
                 publishIssueEvent(EventHookEventType.ISSUE_ASSIGNMENT_COMPLETED, bot, payload, null, false);
+            } catch (WorkflowCancelledException cancelled) {
+                log.info("[Bot '{}'] Issue workflow '{}' cancelled: {}",
+                        bot.getName(), workflow.key(), cancelled.getMessage());
             } catch (Exception e) {
                 log.error("[Bot '{}'] Issue workflow '{}' failed on issue assignment: {}",
                         bot.getName(), workflow.key(), e.getMessage(), e);
@@ -79,6 +89,18 @@ public class IssueWorkflowOrchestrator {
                 AiRetryContext.clear();
             }
         }
+    }
+
+    /**
+     * Returns the issue workflow keys enabled for {@code bot}, or an empty
+     * list when the bot has no issue-assigned workflow configuration.
+     */
+    public static List<String> enabledWorkflowKeys(Bot bot,
+                                                    WorkflowSelectionService workflowSelectionService) {
+        WorkflowConfiguration configuration = bot.getIssueWorkflowConfiguration();
+        return configuration == null
+                ? List.of()
+                : workflowSelectionService.enabledWorkflowKeys(configuration.getId());
     }
 
     /**
@@ -103,7 +125,11 @@ public class IssueWorkflowOrchestrator {
                 // Installed inside the guarded region (see runAssigned): clearing it in the
                 // finally below is what keeps the notice off the next task on this thread.
                 retryNotices.installForIssue(bot, workflow.key(), issue.owner(), issue.repo(), issue.number());
-                workflow.onIssueComment(context(bot, payload, workflow.key()));
+                concurrencyLimiter.runWithPermit(bot.getAiIntegration(),
+                        () -> workflow.onIssueComment(context(bot, payload, workflow.key())));
+            } catch (WorkflowCancelledException cancelled) {
+                log.info("[Bot '{}'] Issue workflow '{}' cancelled: {}",
+                        bot.getName(), workflow.key(), cancelled.getMessage());
             } catch (Exception e) {
                 log.error("[Bot '{}'] Issue workflow '{}' failed on issue comment: {}",
                         bot.getName(), workflow.key(), e.getMessage(), e);
@@ -140,7 +166,7 @@ public class IssueWorkflowOrchestrator {
                     bot.getName());
             return List.of();
         }
-        List<String> keys = workflowSelectionService.enabledWorkflowKeys(configuration.getId());
+        List<String> keys = enabledWorkflowKeys(bot, workflowSelectionService);
         if (keys.isEmpty()) {
             log.debug("[Bot '{}'] Issue-assigned configuration '{}' enables no workflows",
                     bot.getName(), configuration.getName());

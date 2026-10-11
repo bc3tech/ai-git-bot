@@ -31,7 +31,8 @@ Conceptually, the bot keeps agent workflows provider-neutral: it offers a set of
 
 - **Automatic legacy fallback:** if a provider integration does not support native tools, or **Enable native tool calling** is off, the bot uses the legacy prompt-based path.
 - **llama.cpp:** always stays on legacy mode.
-- **History cleanup:** current releases drop obviously invalid historic tool-call/result pairs before retrying provider requests.
+- **History cleanup:** current releases drop obviously invalid historic tool-call/result pairs before retrying provider requests, and a replayed turn whose only content was its tool calls is sent as `[called <tools>]` instead of empty text — Anthropic and Gemini reject an empty message, which a native session replayed in legacy mode is full of.
+- **Closing round:** the writer's answer round keeps its tool declarations; a model that ignores the wrap-up instruction and keeps calling tools ends on the *"I need more context"* comment rather than on a provider error.
 - **Gemini compatibility:** current releases preserve Gemini 3.x metadata required for follow-up tool calls.
 - **Validation guard:** when coding-agent validation is enabled and files were changed, the bot nudges the model to run a build/test command before finishing.
 - **Writer fallback:** writer sessions can recover when a provider returns prose instead of the expected structured plan.

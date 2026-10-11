@@ -3,12 +3,18 @@ package org.remus.giteabot.repository;
 import org.remus.giteabot.repository.model.RepositoryCredentials;
 import org.remus.giteabot.repository.model.PullRequestHead;
 import org.remus.giteabot.repository.model.Review;
+import org.remus.giteabot.repository.model.ReviewAnchorComment;
 import org.remus.giteabot.repository.model.ReviewComment;
+import org.remus.giteabot.repository.model.ReviewPublicationResult;
+import org.remus.giteabot.repository.model.ReviewSnapshot;
+import org.remus.giteabot.repository.model.CommentScan;
+import org.remus.giteabot.repository.model.ThreadCapabilities;
 
 import java.net.URI;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Provider-agnostic interface for repository operations (pull requests, reviews,
@@ -74,6 +80,16 @@ public interface RepositoryApiClient {
         return cloneBaseUrl + "/" + owner + "/" + repo + ".git";
     }
 
+    /**
+     * Returns whether HTTP Git operations must authenticate with a pre-emptive
+     * {@code Authorization: Basic} header instead of a credential helper.
+     * Needed for providers (e.g. Azure DevOps) whose remotes reject the
+     * credential-store challenge/response flow.
+     */
+    default boolean usesGitAuthorizationHeader() {
+        return false;
+    }
+
     /** Returns the authentication token used by this client. */
     default String getToken() {
         return getCredentials().token();
@@ -94,6 +110,12 @@ public interface RepositoryApiClient {
 
     void postReviewComment(String owner, String repo, Long pullNumber, String body);
 
+    /** Posts a review summary and returns its provider remote ID when available. */
+    default Optional<String> postReviewCommentReturningId(String owner, String repo, Long pullNumber, String body) {
+        postReviewComment(owner, repo, pullNumber, body);
+        return Optional.empty();
+    }
+
     default void postReviewAction(String owner, String repo, Long pullNumber, PostReviewAction action) {
         // Most providers do not support post-review state changes.
     }
@@ -105,8 +127,40 @@ public interface RepositoryApiClient {
      * is a distinct operation.
      */
     default void postReview(String owner, String repo, Long pullNumber, String body, PostReviewAction action) {
+        postReviewReturningId(owner, repo, pullNumber, body, action);
+    }
+
+    /** Submits a review and returns the provider review/comment ID when available. */
+    default Optional<String> postReviewReturningId(String owner, String repo, Long pullNumber,
+                                                   String body, PostReviewAction action) {
         postReviewComment(owner, repo, pullNumber, body);
         postReviewAction(owner, repo, pullNumber, action);
+        return Optional.empty();
+    }
+
+    /**
+     * Captures the exact revision and diff a generated review is based on. Providers that can
+     * bind inline comments to a commit return an inline-capable snapshot whose diff and head
+     * commit are known to belong together; the default is a summary-only snapshot.
+     *
+     * @throws IllegalStateException when a consistent snapshot cannot be acquired
+     */
+    default ReviewSnapshot getReviewSnapshot(String owner, String repo, Long pullNumber) {
+        return ReviewSnapshot.summaryOnly(getPullRequestDiff(owner, repo, pullNumber));
+    }
+
+    /**
+     * Publishes a generated review whose findings are anchored to file lines of
+     * {@code snapshot}. Implementations bind every comment to the snapshot's revision, never
+     * resend after an uncertain outcome, and report per-component delivery. Providers without
+     * revision-bound inline support return {@link ReviewPublicationResult#unsupported()} without
+     * writing anything.
+     */
+    default ReviewPublicationResult publishInlineReview(String owner, String repo, Long pullNumber,
+                                                        ReviewSnapshot snapshot, String body,
+                                                        List<ReviewAnchorComment> comments,
+                                                        PostReviewAction action) {
+        return ReviewPublicationResult.unsupported();
     }
 
     /**
@@ -116,6 +170,55 @@ public interface RepositoryApiClient {
      * while GitLab requires a merge-request-specific endpoint.
      */
     void postPullRequestComment(String owner, String repo, Long pullNumber, String body);
+
+    /** Posts a PR-level comment and returns its provider remote ID when available. */
+    default Optional<String> postPullRequestCommentReturningId(String owner, String repo,
+                                                               Long pullNumber, String body) {
+        postPullRequestComment(owner, repo, pullNumber, body);
+        return Optional.empty();
+    }
+
+    /**
+     * Returns thread support by provider: GitHub/GitLab/Bitbucket support replies; Gitea currently
+     * reports no write actions. GitHub and GitLab support resolve; Bitbucket resolve is disabled
+     * until verified. Comment editing is enabled for GitHub, GitLab, and Bitbucket.
+     */
+    default ThreadCapabilities threadCapabilities() {
+        return ThreadCapabilities.unsupported();
+    }
+
+    /** Lists comments in all review threads, including whether every page was read. */
+    default CommentScan<ReviewComment> listReviewThreadComments(String owner, String repo, Long pullNumber) {
+        return new CommentScan<>(List.of(), false);
+    }
+
+    /**
+     * Lists every PR comment surface used for marker reconciliation. A false {@code complete} value
+     * means absence cannot be concluded from the partial result.
+     */
+    default CommentScan<Map<String, Object>> listPullRequestComments(String owner, String repo, Long pullNumber) {
+        return new CommentScan<>(List.of(), false);
+    }
+
+    default Optional<String> replyToReviewThread(String owner, String repo, Long pullNumber,
+                                                 String threadId, String body) {
+        throw new UnsupportedOperationException("Replies in review threads are not supported");
+    }
+
+    default void editReviewComment(String owner, String repo, Long pullNumber,
+                                   String commentId, String body) {
+        throw new UnsupportedOperationException("Editing review comments is not supported");
+    }
+
+    default void resolveReviewThread(String owner, String repo, Long pullNumber, String threadId) {
+        throw new UnsupportedOperationException("Resolving review threads is not supported");
+    }
+
+    /** Returns a browser URL for the comment when the provider exposes one. */
+    default Optional<String> pullRequestCommentLink(String owner, String repo, Long pullNumber,
+                                                     String remoteId) {
+        return Optional.empty();
+    }
 
     /**
      * Attaches an artifact (test screenshot, trace, log file, …) to a pull
@@ -162,6 +265,34 @@ public interface RepositoryApiClient {
     }
 
     void addReaction(String owner, String repo, Long commentId, String reaction);
+
+    /**
+     * Removes a reaction from a comment. Providers without support may keep the default no-op.
+     */
+    default void removeReaction(String owner, String repo, Long commentId, String reaction) {
+        // no-op by default; override where the provider supports it
+    }
+
+    /** Removes the authenticated bot's PR reaction, when supported by the provider. */
+    default void removePullRequestReaction(String owner, String repo, Long pullNumber, String reaction) {
+        // no-op by default; override where the provider supports it
+    }
+
+    /**
+     * Adds a reaction to a pull request itself, rather than to a comment.
+     * Default implementation is a no-op for providers without support.
+     */
+    default void addPullRequestReaction(String owner, String repo, Long pullNumber, String reaction) {
+        // no-op by default; override where the provider supports it
+    }
+
+    /**
+     * Adds a reaction to an issue itself.
+     * Default implementation is a no-op for providers without support.
+     */
+    default void addIssueReaction(String owner, String repo, Long issueNumber, String reaction) {
+        // no-op by default; override where the provider supports it
+    }
 
     void postInlineReviewComment(String owner, String repo, Long pullNumber,
                                  String filePath, int line, String body);
@@ -220,6 +351,17 @@ public interface RepositoryApiClient {
     }
 
     /**
+     * Re-fetches whether a PR is open for workflow writes. The default understands
+     * GitHub/Gitea details; other providers override it. Missing state denies
+     * writes, and API failures propagate to the workflow.
+     */
+    default boolean isPullRequestOpen(String owner, String repo, Long pullNumber) {
+        Map<String, Object> details = getPullRequestDetails(owner, repo, pullNumber);
+        return details != null && "open".equals(details.get("state"))
+                && Boolean.FALSE.equals(details.get("merged"));
+    }
+
+    /**
      * Returns whether writable PR workspaces must resolve the provider's
      * authoritative head repository before cloning. Providers returning
      * {@code true} must implement {@link #getPullRequestHead} and fail closed
@@ -247,9 +389,6 @@ public interface RepositoryApiClient {
 
     String getFileContent(String owner, String repo, String path, String ref);
 
-
-    void createOrUpdateFile(String owner, String repo, String path, String content,
-                            String message, String branch, String sha);
 
     Long createPullRequest(String owner, String repo, String title, String body,
                            String head, String base);

@@ -2,8 +2,6 @@ package org.remus.giteabot.admin;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
-import jakarta.persistence.EnumType;
-import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
@@ -112,18 +110,6 @@ public class Bot {
      */
     @Column(name = "branch_filter", length = 1000)
     private String branchFilter = "";
-
-    /**
-     * @deprecated Issue behaviour is no longer dispatched via the bot type.
-     * It is resolved from {@link #getIssueWorkflowConfiguration()} (see the
-     * {@code issueworkflow} package); PR behaviour from
-     * {@link #getWorkflowConfiguration()}. The column is retained for one
-     * release as migration safety and is scheduled for removal.
-     */
-    @Deprecated
-    @Enumerated(EnumType.STRING)
-    @Column(nullable = false)
-    private BotType botType = BotType.CODING;
 
     @Column(nullable = false)
     private long webhookCallCount = 0;

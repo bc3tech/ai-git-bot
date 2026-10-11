@@ -32,6 +32,16 @@ import java.util.List;
  * <p>The strategy is created fresh per loop run and tracks its own context-round
  * sub-budget. The {@code maxToolRounds} parameter mirrors the previous
  * {@code WriterConfig.maxToolRounds} cap.</p>
+ *
+ * <p>Round {@code maxToolRounds} is the wrap-up round: repository-context calls
+ * are no longer executed, the model is told the budget is spent, and it gets one
+ * final round to answer from what it has already read. That round keeps its tool
+ * descriptors on purpose: taking them out of the request makes every client fall
+ * back to its plain-text message shape, which cannot carry the tool exchanges the
+ * round replays — a turn whose only content was its calls becomes an empty message,
+ * which Anthropic and Gemini reject. A model that keeps calling tools therefore
+ * ends with the "need more context" comment, from either the give-up branch or
+ * {@link #onBudgetExhausted}, exactly like a model that never answers.</p>
  */
 @Slf4j
 @RequiredArgsConstructor
@@ -105,12 +115,21 @@ public final class WriterAgentStrategy implements AgentStrategy {
             return step(ctx, turn.assistantText(), round);
         }
         int writerRound = round - 1;
-        if (writerRound >= maxToolRounds) {
-            sessionService.setStatus(ctx.session(), AgentSession.AgentSessionStatus.IN_PROGRESS);
-            repositoryClient.postIssueComment(ctx.owner(), ctx.repo(), ctx.issueNumber(),
-                    "⚠️ **AI Technical Writer**: I need more context before I can continue. "
-                            + "Please add more details and mention me again.");
-            return new StepDecision.Finish(LoopOutcome.success(ctx.baseBranch(), null));
+        if (writerRound == maxToolRounds) {
+            // Wrap-up round: the context budget is spent, so nothing is executed. Every
+            // call still gets a synthetic result (a provider rejects a request whose
+            // call ids are never answered) and the follow slot carries the wrap-up
+            // instruction, leaving the next round to produce the final answer.
+            List<StepDecision.ToolCallResult> skippedResults = new ArrayList<>(turn.toolCalls().size());
+            for (ToolCall call : turn.toolCalls()) {
+                skippedResults.add(new StepDecision.ToolCallResult(call.id(),
+                        "not executed — the writer's repository-context budget is exhausted for this run"));
+            }
+            return new StepDecision.ContinueWithToolResults(skippedResults,
+                    promptBuilder.buildWrapUpInstruction());
+        }
+        if (writerRound > maxToolRounds) {
+            return new StepDecision.Finish(giveUp(ctx));
         }
 
         List<ImplementationPlan.ToolRequest> requests = new ArrayList<>();
@@ -199,7 +218,13 @@ public final class WriterAgentStrategy implements AgentStrategy {
         int writerRound = round - 1;
         WriterPlan plan = responseParser.parse(aiResponse);
 
-        if (plan.hasContextRequests() && writerRound >= maxToolRounds) {
+        if (plan.hasContextRequests() && writerRound == maxToolRounds) {
+            // Wrap-up round: the JSON envelope carries no call ids to answer, so the
+            // instruction alone is the follow-up and the next round must answer.
+            return new StepDecision.Continue(promptBuilder.buildWrapUpInstruction());
+        }
+
+        if (plan.hasContextRequests() && writerRound > maxToolRounds) {
             sessionService.setStatus(ctx.session(), AgentSession.AgentSessionStatus.IN_PROGRESS);
             repositoryClient.postIssueComment(ctx.owner(), ctx.repo(), ctx.issueNumber(),
                     "⚠️ **AI Technical Writer**: I need more context before I can continue. "
@@ -247,8 +272,23 @@ public final class WriterAgentStrategy implements AgentStrategy {
 
     @Override
     public LoopOutcome onBudgetExhausted(AgentRunContext ctx) {
-        // Historical writer behaviour: the for-loop simply ends after maxToolRounds+1 iterations
-        // without further action when no terminal branch has fired. Mirror that as a no-op success.
+        // Reaching the cap without a terminal branch used to end silently, which left the
+        // user with a run that produced nothing and said nothing. Since the round after
+        // the wrap-up has no tool descriptors, an exhausted run means the model narrated
+        // twice instead of answering (or called tools it no longer has) — the same dead
+        // end as the give-up branch, so it gets the same comment.
+        return giveUp(ctx);
+    }
+
+    /**
+     * Ends the run with the historic "needs more context" comment, leaving the session
+     * resumable: the user adds the missing details and mentions the bot again.
+     */
+    private LoopOutcome giveUp(AgentRunContext ctx) {
+        sessionService.setStatus(ctx.session(), AgentSession.AgentSessionStatus.IN_PROGRESS);
+        repositoryClient.postIssueComment(ctx.owner(), ctx.repo(), ctx.issueNumber(),
+                "⚠️ **AI Technical Writer**: I need more context before I can continue. "
+                        + "Please add more details and mention me again.");
         return LoopOutcome.success(ctx.baseBranch(), null);
     }
 

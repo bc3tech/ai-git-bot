@@ -14,8 +14,9 @@ beyond connecting the bot to your Git host and AI provider.
 
 ## What it does
 
-- On PR open or update, it reads the diff and posts a single Markdown review
-  comment with a summary and findings.
+- On PR open or update, it reads the diff and posts one review: a concise
+  summary plus native inline comments on the file and line each finding is
+  about (see [Inline review comments](#inline-review-comments)).
 - It answers follow-up questions when you mention the bot (`@bot …`) in a PR
   comment.
 - It responds to bot mentions inside inline (line-level) diff comments.
@@ -23,6 +24,22 @@ beyond connecting the bot to your Git host and AI provider.
 - It cleans up its per-PR state when the PR closes.
 - Optionally, it applies a formal review action (approve / request changes) —
   see below.
+
+## Unchanged revisions
+
+Explicit review requests may skip a revision already reviewed successfully by the
+same bot and workflow. Both the head SHA and effective diff base must match, the
+last run must not be degraded (including unparseable output), and complete PR and
+inline-comment scans must show no new non-bot comments. Missing comment metadata
+or a failed/incomplete scan causes a full review. A target-branch update alone
+does not force a review when the effective diff base remains unchanged.
+
+Automatic triggers (including PR opened and synchronize events) always take the
+normal review path. Explicit requests include `/review`, natural-language
+re-review commands, and adding or re-requesting the bot as reviewer. A skipped request
+posts "No changes since last review at `<short-sha>`." and clears its PR and requesting-comment eyes reactions
+where the provider supports reactions. This applies to standard and agentic
+reviews; it takes effect once the grounded pipeline persists revision state.
 
 ## Settings
 
@@ -35,18 +52,83 @@ small or large context window.
 | `maxDiffCharsPerChunk` | `120000` | How large a diff can be before it is split into chunks for review. |
 | `maxDiffChunks` | `8` | Maximum number of chunks reviewed for one PR. Extra chunks are skipped. |
 | `retryTruncatedChunkChars` | `60000` | If a chunk is too big for the model, it is truncated to this size and retried once. |
+| `doubleCheckEnabled` | `true` | Select new findings for independent AI verification. |
+| `doubleCheckMinSeverity` | `LOW` | Check new findings at or above `LOW`, `MEDIUM`, `HIGH`, or `BLOCKER`. |
+| `doubleCheckAiIntegrationId` | `0` | Optional second AI integration ID; blank or `0` uses the review integration. |
+
+Double-check settings are exposed for the grounded-review pipeline; enforcement
+requires the grounding publication integration. Disputed or
+context-changed prior findings are checked regardless of enablement or severity.
+An unknown integration ID falls back to the review integration with an audit warning.
+
+Before relying on the same-model default, run the opt-in
+[live double-check evaluation](LOCAL_DEVELOPMENT.md#opt-in-live-double-check-evaluation).
+If rejection is below 90% or valid retention below 95%, use a separate
+`doubleCheckAiIntegrationId` and evaluate that integration before adopting it.
 
 Large PRs are automatically split into chunks and reviewed piece by piece, so a
 big diff never silently fails.
 
+## Inline review comments
+
+The bot asks the model for its findings as structured data: a short summary plus
+a list of findings, each optionally pointing at a file, a diff side (added or
+removed line), and a single line number. The application, not the model, decides
+where a finding can safely go:
+
+- A finding whose file and line exist in the reviewed diff becomes a native
+  inline comment on that line, on the added (new) or removed (old) side.
+- Findings without a location, or with one that doesn't match the diff, are
+  listed under **Other findings** in the summary. They are never pinned to a
+  guessed line.
+- The summary does not repeat findings that were posted inline.
+- If the model doesn't return the structured format, its text is posted as an
+  ordinary summary review, as before.
+
+This is always on; there is no setting. Inline comments are anchored to the
+exact commit that was reviewed. If the PR changes while the review is being
+generated, or the provider can't produce a consistent snapshot, that review is
+posted as an ordinary summary instead.
+
+Provider support:
+
+| Provider | Inline comments |
+|---|---|
+| Gitea | Yes — one review with all comments, read back to verify placement. |
+| GitHub | Yes — one commit-bound review with all comments. |
+| GitLab | Yes — summary note plus one diff discussion per finding. |
+| Bitbucket | No — summary only, so a comment is never placed on the wrong line. |
+
+When delivery partly fails (a comment is rejected, its placement can't be
+confirmed, or it lands on an unexpected line), the bot posts a follow-up comment
+with the affected findings so nothing is lost. If delivery can't be confirmed,
+those findings may appear twice.
+
+### Limitations
+
+- **Gitea pending reviews:** if the bot account has its own unsubmitted
+  (pending) review on the PR, Gitea would merge the new comments into it. The bot
+  instead posts the full review as a regular comment, and skips the
+  approve/request-changes decision, until the pending review is submitted or
+  discarded. This check is best-effort and can race with a pending review
+  created at the same moment.
+- **Latest review wins:** a new review run for a PR cancels runs already in
+  progress for that PR, including conversational review replies. When both
+  workflows react to the same update, the agentic review takes precedence.
+  Comments a cancelled run already posted remain on the PR. A queued run can
+  still start after a newer one, and this coordination is per application
+  instance only.
+- The bot doesn't resolve, update, or delete inline comments from earlier
+  reviews.
+
 ## Post-review action
 
-After posting the review comment, the bot can optionally submit a formal review
+After posting the review, the bot can optionally submit a formal review
 decision, configured on the bot's Git integration:
 
 | Value | Effect |
 |---|---|
-| `NONE` (default) | Only the comment is posted. |
+| `NONE` (default) | Only the review comments are posted. |
 | `APPROVE` | The bot approves the PR. |
 | `REQUEST_CHANGES` | The bot requests changes on the PR. |
 
@@ -54,7 +136,9 @@ decision, configured on the bot's Git integration:
 
 The review is driven by the operator-editable **Code-Review System-Prompt**
 under **System settings → System prompts**. Edit it to change the review's tone,
-focus, or policies; changes take effect on the next review.
+focus, or policies; changes take effect on the next review. The structured
+output format needed for inline comments is appended by the software, so the
+prompt doesn't need to describe a response layout.
 
 ## Enabling / disabling
 

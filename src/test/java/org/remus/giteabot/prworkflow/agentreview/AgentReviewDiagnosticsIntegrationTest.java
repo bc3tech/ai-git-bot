@@ -21,6 +21,15 @@ import org.remus.giteabot.prworkflow.WorkflowResultStatus;
 import org.remus.giteabot.prworkflow.config.WorkflowSelectionService;
 import org.remus.giteabot.repository.PostReviewAction;
 import org.remus.giteabot.repository.RepositoryApiClient;
+import org.remus.giteabot.audit.PrAuditEventService;
+import org.remus.giteabot.review.ReviewSkipService;
+import org.remus.giteabot.review.grounding.FindingGroundingService;
+import org.remus.giteabot.review.grounding.PriorFindingsDigest;
+import org.remus.giteabot.review.grounding.PriorFindingsService;
+import org.remus.giteabot.review.grounding.ThreadActionExecutor;
+import org.remus.giteabot.review.state.ReviewRunLeaseService;
+import org.remus.giteabot.review.state.ReviewRunLeaseService.LeaseToken;
+import org.remus.giteabot.review.state.ReviewStateService;
 
 import java.nio.file.Path;
 import java.util.List;
@@ -53,6 +62,8 @@ class AgentReviewDiagnosticsIntegrationTest {
             """;
     private static final String CONTEXT_REQUEST =
             "{\"requestFiles\":[\"private-token.java\"]}";
+    private static final String HEAD_SHA = "abcdef012345abcdef012345abcdef012345abcd";
+    private static final String BASE_SHA = "b".repeat(40);
 
     @Test
     void legacyContextCapFailureSurvivesLoopServiceAndWorkflowWithoutPublishingPartialText() throws Exception {
@@ -60,6 +71,21 @@ class AgentReviewDiagnosticsIntegrationTest {
         RepositoryApiClient repositoryClient = mock(RepositoryApiClient.class);
         WorkspaceService workspaceService = mock(WorkspaceService.class);
         EventHookPublisher eventHooks = mock(EventHookPublisher.class);
+        ReviewRunLeaseService leases = mock(ReviewRunLeaseService.class);
+        ReviewStateService state = mock(ReviewStateService.class);
+        PriorFindingsService priors = mock(PriorFindingsService.class);
+        ReviewSkipService skipService = mock(ReviewSkipService.class);
+        PrAuditEventService audits = mock(PrAuditEventService.class);
+        FindingGroundingService grounding = mock(FindingGroundingService.class);
+        ThreadActionExecutor threadActions = mock(ThreadActionExecutor.class);
+        LeaseToken lease = new LeaseToken(9L, "owner", "repo", 1L, "diagnostics-test", 1);
+        PriorFindingsDigest digest = new PriorFindingsDigest(List.of(), true, null);
+        org.remus.giteabot.repository.model.ReviewSnapshot snapshot =
+                new org.remus.giteabot.repository.model.ReviewSnapshot(HEAD_SHA, BASE_SHA, BASE_SHA, DIFF, true);
+        when(leases.acquire(9L, "owner", "repo", 1L)).thenReturn(lease);
+        when(priors.load(repositoryClient, lease, AgentReviewWorkflow.KEY, "bot")).thenReturn(digest);
+        when(skipService.shouldSkip(repositoryClient, lease, AgentReviewWorkflow.KEY, "bot", snapshot, false))
+                .thenReturn(false);
         AgentConfigProperties config = new AgentConfigProperties();
         config.getBudget().setMaxRounds(20);
         config.getBudget().setMaxContextRounds(10);
@@ -70,21 +96,25 @@ class AgentReviewDiagnosticsIntegrationTest {
         when(aiClient.chatWithTools(anyList(), any(), anyList(), anyString(), isNull(), anyInt()))
                 .thenAnswer(invocation -> new ChatTurn(CONTEXT_REQUEST, List.of(),
                         StopReason.END_TURN, 100, 15));
-        when(repositoryClient.getPullRequestDiff("owner", "repo", 1L)).thenReturn(DIFF);
-        when(repositoryClient.getFileContent("owner", "repo", "private-token.java", "feature"))
+        when(repositoryClient.getReviewSnapshot("owner", "repo", 1L)).thenReturn(snapshot);
+        when(repositoryClient.getFileContent("owner", "repo", "private-token.java", HEAD_SHA))
                 .thenReturn("PRIVATE_SOURCE_CONTENT");
-        when(workspaceService.prepareWorkspace(repositoryClient, "owner", "repo", "feature", 1L))
+        when(workspaceService.prepareWorkspaceAtRevision(repositoryClient, "owner", "repo", HEAD_SHA, 1L))
                 .thenReturn(WorkspaceResult.success(workspace));
 
         Bot bot = new Bot();
+        bot.setId(9L);
         AgentReviewService service = new AgentReviewService(
                 new AgentReviewContext(repositoryClient, aiClient, "Review the change.", "bot",
                         null, null, Set.of(), 200_000),
                 new AgentSessionService(mock(AgentSessionRepository.class)),
                 new ToolExecutionService(config, catalog, workspaceService), catalog, workspaceService,
-                config, null, bot, eventHooks);
+                config, null, bot, eventHooks, leases, state, priors, grounding, threadActions, skipService, audits,
+                java.time.Duration.ofMinutes(10),
+                org.remus.giteabot.review.grounding.DoubleCheckSettings.defaults(),
+                new org.remus.giteabot.review.grounding.DoubleCheckService.Budget(30_000, 8));
         AgentReviewServiceFactory serviceFactory = mock(AgentReviewServiceFactory.class);
-        when(serviceFactory.create(bot)).thenReturn(service);
+        when(serviceFactory.create(eq(bot), any())).thenReturn(service);
         AgentReviewWorkflow workflow = new AgentReviewWorkflow(
                 serviceFactory, mock(WorkflowSelectionService.class));
         AtomicReference<String> excerpt = new AtomicReference<>();
@@ -103,6 +133,12 @@ class AgentReviewDiagnosticsIntegrationTest {
                 anyString());
         verify(repositoryClient, never()).postReview(anyString(), anyString(), anyLong(), anyString(), any());
         verify(repositoryClient, never()).postReviewComment(anyString(), anyString(), anyLong(), anyString());
+        verify(repositoryClient, never()).postReviewReturningId(any(), any(), any(), any(), any());
+        verify(leases, org.mockito.Mockito.atLeastOnce()).assertHeld(lease);
+        verify(leases).release(lease);
+        verify(workspaceService).prepareWorkspaceAtRevision(repositoryClient, "owner", "repo", HEAD_SHA, 1L);
+        verify(repositoryClient).getFileContent("owner", "repo", "private-token.java", HEAD_SHA);
+        org.mockito.Mockito.verifyNoInteractions(state, grounding, threadActions, eventHooks);
         verify(workspaceService).cleanupWorkspace(workspace);
     }
 

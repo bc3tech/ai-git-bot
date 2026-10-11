@@ -158,8 +158,10 @@ public class GoogleAiClient extends AbstractAiClient {
             String text = "tool".equals(message.getRole())
                     ? (message.getToolResult() != null ? message.getToolResult() : message.getContent())
                     : message.getContent();
+            // A turn that only called tools has no text; Gemini rejects an empty part,
+            // and a native session replayed in legacy mode contains exactly those turns.
             contents.add(textContent(toGoogleRole(message.getRole()),
-                    text == null ? "" : text));
+                    text == null || text.isBlank() ? message.toolCallSummary() : text));
         }
         return contents;
     }

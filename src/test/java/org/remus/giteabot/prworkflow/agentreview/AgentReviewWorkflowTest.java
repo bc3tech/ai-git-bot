@@ -53,20 +53,39 @@ class AgentReviewWorkflowTest {
     }
 
     @Test
+    void explicitRequestIsPassedToLeasedService() {
+        PrWorkflowContext context = context(new Bot());
+        context.payload().setAction("review_requested");
+        AgentReviewService service = mock(AgentReviewService.class);
+        when(serviceFactory.create(any(), any())).thenReturn(service);
+        when(service.reviewPullRequestDetailed(any(), anyInt(), anyBoolean(), anyString(), any(), anyLong(), any(), any(), eq(true)))
+                .thenReturn(result(AgentReviewService.ReviewResult.SKIPPED));
+        assertEquals(WorkflowResultStatus.SKIPPED, workflow().run(context).status());
+    }
+
+    @Test
     void metadata_isStableAndReview() {
         AgentReviewWorkflow wf = workflow();
         assertEquals("agentic-review", wf.key());
         assertEquals(PrWorkflowCategory.REVIEW, wf.category());
-        assertEquals(6, wf.paramsSchema().fields().size());
+        assertEquals(9, wf.paramsSchema().fields().size());
         assertFalse(wf.paramsSchema().isEmpty());
+    }
+
+    @Test
+    void onlyFullReviewsSupersedeOtherReviews() {
+        AgentReviewWorkflow wf = workflow();
+        assertTrue(wf.supersedesReviews(java.util.Map.of()));
+        assertFalse(wf.supersedesReviews(java.util.Map.of(
+                org.remus.giteabot.prworkflow.PrWorkflowContext.HINT_AGENTIC_REVIEW_CLARIFICATION, "why?")));
     }
 
     @Test
     void run_usesDefaults_whenNoConfiguration_andReportsSuccess() {
         AgentReviewService service = mock(AgentReviewService.class);
-        when(serviceFactory.create(any())).thenReturn(service);
+        when(serviceFactory.create(any(), any())).thenReturn(service);
         when(service.reviewPullRequestDetailed(any(), anyInt(), anyBoolean(), anyString(),
-                any(AgentReviewService.SeverityThresholds.class), anyLong(), any()))
+                any(AgentReviewService.SeverityThresholds.class), anyLong(), any(), any(), anyBoolean()))
                 .thenReturn(result(AgentReviewService.ReviewResult.POSTED));
 
         Bot bot = new Bot();
@@ -76,7 +95,7 @@ class AgentReviewWorkflowTest {
         assertEquals(WorkflowResultStatus.SUCCESS, result.status());
         verify(service).reviewPullRequestDetailed(any(), eq(12), eq(false),
                 eq(AgentReviewWorkflow.DEFAULT_FORMAL_REVIEW_DECISION_PROMPT),
-                eq(new AgentReviewService.SeverityThresholds(null, null, null)), eq(1L), isNull());
+                eq(new AgentReviewService.SeverityThresholds(null, null, null)), eq(1L), isNull(), any(), eq(false));
     }
 
     @Test
@@ -89,9 +108,9 @@ class AgentReviewWorkflowTest {
 
         when(selectionService.resolveParams(7L, "agentic-review")).thenReturn(Map.of("maxToolRounds", 5));
         AgentReviewService service = mock(AgentReviewService.class);
-        when(serviceFactory.create(any())).thenReturn(service);
+        when(serviceFactory.create(any(), any())).thenReturn(service);
         lenient().when(service.reviewPullRequestDetailed(any(), anyInt(), anyBoolean(), anyString(),
-                        any(AgentReviewService.SeverityThresholds.class), anyLong(), any()))
+                        any(AgentReviewService.SeverityThresholds.class), anyLong(), any(), any(), anyBoolean()))
                 .thenReturn(result(AgentReviewService.ReviewResult.NO_DIFF));
 
         WorkflowResult result = workflow().run(context(bot));
@@ -99,15 +118,15 @@ class AgentReviewWorkflowTest {
         assertEquals(WorkflowResultStatus.SKIPPED, result.status());
         verify(service).reviewPullRequestDetailed(any(), eq(5), eq(false),
                 eq(AgentReviewWorkflow.DEFAULT_FORMAL_REVIEW_DECISION_PROMPT),
-                eq(new AgentReviewService.SeverityThresholds(null, null, null)), eq(1L), isNull());
+                eq(new AgentReviewService.SeverityThresholds(null, null, null)), eq(1L), isNull(), any(), eq(false));
     }
 
     @Test
     void run_reportsFailure_whenReviewCannotComplete() {
         AgentReviewService service = mock(AgentReviewService.class);
-        when(serviceFactory.create(any())).thenReturn(service);
+        when(serviceFactory.create(any(), any())).thenReturn(service);
         when(service.reviewPullRequestDetailed(any(), anyInt(), anyBoolean(), anyString(),
-                any(AgentReviewService.SeverityThresholds.class), anyLong(), any()))
+                any(AgentReviewService.SeverityThresholds.class), anyLong(), any(), any(), anyBoolean()))
                 .thenReturn(result(AgentReviewService.ReviewResult.FAILED,
                         ReviewDiagnostics.Category.CONTEXT_ROUND_LIMIT));
 
@@ -117,7 +136,7 @@ class AgentReviewWorkflowTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"POSTED,SUCCESS", "NO_DIFF,SKIPPED", "FAILED,FAILED"})
+    @CsvSource({"POSTED,SUCCESS", "NO_DIFF,SKIPPED", "FAILED,FAILED", "SKIPPED,SKIPPED"})
     void clarification_mapsServiceResult(AgentReviewService.ReviewResult serviceResult,
                                          WorkflowResultStatus expected) {
         AgentReviewService service = mock(AgentReviewService.class);
@@ -148,9 +167,9 @@ class AgentReviewWorkflowTest {
                 "lowThreshold", 5));
 
         AgentReviewService service = mock(AgentReviewService.class);
-        when(serviceFactory.create(any())).thenReturn(service);
+        when(serviceFactory.create(any(), any())).thenReturn(service);
         when(service.reviewPullRequestDetailed(any(), anyInt(), anyBoolean(), anyString(),
-                any(AgentReviewService.SeverityThresholds.class), anyLong(), any()))
+                any(AgentReviewService.SeverityThresholds.class), anyLong(), any(), any(), anyBoolean()))
                 .thenReturn(result(AgentReviewService.ReviewResult.POSTED));
 
         WorkflowResult result = workflow().run(context(bot));
@@ -158,7 +177,24 @@ class AgentReviewWorkflowTest {
         assertEquals(WorkflowResultStatus.SUCCESS, result.status());
         verify(service).reviewPullRequestDetailed(any(), eq(8), eq(true),
                 eq("Custom criteria here"),
-                eq(new AgentReviewService.SeverityThresholds(0, 2, 5)), eq(1L), isNull());
+                eq(new AgentReviewService.SeverityThresholds(0, 2, 5)), eq(1L), isNull(), any(), eq(false));
+    }
+
+    @Test
+    void doubleCheckConfigurationReachesThePerBotService() {
+        Bot bot = new Bot();
+        var cfg = new org.remus.giteabot.prworkflow.config.WorkflowConfiguration();
+        cfg.setId(7L);
+        bot.setWorkflowConfiguration(cfg);
+        when(selectionService.resolveParams(7L, "agentic-review")).thenReturn(Map.of(
+                "doubleCheckEnabled", false, "doubleCheckMinSeverity", "HIGH", "doubleCheckAiIntegrationId", 42));
+        AgentReviewService service = mock(AgentReviewService.class);
+        when(serviceFactory.create(any(), any())).thenReturn(service);
+        when(service.reviewPullRequestDetailed(any(), anyInt(), anyBoolean(), anyString(), any(), anyLong(), any(), any(), anyBoolean()))
+                .thenReturn(result(AgentReviewService.ReviewResult.POSTED));
+        workflow().run(context(bot));
+        verify(serviceFactory).create(eq(bot), eq(new org.remus.giteabot.review.grounding.DoubleCheckSettings(
+                false, org.remus.giteabot.review.grounding.DoubleCheckSettings.Severity.HIGH, 42L)));
     }
 
     @Test
@@ -172,15 +208,15 @@ class AgentReviewWorkflowTest {
         bot.setWorkflowConfiguration(cfg);
 
         AgentReviewService service = mock(AgentReviewService.class);
-        when(serviceFactory.create(any())).thenReturn(service);
+        when(serviceFactory.create(any(), any())).thenReturn(service);
         when(service.reviewPullRequestDetailed(any(), anyInt(), anyBoolean(), anyString(),
-                any(AgentReviewService.SeverityThresholds.class), anyLong(), any()))
+                any(AgentReviewService.SeverityThresholds.class), anyLong(), any(), any(), anyBoolean()))
                 .thenReturn(result(AgentReviewService.ReviewResult.POSTED));
 
         workflow().run(context(bot));
 
         verify(service).reviewPullRequestDetailed(any(), anyInt(), eq(false), anyString(),
-                eq(new AgentReviewService.SeverityThresholds(null, null, null)), eq(1L), isNull());
+                eq(new AgentReviewService.SeverityThresholds(null, null, null)), eq(1L), isNull(), any(), eq(false));
     }
 
     @Test
@@ -198,13 +234,13 @@ class AgentReviewWorkflowTest {
     @Test
     void factoryFailureUsesPreServiceReporterAndPersistsItsUnavailableState() {
         Bot bot = new Bot();
-        when(serviceFactory.create(bot)).thenThrow(new IllegalStateException("private failure"));
+        when(serviceFactory.create(eq(bot), any())).thenThrow(new IllegalStateException("private failure"));
         AgentReviewService.DetailedResult setupFailure = new AgentReviewService.DetailedResult(
                 AgentReviewService.ReviewResult.FAILED,
                 new ReviewDiagnostics.Collector(null, null, null, 1L,
                         null, null, null, null, null).snapshot(ReviewDiagnostics.Category.SETUP_FAILURE),
                 ReviewDiagnostics.NoticeStatus.UNAVAILABLE, "repository-client-unavailable");
-        when(serviceFactory.reportSetupFailure(eq(bot), any(), eq(1L), eq(false))).thenReturn(setupFailure);
+        when(serviceFactory.reportSetupFailure(eq(bot), any(), eq(1L), eq(false), any())).thenReturn(setupFailure);
         AtomicReference<String> excerpt = new AtomicReference<>();
         PrWorkflowContext context = new PrWorkflowContext(bot, new WebhookPayload(), 1L,
                 (name, text) -> excerpt.set(text), () -> false);
@@ -215,16 +251,16 @@ class AgentReviewWorkflowTest {
         org.junit.jupiter.api.Assertions.assertTrue(result.summary().contains("setup-failure"));
         org.junit.jupiter.api.Assertions.assertTrue(excerpt.get().contains("noticeStatus=UNAVAILABLE"));
         org.junit.jupiter.api.Assertions.assertTrue(excerpt.get().contains("repository-client-unavailable"));
-        verify(serviceFactory).reportSetupFailure(eq(bot), any(), eq(1L), eq(false));
+        verify(serviceFactory).reportSetupFailure(eq(bot), any(), eq(1L), eq(false), any());
     }
 
     @Test
     void stepPersistenceFailureDoesNotTriggerASecondNoticeAttempt() {
         Bot bot = new Bot();
         AgentReviewService service = mock(AgentReviewService.class);
-        when(serviceFactory.create(any())).thenReturn(service);
+        when(serviceFactory.create(any(), any())).thenReturn(service);
         when(service.reviewPullRequestDetailed(any(), anyInt(), anyBoolean(), anyString(),
-                any(AgentReviewService.SeverityThresholds.class), anyLong(), any()))
+                any(AgentReviewService.SeverityThresholds.class), anyLong(), any(), any(), anyBoolean()))
                 .thenReturn(result(AgentReviewService.ReviewResult.FAILED,
                         ReviewDiagnostics.Category.CONTEXT_ROUND_LIMIT));
         PrWorkflowContext context = new PrWorkflowContext(bot, new WebhookPayload(), 1L,
@@ -234,7 +270,7 @@ class AgentReviewWorkflowTest {
 
         assertEquals(WorkflowResultStatus.FAILED, result.status());
         assertTrue(result.summary().contains("context-round-limit"));
-        verify(serviceFactory, never()).reportSetupFailure(any(), any(), anyLong(), anyBoolean());
+        verify(serviceFactory, never()).reportSetupFailure(any(), any(), anyLong(), anyBoolean(), any());
     }
 
     @Test

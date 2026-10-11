@@ -2,10 +2,14 @@ package org.remus.giteabot.admin;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.remus.giteabot.ai.AiProviderRegistry;
+import org.remus.giteabot.ai.AiProviderMetadata;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 
 @Slf4j
@@ -16,6 +20,8 @@ public class AiIntegrationService {
 
     private final AiIntegrationRepository aiIntegrationRepository;
     private final EncryptionService encryptionService;
+    private final AiProviderRegistry providerRegistry;
+    private final AiIntegrationConcurrencyLimiter concurrencyLimiter;
 
     @Transactional(readOnly = true)
     public List<AiIntegration> findAll() {
@@ -27,6 +33,7 @@ public class AiIntegrationService {
         return aiIntegrationRepository.findById(id);
     }
 
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public AiIntegration save(AiIntegration integration) {
         return save(integration, false);
     }
@@ -36,25 +43,42 @@ public class AiIntegrationService {
      *
      * <p>The key field is a one-way write: the stored value is never echoed
      * back into the form. A blank field therefore means "keep the stored
-     * value", while {@code clearApiKey} requests explicit removal (the Clear
+     * value" for the same provider, while {@code clearApiKey} requests explicit removal (the Clear
      * button in the UI). Re-encrypting the kept ciphertext would corrupt the
      * key, so only freshly provided plaintext keys are encrypted.</p>
      */
+    // Repository methods own their transactions; provider HTTP validation must not hold a database connection.
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public AiIntegration save(AiIntegration integration, boolean clearApiKey) {
         String apiKey = integration.getApiKey();
-        if (apiKey != null && !apiKey.isBlank()) {
-            integration.setApiKey(encryptionService.encrypt(apiKey));
-        } else if (clearApiKey) {
-            integration.setApiKey(null);
-        } else if (integration.getId() != null) {
-            aiIntegrationRepository.findById(integration.getId())
-                    .ifPresent(existing -> integration.setApiKey(existing.getApiKey()));
+        boolean newKey = apiKey != null && !apiKey.isBlank();
+        String retainedCiphertext = null;
+        String validationKey = newKey ? apiKey : null;
+        AiProviderMetadata provider = providerRegistry.getProviderOrThrow(integration.getProviderType());
+        if (!newKey && !clearApiKey && integration.getId() != null) {
+            AiIntegration existing = aiIntegrationRepository.findById(integration.getId())
+                    .orElseThrow(() -> new IllegalArgumentException("AI integration not found"));
+            if (!Objects.equals(existing.getProviderType(), integration.getProviderType())) {
+                throw new IllegalArgumentException("Enter a new API key or explicitly clear the stored key when changing providers");
+            }
+            retainedCiphertext = existing.getApiKey();
+            if (provider.requiresRetainedKeyValidation(existing, integration)) {
+                validationKey = decryptApiKey(existing);
+                if (validationKey == null || validationKey.isBlank()) {
+                    throw new IllegalArgumentException("Enter an API key to change provider settings");
+                }
+            }
         }
+        // Keep ciphertext available to provider validation without decrypting it on an ordinary edit.
+        integration.setApiKey(newKey ? apiKey : retainedCiphertext);
+        provider.validateConfiguration(integration, validationKey);
+        integration.setApiKey(newKey ? encryptionService.encrypt(apiKey) : retainedCiphertext);
         return aiIntegrationRepository.save(integration);
     }
 
     public void deleteById(Long id) {
         aiIntegrationRepository.deleteById(id);
+        concurrencyLimiter.forget(id);
     }
 
     public String decryptApiKey(AiIntegration integration) {

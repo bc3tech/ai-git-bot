@@ -25,6 +25,12 @@ public class GitLabReviewComment implements ReviewComment {
 
     private GitLabPosition position;
 
+    private String threadId;
+
+    private String parentId;
+
+    private Boolean resolved;
+
     @Override
     public String getPath() {
         return position != null ? position.getNewPath() : null;

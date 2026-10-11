@@ -3,9 +3,12 @@ package org.remus.giteabot.prworkflow.agentreview;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.remus.giteabot.prworkflow.WorkflowCancelledException;
 import org.remus.giteabot.repository.RepositoryApiClient;
+import org.remus.giteabot.review.state.ReviewRunLeaseService.LeaseLostException;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -73,6 +76,31 @@ class ReviewFailureReporterTest {
         assertThat(missingClient.reason()).isEqualTo("repository-client-unavailable");
         assertThat(missingIdentity.status()).isEqualTo(ReviewDiagnostics.NoticeStatus.UNAVAILABLE);
         assertThat(missingClient.status()).isEqualTo(ReviewDiagnostics.NoticeStatus.UNAVAILABLE);
+        verifyNoInteractions(client);
+    }
+
+    @Test
+    void supersessionAndLostLeaseAreNotSwallowedAsDeliveryFailures() {
+        for (RuntimeException failure : new RuntimeException[] {
+                new WorkflowCancelledException("superseded"), mock(LeaseLostException.class)}) {
+            RepositoryApiClient client = mock(RepositoryApiClient.class);
+            doThrow(failure).when(client).postPullRequestComment(anyString(), anyString(), anyLong(), anyString());
+
+            assertThatThrownBy(() -> new ReviewFailureReporter().report(client, "owner", "repo", 9L,
+                    snapshot(ReviewDiagnostics.Category.CONTEXT_ROUND_LIMIT), false))
+                    .isSameAs(failure);
+            verify(client, times(1)).postPullRequestComment(anyString(), anyString(), anyLong(), anyString());
+        }
+    }
+
+    @Test
+    void cancelledSetupNoticeDoesNotWriteToRepository() {
+        RepositoryApiClient client = mock(RepositoryApiClient.class);
+        var cancellation = new WorkflowCancelledException("superseded");
+
+        assertThatThrownBy(() -> new ReviewFailureReporter().report(client, "owner", "repo", 9L,
+                snapshot(ReviewDiagnostics.Category.SETUP_FAILURE), false,
+                location -> { throw cancellation; })).isSameAs(cancellation);
         verifyNoInteractions(client);
     }
 

@@ -22,6 +22,8 @@ public record PrWorkflowContext(
         Map<String, String> hints,
         Consumer<AgentRunContext.ToolCallRecord> auditToolCallConsumer) {
 
+    public static final String HINT_EXPLICIT_REVIEW_REQUEST = "review.explicit-request";
+
     public static final String HINT_E2E_FEEDBACK = "e2e.feedback";
     public static final String HINT_RERUN_ONLY = "e2e.rerun-only";
     public static final String HINT_README_SYNC_GUIDANCE = "readme-sync.guidance";
@@ -54,6 +56,11 @@ public record PrWorkflowContext(
                              BooleanSupplier cancellationCheck,
                              Map<String, String> hints) {
         this(bot, payload, runId, stepAppender, cancellationCheck, hints, null);
+    }
+
+    public boolean explicitRequest() {
+        return Boolean.parseBoolean(hint(HINT_EXPLICIT_REVIEW_REQUEST))
+                || "review_requested".equals(payload.getAction());
     }
 
     public String hint(String key) {
