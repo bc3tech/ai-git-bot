@@ -39,8 +39,8 @@ public class AiUsageService {
     private static final int MAX_ERROR_MESSAGE_LENGTH = 2000;
     private static final int MAX_STACK_TRACE_LENGTH = 100_000;
     private static final Set<String> USAGE_SORT_COLUMNS =
-            Set.of("timestamp", "aiIntegrationName", "sessionId", "inputTokens", "outputTokens",
-                    "cacheCreationInputTokens", "cacheReadInputTokens");
+            Set.of("timestamp", "aiIntegrationName", "sessionId", "round", "inputTokens",
+                    "outputTokens", "cacheCreationInputTokens", "cacheReadInputTokens");
     private static final Set<String> ERROR_SORT_COLUMNS =
             Set.of("timestamp", "aiIntegrationName", "sessionId", "errorMessage");
 
@@ -56,9 +56,12 @@ public class AiUsageService {
      * <p>{@code inputTokens} is the total processed input (for cache-capable
      * providers: uncached + cache write + cache read); the two cache fields
      * carry the breakdown so cache activity is visible on the Usage page.</p>
+     *
+     * <p>{@code round} is the agent-loop round that produced the call, or
+     * {@code null} when the call was not made inside an agent loop.</p>
      */
     @Transactional
-    public void recordUsage(String aiIntegrationName, String sessionId,
+    public void recordUsage(String aiIntegrationName, String sessionId, Integer round,
                             long inputTokens, long outputTokens,
                             long cacheCreationInputTokens, long cacheReadInputTokens,
                             String rawRequest, String rawResponse) {
@@ -67,6 +70,7 @@ public class AiUsageService {
             entry.setTimestamp(Instant.now());
             entry.setAiIntegrationName(aiIntegrationName);
             entry.setSessionId(sessionId);
+            entry.setRound(round);
             entry.setInputTokens(inputTokens);
             entry.setOutputTokens(outputTokens);
             entry.setCacheCreationInputTokens(cacheCreationInputTokens);

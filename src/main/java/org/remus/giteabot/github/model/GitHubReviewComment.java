@@ -28,7 +28,32 @@ public class GitHubReviewComment implements ReviewComment {
     @JsonProperty("original_line")
     private Integer originalLine;
 
+    @JsonProperty("in_reply_to_id")
+    private Long inReplyToId;
+
+    @JsonProperty("pull_request_review_id")
+    private Long pullRequestReviewId;
+
+    @JsonProperty("created_at")
+    private String createdAt;
+
     private GitHubReview.GitHubUser user;
+
+    @Override
+    public String getThreadId() {
+        Long rootId = inReplyToId == null ? id : inReplyToId;
+        return rootId == null ? null : rootId.toString();
+    }
+
+    @Override
+    public String getParentId() {
+        return inReplyToId == null ? null : inReplyToId.toString();
+    }
+
+    @Override
+    public String getCreatedAt() {
+        return createdAt;
+    }
 
     @Override
     public String getUserLogin() {

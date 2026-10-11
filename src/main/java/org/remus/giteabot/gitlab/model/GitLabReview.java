@@ -23,6 +23,10 @@ public class GitLabReview implements Review {
 
     private List<GitLabNote> notes;
 
+    public String getDiscussionId() {
+        return id;
+    }
+
     @Override
     public Long getId() {
         // GitLab discussion IDs are strings; use the first note's ID as the numeric ID

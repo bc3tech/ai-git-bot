@@ -41,16 +41,26 @@ class AiUsageServiceTest {
 
     @Test
     void recordUsage_persistsEntryWithIntegrationAndSession() {
-        service.recordUsage("my-openai", "owner/repo#42", 120, 35, 0, 0, null, null);
+        service.recordUsage("my-openai", "owner/repo#42", 2, 120, 35, 0, 0, null, null);
 
         ArgumentCaptor<AiUsageLog> captor = ArgumentCaptor.forClass(AiUsageLog.class);
         verify(usageRepository).save(captor.capture());
         AiUsageLog entry = captor.getValue();
         assertEquals("my-openai", entry.getAiIntegrationName());
         assertEquals("owner/repo#42", entry.getSessionId());
+        assertEquals(2, entry.getRound());
         assertEquals(120, entry.getInputTokens());
         assertEquals(35, entry.getOutputTokens());
         assertNotNull(entry.getTimestamp());
+    }
+
+    @Test
+    void recordUsage_outsideAgentLoop_storesNullRound() {
+        service.recordUsage("my-openai", "owner/repo#42", null, 120, 35, 0, 0, null, null);
+
+        ArgumentCaptor<AiUsageLog> captor = ArgumentCaptor.forClass(AiUsageLog.class);
+        verify(usageRepository).save(captor.capture());
+        assertNull(captor.getValue().getRound());
     }
 
     @Test
@@ -58,7 +68,7 @@ class AiUsageServiceTest {
         when(usageProperties.isRawPayloadsEnabled()).thenReturn(true);
         when(usageProperties.getEffectiveMaxRawPayloadLength()).thenReturn(65535);
 
-        service.recordUsage("my-openai", "owner/repo#42", 120, 35, 0, 0,
+        service.recordUsage("my-openai", "owner/repo#42", null, 120, 35, 0, 0,
                 "{\"prompt\":\"hello\"}", "{\"text\":\"hi\"}");
 
         ArgumentCaptor<AiUsageLog> captor = ArgumentCaptor.forClass(AiUsageLog.class);
@@ -72,7 +82,7 @@ class AiUsageServiceTest {
     void recordUsage_dropsRawPayloadsWhenDisabled() {
         when(usageProperties.isRawPayloadsEnabled()).thenReturn(false);
 
-        service.recordUsage("my-openai", "owner/repo#42", 120, 35, 0, 0,
+        service.recordUsage("my-openai", "owner/repo#42", null, 120, 35, 0, 0,
                 "{\"prompt\":\"hello\"}", "{\"text\":\"hi\"}");
 
         ArgumentCaptor<AiUsageLog> captor = ArgumentCaptor.forClass(AiUsageLog.class);
@@ -87,7 +97,7 @@ class AiUsageServiceTest {
         when(usageProperties.isRawPayloadsEnabled()).thenReturn(true);
         when(usageProperties.getEffectiveMaxRawPayloadLength()).thenReturn(10);
 
-        service.recordUsage("my-openai", "owner/repo#42", 120, 35, 0, 0,
+        service.recordUsage("my-openai", "owner/repo#42", null, 120, 35, 0, 0,
                 "{\"prompt\":\"hello\"}", "{\"text\":\"hi\"}");
 
         ArgumentCaptor<AiUsageLog> captor = ArgumentCaptor.forClass(AiUsageLog.class);
@@ -99,7 +109,7 @@ class AiUsageServiceTest {
 
     @Test
     void recordUsage_persistsCacheTokenBreakdown() {
-        service.recordUsage("my-anthropic", "owner/repo#42", 16_000, 50, 1_200, 14_500, null, null);
+        service.recordUsage("my-anthropic", "owner/repo#42", null, 16_000, 50, 1_200, 14_500, null, null);
 
         ArgumentCaptor<AiUsageLog> captor = ArgumentCaptor.forClass(AiUsageLog.class);
         verify(usageRepository).save(captor.capture());
@@ -111,7 +121,7 @@ class AiUsageServiceTest {
 
     @Test
     void recordUsage_withoutCacheBreakdown_defaultsCacheFieldsToZero() {
-        service.recordUsage("my-openai", null, 120, 35, 0, 0, null, null);
+        service.recordUsage("my-openai", null, null, 120, 35, 0, 0, null, null);
 
         ArgumentCaptor<AiUsageLog> captor = ArgumentCaptor.forClass(AiUsageLog.class);
         verify(usageRepository).save(captor.capture());
@@ -124,7 +134,7 @@ class AiUsageServiceTest {
     void recordUsage_neverPropagatesPersistenceFailures() {
         when(usageRepository.save(any())).thenThrow(new RuntimeException("db down"));
 
-        assertDoesNotThrow(() -> service.recordUsage("my-openai", null, 1, 2, 0, 0, null, null));
+        assertDoesNotThrow(() -> service.recordUsage("my-openai", null, null, 1, 2, 0, 0, null, null));
     }
 
     @Test

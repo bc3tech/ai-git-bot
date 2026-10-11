@@ -7,15 +7,26 @@ import org.remus.giteabot.repository.PostReviewAction;
 import org.remus.giteabot.repository.RepositoryApiClient;
 import org.remus.giteabot.repository.WorkflowDispatchRequest;
 import org.remus.giteabot.repository.WorkflowRunStatus;
+import org.remus.giteabot.repository.model.DiffSide;
+import org.remus.giteabot.repository.model.CommentScan;
+import org.remus.giteabot.repository.model.ThreadCapabilities;
 import org.remus.giteabot.repository.model.RepositoryCredentials;
+import org.remus.giteabot.repository.model.ReviewAnchorComment;
+import org.remus.giteabot.repository.model.ReviewPublicationResult;
+import org.remus.giteabot.repository.model.ReviewSnapshot;
 import org.remus.giteabot.repository.model.Review;
 import org.remus.giteabot.repository.model.ReviewComment;
 import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.RestClient;
+import org.springframework.web.client.RestClientException;
 
-import java.util.Base64;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.function.Function;
 
 /**
  * GitHub-specific implementation of {@link RepositoryApiClient}.
@@ -26,6 +37,8 @@ public class GitHubApiClient implements RepositoryApiClient {
 
     private final RestClient restClient;
     private final RepositoryCredentials credentials;
+    private final RestClient graphQlClient;
+    private volatile boolean resolveSupported = true;
 
     /**
      * Creates a GitHubApiClient with the given RestClient and credentials.
@@ -34,8 +47,30 @@ public class GitHubApiClient implements RepositoryApiClient {
      * @param credentials the repository credentials (base URL, clone URL, token)
      */
     public GitHubApiClient(RestClient restClient, RepositoryCredentials credentials) {
+        this(restClient, credentials, graphQlClient(restClient, credentials));
+    }
+
+    GitHubApiClient(RestClient restClient, RepositoryCredentials credentials, RestClient graphQlClient) {
         this.restClient = restClient;
         this.credentials = credentials;
+        this.graphQlClient = graphQlClient;
+    }
+
+    static String graphQlEndpoint(String restBaseUrl) {
+        java.net.URI uri = java.net.URI.create(restBaseUrl);
+        String path = "api.github.com".equalsIgnoreCase(uri.getHost()) ? "/graphql" : "/api/graphql";
+        return uri.getScheme() + "://" + uri.getRawAuthority() + path;
+    }
+
+    private static RestClient graphQlClient(RestClient restClient, RepositoryCredentials credentials) {
+        if (restClient != null) {
+            return restClient.mutate().baseUrl(graphQlEndpoint(credentials.baseUrl())).build();
+        }
+        RestClient.Builder builder = RestClient.builder().baseUrl(graphQlEndpoint(credentials.baseUrl()));
+        if (credentials.token() != null && !credentials.token().isBlank()) {
+            builder.defaultHeader("Authorization", "Bearer " + credentials.token());
+        }
+        return builder.defaultHeader("Accept", "application/json").build();
     }
 
     @Override
@@ -58,14 +93,102 @@ public class GitHubApiClient implements RepositoryApiClient {
     }
 
     @Override
+    public ReviewSnapshot getReviewSnapshot(String owner, String repo, Long pullNumber) {
+        String diff = null;
+        for (int attempt = 0; attempt < 2; attempt++) {
+            Map<String, Object> before = getPullRequestDetails(owner, repo, pullNumber);
+            String headSha = nestedString(before, "head", "sha");
+            String baseSha = nestedString(before, "base", "sha");
+            diff = restClient.get()
+                    .uri("/repos/{owner}/{repo}/pulls/{pull_number}", owner, repo, pullNumber)
+                    .header("Accept", "application/vnd.github.v3.diff")
+                    .retrieve()
+                    .body(String.class);
+            if (headSha == null) {
+                break;
+            }
+            Map<String, Object> after = getPullRequestDetails(owner, repo, pullNumber);
+            if (headSha.equals(nestedString(after, "head", "sha"))
+                    && java.util.Objects.equals(baseSha, nestedString(after, "base", "sha"))) {
+                String mergeBase = null;
+                if (baseSha != null) {
+                    try {
+                        Map<String, Object> comparison = restClient.get()
+                                .uri("/repos/{owner}/{repo}/compare/{base}...{head}", owner, repo, baseSha, headSha)
+                                .retrieve().body(new ParameterizedTypeReference<>() {});
+                        mergeBase = nestedString(comparison, "merge_base_commit", "sha");
+                    } catch (org.springframework.web.client.RestClientException e) {
+                        log.warn("Could not determine merge-base for GitHub PR #{}: {}", pullNumber, e.getMessage());
+                    }
+                }
+                return new ReviewSnapshot(headSha, baseSha, mergeBase, diff, true);
+            }
+        }
+        log.warn("GitHub PR #{} in {}/{} has no stable head; review will be summary-only", pullNumber, owner, repo);
+        return ReviewSnapshot.summaryOnly(diff);
+    }
+
+    @Override
+    public ReviewPublicationResult publishInlineReview(String owner, String repo, Long pullNumber,
+                                                       ReviewSnapshot snapshot, String body,
+                                                       List<ReviewAnchorComment> comments,
+                                                       PostReviewAction action) {
+        List<ReviewAnchorComment> requested = comments == null ? List.of() : List.copyOf(comments);
+        List<GitHubInlineComment> inlineComments = requested.stream()
+                .map(comment -> new GitHubInlineComment(comment.path(), comment.body(), comment.line(),
+                        comment.side() == DiffSide.NEW ? "RIGHT" : "LEFT"))
+                .toList();
+        GitHubInlineReviewRequest request = new GitHubInlineReviewRequest(snapshot.headSha(), body,
+                reviewEvent(action), inlineComments);
+        try {
+            Map<String, Object> response = restClient.post()
+                    .uri("/repos/{owner}/{repo}/pulls/{pull_number}/reviews", owner, repo, pullNumber)
+                    .body(request)
+                    .retrieve()
+                    .body(new ParameterizedTypeReference<>() {});
+            Object reviewId = response == null ? null : response.get("id");
+            log.info("GitHub inline review published on PR #{} in {}/{} (review id: {})",
+                    pullNumber, owner, repo, reviewId);
+            List<ReviewPublicationResult.CommentOutcome> outcomes = requested.stream()
+                    .map(comment -> new ReviewPublicationResult.CommentOutcome(
+                            comment, ReviewPublicationResult.Delivery.CONFIRMED, null))
+                    .toList();
+            return new ReviewPublicationResult(ReviewPublicationResult.Status.PUBLISHED,
+                    ReviewPublicationResult.Delivery.CONFIRMED, outcomes, null);
+        } catch (HttpStatusCodeException e) {
+            if (e.getStatusCode().is4xxClientError()) {
+                return ReviewPublicationResult.notWritten(ReviewPublicationResult.Status.REJECTED, requested,
+                        "GitHub rejected the inline review: " + e.getStatusText());
+            }
+            return ReviewPublicationResult.unknown(requested,
+                    "GitHub returned an error while publishing the inline review: " + e.getStatusText());
+        } catch (RestClientException e) {
+            return ReviewPublicationResult.unknown(requested,
+                    "Could not determine whether GitHub published the inline review: " + e.getMessage());
+        }
+    }
+
+    private static String nestedString(Map<String, Object> data, String parent, String field) {
+        if (data == null || !(data.get(parent) instanceof Map<?, ?> nested)) {
+            return null;
+        }
+        Object value = nested.get(field);
+        return value instanceof String string ? string : null;
+    }
+
+    @Override
     public void postReviewComment(String owner, String repo, Long pullNumber, String body) {
-        log.info("Posting review comment on PR #{} in {}/{}", pullNumber, owner, repo);
-        restClient.post()
+        postReviewCommentReturningId(owner, repo, pullNumber, body);
+    }
+
+    @Override
+    public Optional<String> postReviewCommentReturningId(String owner, String repo, Long pullNumber, String body) {
+        Map<String, Object> response = restClient.post()
                 .uri("/repos/{owner}/{repo}/pulls/{pull_number}/reviews", owner, repo, pullNumber)
                 .body(new ReviewRequest(body, "COMMENT"))
                 .retrieve()
-                .toBodilessEntity();
-        log.info("Review comment posted successfully");
+                .body(new ParameterizedTypeReference<>() {});
+        return remoteId(response);
     }
 
     @Override
@@ -87,14 +210,19 @@ public class GitHubApiClient implements RepositoryApiClient {
 
     @Override
     public void postReview(String owner, String repo, Long pullNumber, String body, PostReviewAction action) {
+        postReviewReturningId(owner, repo, pullNumber, body, action);
+    }
+
+    @Override
+    public Optional<String> postReviewReturningId(String owner, String repo, Long pullNumber,
+                                                  String body, PostReviewAction action) {
         String event = reviewEvent(action);
-        log.info("Posting {} review on PR #{} in {}/{}", event, pullNumber, owner, repo);
-        restClient.post()
+        Map<String, Object> response = restClient.post()
                 .uri("/repos/{owner}/{repo}/pulls/{pull_number}/reviews", owner, repo, pullNumber)
                 .body(new ReviewRequest(body, event))
                 .retrieve()
-                .toBodilessEntity();
-        log.info("Review posted successfully");
+                .body(new ParameterizedTypeReference<>() {});
+        return remoteId(response);
     }
 
     private static String reviewEvent(PostReviewAction action) {
@@ -110,13 +238,18 @@ public class GitHubApiClient implements RepositoryApiClient {
 
     @Override
     public void postPullRequestComment(String owner, String repo, Long pullNumber, String body) {
-        log.info("Posting top-level comment on PR #{} in {}/{}", pullNumber, owner, repo);
-        restClient.post()
+        postPullRequestCommentReturningId(owner, repo, pullNumber, body);
+    }
+
+    @Override
+    public Optional<String> postPullRequestCommentReturningId(String owner, String repo, Long pullNumber,
+                                                               String body) {
+        Map<String, Object> response = restClient.post()
                 .uri("/repos/{owner}/{repo}/issues/{issue_number}/comments", owner, repo, pullNumber)
                 .body(new CommentRequest(body))
                 .retrieve()
-                .toBodilessEntity();
-        log.info("Comment posted successfully");
+                .body(new ParameterizedTypeReference<>() {});
+        return remoteId(response);
     }
 
     @Override
@@ -132,16 +265,188 @@ public class GitHubApiClient implements RepositoryApiClient {
 
     @Override
     public List<Map<String, Object>> getIssueComments(String owner, String repo, Long issueNumber) {
-        log.info("Fetching comments for issue #{} in {}/{}", issueNumber, owner, repo);
-        List<Map<String, Object>> comments = restClient.get()
-                .uri(uriBuilder -> uriBuilder
-                        .path("/repos/{owner}/{repo}/issues/{issue_number}/comments")
-                        .queryParam("per_page", 50)
+        return fetchPages(page -> restClient.get()
+                .uri(uriBuilder -> uriBuilder.path("/repos/{owner}/{repo}/issues/{issue_number}/comments")
+                        .queryParam("per_page", 100).queryParam("page", page)
                         .build(owner, repo, issueNumber))
-                .retrieve()
-                .body(new ParameterizedTypeReference<>() {});
-        return comments != null ? comments : List.of();
+                .retrieve().body(new ParameterizedTypeReference<List<Map<String, Object>>>() {})).items();
     }
+
+    @Override
+    public ThreadCapabilities threadCapabilities() {
+        return new ThreadCapabilities(true, true, resolveSupported);
+    }
+
+    @Override
+    public Optional<String> replyToReviewThread(String owner, String repo, Long pullNumber,
+                                                String threadId, String body) {
+        Map<String, Object> response = restClient.post()
+                .uri("/repos/{owner}/{repo}/pulls/{pull_number}/comments", owner, repo, pullNumber)
+                .body(Map.of("body", body, "in_reply_to", Long.parseLong(threadId)))
+                .retrieve().body(new ParameterizedTypeReference<>() {});
+        return remoteId(response);
+    }
+
+    @Override
+    public void editReviewComment(String owner, String repo, Long pullNumber, String commentId, String body) {
+        restClient.patch().uri("/repos/{owner}/{repo}/pulls/comments/{comment_id}", owner, repo,
+                        Long.parseLong(commentId))
+                .body(Map.of("body", body)).retrieve().toBodilessEntity();
+    }
+
+    @Override
+    public void resolveReviewThread(String owner, String repo, Long pullNumber, String threadId) {
+        if (!resolveSupported) {
+            throw new UnsupportedOperationException("GitHub review-thread resolution is unavailable");
+        }
+        try {
+            String nodeId = findReviewThreadNodeId(owner, repo, pullNumber, Long.parseLong(threadId));
+            if (nodeId == null) return;
+            Map<String, Object> result = graphQlClient.post().uri("")
+                    .body(Map.of("query", "mutation($threadId: ID!) { resolveReviewThread(input: {threadId: $threadId}) { thread { id isResolved } } }",
+                            "variables", Map.of("threadId", nodeId)))
+                    .retrieve().body(new ParameterizedTypeReference<>() {});
+            if (hasGraphQlForbidden(result)) {
+                resolveSupported = false;
+                return;
+            }
+            if (result == null || result.containsKey("errors")) {
+                throw new IllegalStateException("GitHub could not resolve the review thread");
+            }
+        } catch (HttpStatusCodeException e) {
+            if (e.getStatusCode().value() == 401 || e.getStatusCode().value() == 403) {
+                resolveSupported = false;
+                return;
+            }
+            throw e;
+        }
+    }
+
+    private String findReviewThreadNodeId(String owner, String repo, Long pullNumber, Long commentId) {
+        String cursor = null;
+        do {
+            Map<String, Object> variables = new LinkedHashMap<>();
+            variables.put("owner", owner);
+            variables.put("repo", repo);
+            variables.put("number", pullNumber);
+            variables.put("after", cursor);
+            Map<String, Object> response = graphQlClient.post().uri("")
+                    .body(Map.of("query", "query($owner: String!, $repo: String!, $number: Int!, $after: String) { repository(owner: $owner, name: $repo) { pullRequest(number: $number) { reviewThreads(first: 100, after: $after) { nodes { id comments(first: 100) { nodes { databaseId } } } pageInfo { hasNextPage endCursor } } } } }",
+                            "variables", variables))
+                    .retrieve().body(new ParameterizedTypeReference<>() {});
+            Map<?, ?> threads = nestedMap(nestedMap(nestedMap(response, "data"), "repository"), "pullRequest").get("reviewThreads") instanceof Map<?, ?> value
+                    ? value : null;
+            if (hasGraphQlForbidden(response)) {
+                resolveSupported = false;
+                return null;
+            }
+            if (threads == null || !(threads.get("nodes") instanceof List<?> nodes)) {
+                throw new IllegalStateException("GitHub review thread was not found");
+            }
+            for (Object item : nodes) {
+                if (item instanceof Map<?, ?> thread && thread.get("comments") instanceof Map<?, ?> comments
+                        && comments.get("nodes") instanceof List<?> commentNodes) {
+                    for (Object comment : commentNodes) {
+                        if (comment instanceof Map<?, ?> data && String.valueOf(commentId).equals(String.valueOf(data.get("databaseId")))) {
+                            return String.valueOf(thread.get("id"));
+                        }
+                    }
+                }
+            }
+            Map<?, ?> pageInfo = threads.get("pageInfo") instanceof Map<?, ?> value ? value : Map.of();
+            cursor = Boolean.TRUE.equals(pageInfo.get("hasNextPage")) && pageInfo.get("endCursor") instanceof String value
+                    ? value : null;
+        } while (cursor != null);
+        throw new IllegalStateException("GitHub review thread was not found");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<?, ?> nestedMap(Map<?, ?> source, String key) {
+        return source != null && source.get(key) instanceof Map<?, ?> nested ? nested : Map.of();
+    }
+
+    private static boolean hasGraphQlForbidden(Map<String, Object> response) {
+        if (response == null || !(response.get("errors") instanceof List<?> errors)) {
+            return false;
+        }
+        return errors.stream().filter(Map.class::isInstance).map(Map.class::cast).anyMatch(error ->
+                "FORBIDDEN".equals(error.get("type")) || "UNAUTHORIZED".equals(error.get("type"))
+                        || String.valueOf(error.get("message")).toLowerCase().contains("resource not accessible"));
+    }
+
+    @Override
+    public CommentScan<ReviewComment> listReviewThreadComments(String owner, String repo, Long pullNumber) {
+        PageScan<GitHubReviewComment> scan = fetchPages(page -> restClient.get()
+                .uri(uriBuilder -> uriBuilder.path("/repos/{owner}/{repo}/pulls/{pull_number}/comments")
+                        .queryParam("per_page", 100).queryParam("page", page).build(owner, repo, pullNumber))
+                .retrieve().body(new ParameterizedTypeReference<List<GitHubReviewComment>>() {}));
+        return new CommentScan<>(new ArrayList<ReviewComment>(scan.items()), scan.complete());
+    }
+
+    @Override
+    public CommentScan<Map<String, Object>> listPullRequestComments(String owner, String repo, Long pullNumber) {
+        CommentScan<Map<String, Object>> conversation = scanIssueComments(owner, repo, pullNumber);
+        PageScan<GitHubReviewComment> inline = fetchPages(page -> restClient.get()
+                .uri(uriBuilder -> uriBuilder.path("/repos/{owner}/{repo}/pulls/{pull_number}/comments")
+                        .queryParam("per_page", 100).queryParam("page", page).build(owner, repo, pullNumber))
+                .retrieve().body(new ParameterizedTypeReference<List<GitHubReviewComment>>() {}));
+        PageScan<GitHubReview> reviews = fetchPages(page -> restClient.get()
+                .uri(uriBuilder -> uriBuilder.path("/repos/{owner}/{repo}/pulls/{pull_number}/reviews")
+                        .queryParam("per_page", 100).queryParam("page", page).build(owner, repo, pullNumber))
+                .retrieve().body(new ParameterizedTypeReference<List<GitHubReview>>() {}));
+        List<Map<String, Object>> all = new ArrayList<>(conversation.comments());
+        for (GitHubReviewComment comment : inline.items()) {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("id", comment.getId()); item.put("body", comment.getBody());
+            item.put("created_at", comment.getCreatedAt()); item.put("user", Map.of("login", comment.getUserLogin() == null ? "" : comment.getUserLogin()));
+            all.add(item);
+        }
+        for (GitHubReview review : reviews.items()) {
+            if (review.getBody() != null && !review.getBody().isBlank()) {
+                Map<String, Object> item = new LinkedHashMap<>();
+                item.put("id", review.getId()); item.put("body", review.getBody()); item.put("submitted_at", review.getSubmittedAt());
+                item.put("user", Map.of("login", review.getUserLogin() == null ? "" : review.getUserLogin()));
+                all.add(item);
+            }
+        }
+        return new CommentScan<>(all, conversation.complete() && inline.complete() && reviews.complete());
+    }
+
+    private CommentScan<Map<String, Object>> scanIssueComments(String owner, String repo, Long pullNumber) {
+        PageScan<Map<String, Object>> scan = fetchPages(page -> restClient.get()
+                .uri(uriBuilder -> uriBuilder.path("/repos/{owner}/{repo}/issues/{issue_number}/comments")
+                        .queryParam("per_page", 100).queryParam("page", page).build(owner, repo, pullNumber))
+                .retrieve().body(new ParameterizedTypeReference<List<Map<String, Object>>>() {}));
+        return new CommentScan<>(scan.items(), scan.complete());
+    }
+
+    private static <T> PageScan<T> fetchPages(Function<Integer, List<T>> fetch) {
+        List<T> items = new ArrayList<>();
+        for (int page = 1; ; page++) {
+            try {
+                List<T> next = fetch.apply(page);
+                if (next == null) return new PageScan<>(items, false);
+                items.addAll(next);
+                if (next.size() < 100) return new PageScan<>(items, true);
+            } catch (RestClientException e) {
+                return new PageScan<>(items, false);
+            }
+        }
+    }
+
+    private static Optional<String> remoteId(Map<String, Object> response) {
+        Object id = response == null ? null : response.get("id");
+        return id == null ? Optional.empty() : Optional.of(String.valueOf(id));
+    }
+
+    @Override
+    public Optional<String> pullRequestCommentLink(String owner, String repo, Long pullNumber, String remoteId) {
+        String webBase = credentials.cloneUrl();
+        return Optional.of(webBase.replaceAll("/+$", "") + "/" + owner + "/" + repo
+                + "/pull/" + pullNumber + "#issuecomment-" + remoteId);
+    }
+
+    private record PageScan<T>(List<T> items, boolean complete) { }
 
     @Override
     public void assignIssue(String owner, String repo, Long issueNumber, String assignee) {
@@ -161,6 +466,53 @@ public class GitHubApiClient implements RepositoryApiClient {
         restClient.post()
                 .uri("/repos/{owner}/{repo}/issues/comments/{comment_id}/reactions",
                         owner, repo, commentId)
+                .body(new ReactionRequest(reaction))
+                .retrieve()
+                .toBodilessEntity();
+    }
+
+    @Override
+    public void removePullRequestReaction(String owner, String repo, Long pullNumber, String reaction) {
+        Map<String, Object> user = restClient.get().uri("/user").retrieve()
+                .body(new ParameterizedTypeReference<>() {});
+        if (user == null || user.get("id") == null) {
+            return;
+        }
+        int page = 1;
+        while (true) {
+            List<Map<String, Object>> reactions = restClient.get()
+                    .uri("/repos/{owner}/{repo}/issues/{pr}/reactions?per_page=100&page={page}",
+                            owner, repo, pullNumber, page++)
+                    .retrieve().body(new ParameterizedTypeReference<>() {});
+            if (reactions == null) return;
+            for (Map<String, Object> entry : reactions) {
+                if (reaction.equals(entry.get("content")) && entry.get("user") instanceof Map<?, ?> author
+                        && java.util.Objects.equals(user.get("id"), author.get("id"))) {
+                    restClient.delete().uri("/repos/{owner}/{repo}/issues/{pr}/reactions/{id}",
+                            owner, repo, pullNumber, entry.get("id")).retrieve().toBodilessEntity();
+                    return;
+                }
+            }
+            if (reactions.size() < 100) return;
+        }
+    }
+
+    @Override
+    public void addPullRequestReaction(String owner, String repo, Long pullNumber, String reaction) {
+        log.info("Adding '{}' reaction to PR #{} in {}/{}", reaction, pullNumber, owner, repo);
+        postIssueResourceReaction(owner, repo, pullNumber, reaction);
+    }
+
+    @Override
+    public void addIssueReaction(String owner, String repo, Long issueNumber, String reaction) {
+        log.info("Adding '{}' reaction to issue #{} in {}/{}", reaction, issueNumber, owner, repo);
+        postIssueResourceReaction(owner, repo, issueNumber, reaction);
+    }
+
+    private void postIssueResourceReaction(String owner, String repo, Long issueNumber, String reaction) {
+        restClient.post()
+                .uri("/repos/{owner}/{repo}/issues/{issue_number}/reactions",
+                        owner, repo, issueNumber)
                 .body(new ReactionRequest(reaction))
                 .retrieve()
                 .toBodilessEntity();
@@ -301,31 +653,6 @@ public class GitHubApiClient implements RepositoryApiClient {
         return content != null ? content : "";
     }
 
-
-    @Override
-    public void createOrUpdateFile(String owner, String repo, String path, String content,
-                                   String message, String branch, String sha) {
-        log.info("Creating/updating file {} on branch '{}' in {}/{}", path, branch, owner, repo);
-        String base64Content = Base64.getEncoder().encodeToString(content.getBytes());
-
-        var body = new java.util.LinkedHashMap<String, Object>();
-        body.put("message", message);
-        body.put("content", base64Content);
-        body.put("branch", branch);
-        if (sha != null) {
-            body.put("sha", sha);
-        }
-
-        restClient.put()
-                .uri(uriBuilder -> uriBuilder
-                        .path("/repos/{owner}/{repo}/contents/")
-                        .path(path)
-                        .build(owner, repo))
-                .body(body)
-                .retrieve()
-                .toBodilessEntity();
-        log.info("File {} committed successfully", path);
-    }
 
 
     @Override
@@ -592,6 +919,9 @@ public class GitHubApiClient implements RepositoryApiClient {
     // ---- Request DTOs ----
 
     record ReviewRequest(String body, String event) {}
+    record GitHubInlineReviewRequest(String commit_id, String body, String event,
+                                    List<GitHubInlineComment> comments) {}
+    record GitHubInlineComment(String path, String body, int line, String side) {}
     record CommentRequest(String body) {}
     record ReactionRequest(String content) {}
     record InlineReviewRequest(String body, String event, List<InlineReviewComment> comments) {}

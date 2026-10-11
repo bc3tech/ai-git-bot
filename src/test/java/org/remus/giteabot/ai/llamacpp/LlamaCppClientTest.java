@@ -1,6 +1,8 @@
 package org.remus.giteabot.ai.llamacpp;
 
 import org.junit.jupiter.api.Test;
+import org.remus.giteabot.agent.shared.AgentJackson;
+import org.remus.giteabot.ai.AiClient;
 import org.remus.giteabot.ai.AiMessage;
 import org.remus.giteabot.ai.ChatTurn;
 import org.remus.giteabot.ai.StopReason;
@@ -9,24 +11,52 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.client.MockRestServiceServer;
+import org.springframework.mock.http.client.MockClientHttpRequest;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClient;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.mock;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.jsonPath;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 
 class LlamaCppClientTest {
 
+    @Test
+    void requestEstimateSizesActualSerializedChatMlIncludingDefaultPromptAndEmptyCurrent() {
+        RestClient.Builder builder = RestClient.builder().baseUrl("https://provider.example");
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        AtomicReference<String> sentPrompt = new AtomicReference<>();
+        server.expect(requestTo("https://provider.example/v1/completions"))
+                .andExpect(request -> sentPrompt.set(AgentJackson.mapper().readTree(
+                        ((MockClientHttpRequest) request).getBodyAsString()).path("prompt").asText()))
+                .andRespond(withSuccess("data: {\"choices\":[{\"text\":\"done\",\"finish_reason\":\"stop\"}]}\n",
+                        MediaType.TEXT_EVENT_STREAM));
+        LlamaCppClient client = new LlamaCppClient(builder.build(), "test-model", 128);
+        List<AiMessage> history = List.of(
+                AiMessage.builder().role("user").content("界\n\"question\"").build(),
+                AiMessage.builder().role("assistant").content("answer").build());
+        List<ToolDescriptor> ignoredTools = List.of(new ToolDescriptor("read", "not sent", null));
+
+        long estimate = client.estimateRequestTokens(history, null, ignoredTools, null);
+        client.chatWithTools(history, null, ignoredTools, null, null, 64);
+
+        assertEquals(AiClient.estimateSerializedRequestTokens(sentPrompt.get()), estimate);
+        assertTrue(sentPrompt.get().contains("<|im_start|>user\n<|im_end|>\n<|im_start|>assistant\n"));
+        assertTrue(sentPrompt.get().contains("experienced software engineer"));
+        assertTrue(estimate > history.stream().mapToInt(m -> m.getContent().length()).sum());
+        assertEquals(estimate, client.estimateRequestTokens(history, "", List.of(), null));
+        server.verify();
+    }
+
     private LlamaCppClient createClient() {
-        RestClient restClient = mock(RestClient.class);
+        RestClient restClient = RestClient.builder().baseUrl("http://localhost").build();
         return new LlamaCppClient(restClient, "qwen2.5-coder-7b-instruct", 4096);
     }
 
@@ -129,10 +159,25 @@ class LlamaCppClientTest {
     }
 
     @Test
+    void reviewRequestUsesConfiguredModelForRouterMode() {
+        RestClient.Builder builder = RestClient.builder().baseUrl("https://provider.example");
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        server.expect(requestTo("https://provider.example/v1/completions"))
+                .andExpect(jsonPath("$.model").value("configured-router-model"))
+                .andRespond(withSuccess("data: {\"choices\":[{\"text\":\"Review\",\"finish_reason\":\"stop\"}]}\n",
+                        MediaType.TEXT_EVENT_STREAM));
+
+        LlamaCppClient client = new LlamaCppClient(builder.build(), "configured-router-model", 128);
+
+        assertEquals("Review", client.submitReviewPrompt("review", null, "change"));
+        server.verify();
+    }
+
+    @Test
     void typedTurnKeepsChatMlGrammarAndTokenOverrideWithoutAdvertisingTools() {
         RestClient.Builder builder = RestClient.builder().baseUrl("https://provider.example");
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
-        server.expect(requestTo("https://provider.example/completion"))
+        server.expect(requestTo("https://provider.example/v1/completions"))
                 .andExpect(jsonPath("$.prompt").value("""
                         <|im_start|>system
                         Output JSON<|im_end|>
@@ -144,11 +189,14 @@ class LlamaCppClientTest {
                         Continue<|im_end|>
                         <|im_start|>assistant
                         """))
-                .andExpect(jsonPath("$.n_predict").value(64))
+                .andExpect(jsonPath("$.model").value("router-model"))
+                .andExpect(jsonPath("$.max_tokens").value(64))
                 .andExpect(jsonPath("$.stream").value(true))
+                .andExpect(jsonPath("$.stream_options.include_usage").value(true))
                 .andExpect(jsonPath("$.grammar").isNotEmpty())
                 .andExpect(jsonPath("$.tools").doesNotExist())
-                .andRespond(withSuccess("data: {\"content\":\"{}\",\"stop\":true,\"stop_type\":\"eos\"}\n",
+                .andRespond(withSuccess("data: {\"choices\":[{\"text\":\"{}\",\"finish_reason\":\"stop\"}],"
+                                + "\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":2}}\n",
                         MediaType.TEXT_EVENT_STREAM));
         LlamaCppClient client = new LlamaCppClient(builder.build(), "test-model", 128);
         List<AiMessage> history = List.of(
@@ -156,7 +204,7 @@ class LlamaCppClientTest {
                 AiMessage.builder().role("assistant").content("Earlier response").build());
 
         ChatTurn turn = client.chatWithTools(history, "Continue",
-                List.of(new ToolDescriptor("lookup", "Read context", null)), "Output JSON", null, 64);
+                List.of(new ToolDescriptor("lookup", "Read context", null)), "Output JSON", "router-model", 64);
 
         assertFalse(client.supportsNativeTools());
         assertTrue(turn.toolCalls().isEmpty());

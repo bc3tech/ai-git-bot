@@ -22,6 +22,22 @@ public class ConversationMessage {
     @Column(nullable = false, columnDefinition = "TEXT")
     private String content;
 
+    /**
+     * Native tool-call payload of an assistant turn (JSON array of
+     * {@code {id,name,args,providerMetadata}} objects). {@code null} for turns
+     * that called no tools, for every other role, and for rows persisted before
+     * V53.
+     */
+    @Column(columnDefinition = "TEXT")
+    private String toolCalls;
+
+    /**
+     * The tool call a {@code role:"tool"} row is the response to. {@code null}
+     * for other roles and for rows persisted before V53.
+     */
+    @Column(name = "tool_call_id", length = 255)
+    private String toolCallId;
+
     @Column(nullable = false, updatable = false)
     private Instant createdAt;
 

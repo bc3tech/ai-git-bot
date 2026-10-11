@@ -1,0 +1,23 @@
+{
+  "base": "7c9b3ad6",
+  "plan": "docs/plans/2026-10-10-002-fix-legacy-review-recovery-plan.md",
+  "mode": "autofix",
+  "reviewersReturned": 11,
+  "suppressedFindings": 5,
+  "findings": [
+    {"id": 1, "severity": "P2", "title": "Final retry retention bypassed stalled-context boundary", "status": "fixed", "verification": "real-strategy loop regression"},
+    {"id": 2, "severity": "P2", "title": "Diagnostics integration retained old repetition oracle", "status": "fixed", "verification": "new-evidence and repeated-evidence parameterized workflow integration"},
+    {"id": 3, "severity": "P2", "title": "Evicted and omitted source inventory disappeared", "status": "fixed", "verification": "bounded inventory retention regressions"},
+    {"id": 4, "severity": "P2", "title": "Source and numbered-tool line parsing diverged", "status": "fixed", "verification": "CRLF/LF/CR and embedded Unicode tool-line regressions"},
+    {"id": 5, "severity": "P2", "title": "Verified empty and bounded EOF cat reads degraded falsely", "status": "fixed", "verification": "empty full-source and short bounded-read tests"},
+    {"id": 6, "severity": "P2", "title": "Disclosure assertions matched model summary", "status": "fixed", "verification": "neutral summary with exact application-owned coverage disclosure"},
+    {"id": 7, "severity": "P3", "title": "Historical fenced review with trailing metadata regressed", "status": "fixed", "verification": "classification compatibility regression"}
+  ],
+  "browser": "not applicable: backend Java and documentation only; no browser or server started",
+  "unslop": {
+    "fixed": "Moved generic compaction comment into the generic branch.",
+    "skipped": "Retained diagnostic compatibility constructor per explicit caller-compatibility invariant."
+  },
+  "operational": "Deployment and same-model live replay require separate permission; remote Compose remains read-only.",
+  "video": "recovery-walkthrough.mp4: 18-second deterministic explanatory walkthrough, H.264, 1280x900. Not a live model/server recording. Published as a repository-hosted video linked from PR #4. Native attachment upload returned HTTP 404; browser connectivity recovered, but GitHub browser sign-in was unavailable unattended. Repository hosting is the fallback, not an inline user attachment."
+}

@@ -17,7 +17,11 @@ public enum ReviewParam implements WorkflowParamName {
     RETRY_TRUNCATED_CHUNK_CHARS("retryTruncatedChunkChars"),
 
     /** Comma-separated glob/filename patterns whose diff sections are stripped before review. */
-    EXCLUDED_FILE_PATTERNS("excludedFilePatterns");
+    EXCLUDED_FILE_PATTERNS("excludedFilePatterns"),
+
+    DOUBLE_CHECK_ENABLED("doubleCheckEnabled"),
+    DOUBLE_CHECK_MIN_SEVERITY("doubleCheckMinSeverity"),
+    DOUBLE_CHECK_AI_INTEGRATION_ID("doubleCheckAiIntegrationId");
 
     private final String key;
 

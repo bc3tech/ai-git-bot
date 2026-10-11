@@ -2,7 +2,7 @@
 
 ## Overview
 
-AI-Git-Bot is a **Gateway application** that provides a web-based management interface for creating and managing AI-powered code review bots. Each bot connects an AI provider (Anthropic, OpenAI, Google AI, Ollama, or llama.cpp) with a Git provider (Gitea, GitHub, GitHub Enterprise, GitLab, or Bitbucket Cloud) and has its own unique webhook URL. The Gateway architecture allows you to manage multiple bots with different configurations across different Git platforms — all from a single dashboard.
+AI-Git-Bot is a **Gateway application** that provides a web-based management interface for creating and managing AI-powered code review bots. Each bot connects an AI provider (Anthropic, OpenAI, OpenRouter, Google AI, Ollama, or llama.cpp) with a Git provider (Gitea, GitHub, GitHub Enterprise, GitLab, or Bitbucket Cloud) and has its own unique webhook URL. The Gateway architecture allows you to manage multiple bots with different configurations across different Git platforms — all from a single dashboard.
 
 Besides classic pull-request review bots, AI-Git-Bot also supports **issue-based agent workflows** and **opt-in PR workflows**:
 
@@ -58,7 +58,7 @@ The Usage page (`/usage`) audits all AI provider interactions. It contains two c
 
 ### AI usage
 
-A paginated table (20 entries per page) of every AI interaction with the columns **Timestamp**, **AI-Integration**, **Session-ID**, **Input tokens**, **Output tokens**, **Cache creation input tokens**, **Cache read input tokens**, and **Details**. The Session-ID has the form `owner/repo#number` and identifies the pull request or issue that triggered the interaction. Click a column header to sort ascending/descending. Use **Clear all** in the section header (a confirmation dialog is shown) to remove all recorded usage entries.
+A paginated table (20 entries per page) of every AI interaction with the columns **Timestamp**, **AI-Integration**, **Session-ID**, **Round**, **Input tokens**, **Output tokens**, **Cache creation input tokens**, **Cache read input tokens**, and **Details**. The Session-ID has the form `owner/repo#number` and identifies the pull request or issue that triggered the interaction. The **Round** column shows which round of the agent loop produced the interaction — useful to see how deep into a loop a run got — and is **—** for single-shot calls that are not part of an agent loop (a plain code review or a triage classification, for example). Click a column header to sort ascending/descending. Use **Clear all** in the section header (a confirmation dialog is shown) to remove all recorded usage entries.
 
 Click the **Raw** button in the **Details** column to open a modal showing the raw JSON request sent to the AI provider and the raw JSON response received back. This is useful for debugging provider-specific behavior, token accounting discrepancies, or unexpected completions.
 
@@ -87,16 +87,18 @@ AI Integrations define connections to AI providers. Navigate to **AI Integration
      |----------|-----------------|------------------|
      | `anthropic` | `https://api.anthropic.com` | claude-opus-4-7, claude-sonnet-4-6, claude-haiku-4-5-20251001 |
      | `openai` | `https://api.openai.com` | gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex |
+     | `openrouter` | `https://openrouter.ai/api` | `openrouter/auto`, `deepseek/deepseek-v4.1-flash`, `z-ai/glm-5.3-flash`, `xiaomi/mimo-v2.6-flash` |
      | `google` | `https://generativelanguage.googleapis.com` | gemini-2.5-pro, gemini-2.5-flash, gemini-2.0-flash |
      | `ollama` | `http://localhost:11434` | *(user-configured)* |
      | `llamacpp` | `http://localhost:8081` | *(user-configured)* |
      
-   - **API URL**: Pre-filled based on provider; customize for self-hosted or proxy setups
+   - **API URL**: Pre-filled based on provider; customize for self-hosted or proxy setups. OpenRouter uses a read-only, region-derived official URL.
    - **API Key**: Your API key (encrypted at rest when `APP_ENCRYPTION_KEY` is configured; not needed for Ollama or llama.cpp)
    - **API Version**: API version string (Anthropic only, e.g., `2023-06-01`)
    - **Model**: Select from the dropdown for suggested models, or type a custom model name
-   - **Model Flavor**: OpenAI integrations only. Provider default behavior for the model; the available flavors are listed under the field (see the OpenAI-compatible section below)
+   - **Model Flavor**: Available flavors are listed under the field. OpenRouter currently accepts only `standard` (provider default); see the OpenAI-compatible section for OpenAI flavors.
    - **Max Tokens**: Maximum tokens per AI response (default: 4096)
+   - **Parallel Worker Limit**: Maximum number of jobs that may run at the same time for this integration (`0` = unlimited, `1`–`20` = cap). See [Parallel worker limit](#parallel-worker-limit)
    - **Max Diff Chars Per Chunk**: Maximum characters per diff chunk (default: 120000)
    - **Max Diff Chunks**: Maximum number of diff chunks to process (default: 8)
    - **Retry Truncated Chunk Chars**: Truncated chunk size for retries (default: 60000)
@@ -114,6 +116,20 @@ AI Integrations define connections to AI providers. Navigate to **AI Integration
 - Compatible with OpenAI API proxies by changing the API URL
 - Suggested models: gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex
 - **Model Flavor** (this provider only): `Standard` sends no extra request fields. `No reasoning effort` sends `reasoning_effort: "none"` — use it when a gateway in front of the model (e.g. for `gpt-5.6-sol`) injects a default `reasoning_effort` and the provider rejects function tools on `/v1/chat/completions`
+
+#### OpenRouter
+
+- Select **openrouter**, enter an **inference API key**, choose a suggested model or enter an exact model ID (usually `author/model`), and set your response/context limits. Suggestions are bundled examples, not a live catalog or availability guarantee; check the current [model catalog](https://openrouter.ai/models?order=most-popular) and enter another model ID when needed. Custom model IDs remain supported without changing configuration files or requesting the catalog during inference.
+- Configure **Routing and privacy**: Global (default), EU or US. EU/US are Enterprise in-region routes and require account eligibility. The API root is fixed by the selected region; custom proxies use the generic `openai` provider.
+- When entering or replacing a key, the server checks `/v1/key` at the selected official host, rejects management/provisioning keys, and verifies the region is allowed. Missing or invalid key-type flags fail closed. An omitted `allowed_data_regions` is accepted only for Global; EU/US require an explicit matching entitlement. Explicit restrictions must be an array containing the selected region. See the [OpenRouter key response schema](https://openrouter.ai/docs/api/api-reference/api-keys/get-current-api-key). Validation runs outside database transactions. HTTP redirects are disabled for key checks and inference.
+- Leave the key blank on edit to keep it **only for the same provider**. A provider change requires a newly entered key or an explicit **Clear** for providers that allow keyless saves. Switching an existing generic OpenRouter integration from `openai` to `openrouter` therefore requires re-entering its key. Keys use the existing encrypted storage when `APP_ENCRYPTION_KEY` is configured.
+- Existing OpenRouter keys are not rechecked on ordinary settings edits. Changing the region rechecks the retained key against the new route; to recheck a key otherwise, enter it again. OpenRouter integrations cannot be saved without a key, including after using **Clear**; enter a replacement before saving.
+- **Provider data collection** defaults to **Deny**; **Require zero data retention (ZDR)** defaults to off. Requests always require the configured parameters and disable provider fallbacks. A missing compatible route fails explicitly rather than weakening the settings.
+- ZDR and data collection are independent routing filters. When ZDR is enabled, only ZDR endpoints are eligible even if data collection is set to **Allow**; **Allow** does not override ZDR. Both selections are preserved rather than silently normalised.
+- Requests explicitly disable the documented OpenRouter [plugins](https://openrouter.ai/docs/guides/features/plugins), including [automatic context compression](https://openrouter.ai/docs/guides/features/message-transforms) and the [Pareto Router](https://openrouter.ai/docs/guides/routing/routers/pareto-router). Account-level **Prevent overrides** settings can enforce plugins anyway; configure the OpenRouter account without forced plugins and select a concrete model ID for predictable review behavior.
+- Requests use `max_tokens`; the generic OpenAI integration continues to use `max_completion_tokens`. The `standard` flavor leaves reasoning at the provider default. Unsupported explicit flavors are rejected.
+- Native tool continuations preserve opaque `reasoning_details` in memory, separately from visible answers and session history. The existing, explicitly enabled `AI_USAGE_RAW_PAYLOADS_ENABLED` audit option also captures these provider payloads; it is off by default.
+- A key-check HTTP 401 means the key was rejected. Inference HTTP 402/429 indicates credit/rate limits; check the account. Inference HTTP 404 can indicate an unavailable model or route under the selected policy. Provider response bodies are not exposed in errors.
 
 #### Google AI
 - Requires a Gemini API key from Google AI Studio; the key is encrypted at rest when `APP_ENCRYPTION_KEY` is configured
@@ -147,14 +163,14 @@ Configure OpenAI-compatible providers in **AI Integrations → New Integration**
 | **API Key** | Enter the provider API key. For local tools that do not enforce authentication, enter a placeholder value such as `local` if the server accepts or ignores it. |
 | **API Version** | Leave blank. This field is only used for Anthropic integrations. |
 | **Model** | Enter the provider's exact model identifier, including any provider-specific prefix. |
-| **Model Flavor** | Keep the default `Standard` unless the selected model rejects function tools because of an injected `reasoning_effort` (see Troubleshooting). Select `No reasoning effort` for reasoning models such as `gpt-5.6-sol` used through a gateway that injects a default `reasoning_effort`. The field is only shown for providers that offer flavors (currently the OpenAI integration). |
+| **Model Flavor** | Keep the default `Standard` unless the selected model rejects function tools because of an injected `reasoning_effort` (see Troubleshooting). Select `No reasoning effort` for reasoning models such as `gpt-5.6-sol` used through a gateway that injects a default `reasoning_effort`. The field is only shown for providers that offer flavors. |
 | **Max Tokens** and chunk limits | Start with the defaults, then reduce chunk limits if the selected model has a smaller context window. |
 
 Documented examples:
 
 | Provider/tool | API URL | API key | Example model | Notes |
 |---------------|---------|---------|---------------|-------|
-| OpenRouter | `https://openrouter.ai/api` | OpenRouter API key | `openai/gpt-4o-mini` | OpenRouter's endpoint includes `/api/v1/chat/completions`; enter the base URL without the trailing `/v1/chat/completions`. Model names usually include a provider prefix. |
+| OpenRouter (existing generic setup) | `https://openrouter.ai/api` | OpenRouter API key | `openai/gpt-4o-mini` | For new setups, select the dedicated **OpenRouter** provider above, which uses OpenRouter's token-cap dialect and explicit routing policy. Existing `openai` configurations remain supported. |
 | LM Studio local server | `http://localhost:1234` | Placeholder such as `local` if authentication is disabled | Model name shown by LM Studio | Enable LM Studio's OpenAI-compatible local server before using the integration. |
 | vLLM OpenAI-compatible server | `http://localhost:8000` | The key configured for the server, or a placeholder if auth is disabled | Served model name, for example `meta-llama/Llama-3.1-8B-Instruct` | Ensure the vLLM server exposes `/v1/chat/completions` from this base URL. |
 
@@ -184,12 +200,31 @@ Troubleshooting:
 
 #### llama.cpp
 - No API key required
-- Model is determined by the llama.cpp server configuration
+- For a server started with one model (`--model`), the Model field is ignored by llama.cpp
+- In router mode (no `--model`), the Model field must contain the exact model ID returned by `GET /v1/models`; llama.cpp uses it to route each request
+- Uses llama.cpp's OpenAI-compatible `/v1/completions` endpoint
 - Supports GBNF grammar constraints for reliable JSON output (agent feature)
+
+### Parallel worker limit
+
+Every AI integration has a **Parallel worker limit** that controls how many of its jobs may run at the same time:
+
+- **0** (default) — unlimited parallel execution. Jobs start immediately, exactly as before.
+- **1–20** — at most that many jobs run concurrently for the integration. Once the limit is reached, further jobs are **not dropped**: they stay queued and start as soon as a running job finishes.
+
+The value is validated when the integration is saved — the form and the server both accept only `0`–20. A job that is waiting for a free slot is not reported as running: its run row is created once the slot becomes available.
+
+The limit is applied per AI integration, so a busy integration never holds back jobs that use a different one, and every bot's jobs are bounded by the limit of the AI integration it is configured with. It is intended for self-hosted or resource-constrained providers (for example a local vLLM or llama.cpp backend) that become unstable or slow when several reviews run against them at once. The counter lives in the running application, so in a multi-instance deployment the limit applies per instance rather than globally.
 
 ### Editing an AI Integration
 
-Click the **Edit** button on the integration's row. When editing, leave the API Key field blank to keep the existing stored value.
+Click the **Edit** button on the integration's row. Leave the API Key field blank to keep the existing stored value **only when the provider stays the same**.
+
+Changing **any** provider requires a newly entered API key or an explicit **Clear** of the stored key. This also applies when switching to a keyless provider such as Ollama or llama.cpp: click **Clear** before saving so the previous provider's credential cannot be reused. OpenRouter still requires a replacement key and does not allow a keyless save.
+
+Every save requires a registered **Provider Type**. Missing, blank or unknown provider types are rejected, including requests sent outside the form.
+
+Empty, non-numeric or overflowing token/worker-limit fields show a validation flash message without saving the integration. Worker-limit-only errors keep the specific `0`–`20` message. Malformed OpenRouter region, data-collection or boolean values still return HTTP 400; submitted credentials are not included in these validation messages.
 
 ### Deleting an AI Integration
 
@@ -740,9 +775,11 @@ Set `GITEABOT_SECURITY_OAUTH_DEBUG_LOGGING_ENABLED=true` and configure the appli
 | `AGENT_MAX_TOKENS` | `32768` | Maximum tokens for AI responses in agent mode |
 | `AGENT_BRANCH_PREFIX` | `ai-agent/` | Prefix for branches created by the agent |
 | `AGENT_VALIDATION_ENABLED` | `true` | Enable syntax validation before commit |
+| `AGENT_VALIDATION_TOOL_TIMEOUT_SECONDS` | `300` | Timeout for each build/test/validation command the coding agent runs, including repository-provided `execute` scripts |
 | `AGENT_VALIDATION_MAX_RETRIES` | `3` | Max iterations for error correction |
+| `AGENT_WRITER_MAX_TOOL_ROUNDS` | `5` | Repository-context rounds the technical-writer agent may spend before it has to answer |
 
-See [Agent Documentation](AGENT.md) for full details on the coding and writer agent workflows.
+See [Agent Documentation](AGENT.md) for full details on the coding and writer agent workflows. The writer agent's wrap-up round can no longer use tools and must answer from what it has already read, and the round that has to produce that answer keeps its tools declared — sending it without them made every provider fall back to a plain-text request that cannot carry the tool history (the calls and their results have to be rewritten as text), so the exit could be missed. Raise `AGENT_WRITER_MAX_TOOL_ROUNDS` for repositories where the model needs to read more files before it can draft the improved issue.
 
 ### AI Provider Overload Retries
 

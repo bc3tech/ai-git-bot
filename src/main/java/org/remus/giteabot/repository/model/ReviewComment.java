@@ -20,4 +20,20 @@ public interface ReviewComment {
     Integer getLine();
 
     String getUserLogin();
+
+    default String getThreadId() {
+        return null;
+    }
+
+    default String getParentId() {
+        return null;
+    }
+
+    default String getCreatedAt() {
+        return null;
+    }
+
+    default Boolean getResolved() {
+        return null;
+    }
 }

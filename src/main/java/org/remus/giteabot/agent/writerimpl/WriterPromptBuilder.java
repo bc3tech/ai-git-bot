@@ -45,6 +45,28 @@ public class WriterPromptBuilder {
         return sb.toString();
     }
 
+    /**
+     * Delivered as the follow-up of the wrap-up round, once the repository-context
+     * budget is spent: the model gets one final round to answer from what it has
+     * already read. Generated at runtime, so it cannot be clobbered by an edited
+     * {@code system_prompts} row.
+     */
+    public String buildWrapUpInstruction() {
+        return """
+                ## Context rounds exhausted
+
+                You have used all repository-context rounds for this run and cannot call tools any more.
+
+                Return your final JSON answer now, from what you have already read:
+                - If the issue can be improved with that information, set "readyToCreate": true and fill
+                  "revisedIssueDraft" (plus "assumptions" for anything you inferred).
+                - If a fact is still missing, put the specific question in "clarifyingQuestions" and name the file
+                  or behaviour you could not verify.
+
+                A further tool request ends this run and the author is asked for details instead.
+                """;
+    }
+
     public String buildIssueBody(Long originatingIssueNumber, WriterPlan plan) {
         StringBuilder sb = new StringBuilder();
         sb.append("Originates from #").append(originatingIssueNumber).append("\n\n");

@@ -13,9 +13,16 @@ COPY pom.xml .
 RUN apk add --no-cache maven && \
     mvn dependency:go-offline -B
 
-# Build the application (source changes don't bust the dependency cache)
+# Build the application (source changes don't bust the dependency cache).
+# Allow downloads here: a cached go-offline layer may not contain every artifact.
 COPY src ./src
-RUN mvn clean package -DskipTests -o
+COPY prompts ./prompts
+# The build fingerprint is a hash of everything that goes into the image's application, so
+# the same source always yields the same id no matter how often the container is recreated.
+# GIT_COMMIT is optional (.git is not in the build context): --build-arg GIT_COMMIT=$(git rev-parse HEAD)
+ARG GIT_COMMIT=unknown
+RUN BUILD_FINGERPRINT=$(find pom.xml src prompts -type f -exec sha256sum {} + | LC_ALL=C sort -k2 | sha256sum | cut -c1-12) && \
+    mvn clean package -DskipTests -B -Dbuild.fingerprint="$BUILD_FINGERPRINT" -Dbuild.commit="$GIT_COMMIT"
 
 # --- Runtime image ---
 #
@@ -71,6 +78,7 @@ RUN set -eux; \
 # Node.js 22 LTS (NodeSource) — required by Playwright, Cypress and the
 # scaffolded `npx` commands the PR-workflow tools issue.
 # ---------------------------------------------------------------------------
+ARG PNPM_VERSION=10.11.0
 RUN set -eux; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/*; \
@@ -79,7 +87,9 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends nodejs; \
     rm -rf /var/lib/apt/lists/*; \
     node --version; \
-    npm --version
+    npm --version; \
+    npm install -g "pnpm@${PNPM_VERSION}"; \
+    pnpm --version
 
 # ---------------------------------------------------------------------------
 # .NET 10 SDK (Microsoft package feed)
@@ -180,7 +190,8 @@ RUN npm install -g --omit=optional \
     chown -R appuser:appgroup /home/appuser
 
 USER appuser
-RUN playwright install chromium && \
+RUN pnpm --version && \
+    playwright install chromium && \
     cypress install
 
 # ---------------------------------------------------------------------------
@@ -220,5 +231,3 @@ ENTRYPOINT ["/usr/bin/tini", "--", "java", \
     "-XX:+UseContainerSupport", \
     "-XX:MaxRAMPercentage=75.0", \
     "-jar", "app.jar" ]
-
-

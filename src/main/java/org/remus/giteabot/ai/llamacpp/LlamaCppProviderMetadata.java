@@ -53,6 +53,8 @@ public class LlamaCppProviderMetadata implements AiProviderMetadata {
         return restClientBuilder.getObject()
                 .baseUrl(integration.getApiUrl())
                 .defaultHeader("Content-Type", "application/json")
+                // Some llama.cpp builds advertise keep-alive but close completed SSE connections.
+                .defaultHeader("Connection", "close")
                 .build();
     }
 

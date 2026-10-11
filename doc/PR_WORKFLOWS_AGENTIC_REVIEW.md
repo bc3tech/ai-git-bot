@@ -20,13 +20,96 @@ context-aware feedback and are willing to spend more time and tokens per review.
   forming an opinion.
 - Focuses on the files that matter first, so it handles large PRs without
   drowning in noise.
-- Posts a single Markdown review comment with its findings.
+- Posts one review: a concise summary plus native inline comments on the file
+  and line each finding is about. Placement, provider support, and limitations
+  are the same as for [PR Review](PR_WORKFLOWS_REVIEW.md#inline-review-comments).
 - Optionally submits a formal review decision (approve / request changes) — see
   below.
 
 The bot is **read-only**: this workflow never commits, pushes, creates branches,
-or changes your code. Its only outputs are the review comment and, when you
-enable it, the formal review decision.
+or changes your code. Its only outputs are the review (summary and inline
+comments) and, when you enable it, the formal review decision.
+
+Review runs share a per-PR database lease with plain PR Review. A waiting run
+acquires the lease before reading the latest snapshot; heartbeat renewal keeps
+it held throughout exploration, grounding, publication, and revision-state
+persistence. Cancellation and lease loss prevent further writes. When both
+workflows react to the same update, agentic review takes precedence.
+
+The workspace uses a detached checkout of the snapshot's head SHA, and API file
+reads use that same SHA. A failed pinned checkout stops the review; a failed
+legacy evidence read remains an explicit coverage limitation and never falls
+back to a branch's newer content. If no head SHA is available,
+exploration is limited to the supplied diff, with summary-only publication.
+
+## Legacy evidence recovery
+
+Full reviews using the legacy JSON tool protocol return one bare JSON object:
+either a context request or the completed `summary`/`findings` envelope.
+Optional formal classification lives inside that envelope, not in a second
+trailing object. Native reviews and follow-up answers retain their existing
+protocols.
+
+Evidence is tracked at the pinned revision. An equivalent request whose
+complete evidence remains in the effective request is acknowledged instead of
+being executed or appended again. Mixed file batches fetch only eligible files.
+Evicted evidence may be requested again; a fetch-cache entry is not proof that
+the model still has the source.
+
+A context turn without new or restored usable evidence gets one recovery
+opportunity. Another consecutive non-progress turn fails with
+`stalled-context`. Failed reads and identical excerpts do not count as progress.
+Recovery uses the existing overall and context-round budgets, not extra turns.
+
+Before each provider attempt, the bot budgets instructions, active task,
+pinned revision, history, evidence inventory and reserved output headroom.
+Optional oversized reads become labeled excerpts with included and omitted
+regions and narrower-read guidance. Mandatory task/instruction overflow fails
+with `mandatory-context-limit`, without sending the oversized request.
+Conservative request estimates are policy checks, not exact tokenization;
+the existing bounded prompt-too-long retry remains a last resort.
+
+Known requested evidence that remains unavailable or incomplete degrades an
+otherwise completed review: its summary discloses limited coverage and it
+cannot approve. Eviction alone does not erase previously complete acquisition.
+An unfinished response never becomes a degraded fallback review.
+
+## Failure diagnostics
+
+If the run fails before producing a complete review, the run summary records
+the failure category and known limiting counts. Categories distinguish
+`context-round-limit`, `loop-round-limit`, `stalled-context`,
+`mandatory-context-limit`, `output-token-limit`,
+`incomplete-completion`, `unknown-completion`, `empty-feedback`,
+`setup-failure`, `provider-request-failure`, `publication-failure`, and
+`unknown-execution-failure`.
+
+The detailed workflow step records available `turns`, `contextRounds`,
+`loopRounds`, `outputTokenLimit`, `outputTokens`, `mode`, normalized
+`completion`, `promptCharsEstimate`, `responseChars`, `contextChars`, and
+provider/integration correlation. `requestOccurrences` counts context
+operations; `repeatedRequestOccurrences` counts duplicates, while
+`repeatedRequestRounds` counts turns containing at least one duplicate. The step
+also records `providerCallFailed` and whether the single plain PR failure notice
+was delivered, failed, or unavailable, including a controlled reason when it
+could not be attempted. Unknown metadata is shown as unavailable.
+
+Duplicate identities include the pinned repository ref. Native calls are
+observed in execution order, and legacy requests use the same reviewed
+revision. Branch-switch requests pass through the read-only review policy and
+cannot change either the workspace revision or the diagnostic identity.
+
+Context-exploration rounds and total model turns are separate limits. A
+provider response ending with `END_TURN` does not by itself mean the review
+finished: the agent may still request context. Repeated requests are an
+observation to help investigate a run, not proof of cause. A failure notice
+does not contain partial findings or make a formal review decision. Successful
+reviews do not receive a failure notice, and no-diff runs remain skipped.
+
+Added diagnostics contain bounded metadata only; they do not include prompts,
+model output, source contents, or tool arguments.
+Recovery also distinguishes executed and suppressed context operations using
+safe counts; evidence identities remain private to the run.
 
 ## Settings
 
@@ -41,13 +124,22 @@ PR Review**.
 | `blockerThreshold` | integer | *(empty)* | Maximum allowed `BLOCKER` findings for a formal `APPROVE`. Empty means ignored. |
 | `mediumThreshold` | integer | *(empty)* | Maximum allowed `MEDIUM` findings for a formal `APPROVE`. Empty means ignored. |
 | `lowThreshold` | integer | *(empty)* | Maximum allowed `LOW` findings for a formal `APPROVE`. Empty means ignored. |
+| `doubleCheckEnabled` | boolean | `true` | Select new findings for independent AI verification. |
+| `doubleCheckMinSeverity` | enum | `LOW` | Check new findings at or above `LOW`, `MEDIUM`, `HIGH`, or `BLOCKER`. |
+| `doubleCheckAiIntegrationId` | integer | `0` | Optional second AI integration ID; blank or `0` uses the review integration. |
+
+Each finding needs a verbatim code quote or review-wide citations. The bot
+verifies this evidence against the pinned revision before the AI double-check,
+then drops unsupported findings and suppresses unchanged duplicates. Disputed or
+context-changed prior findings are checked regardless of enablement or severity.
+An unknown integration ID falls back to the review integration with an audit warning.
 
 ### Formal review decision
 
-When `enableFormalReviewDecision` is on, the model classifies its findings as
-`BLOCKER`, `MEDIUM`, or `LOW` and emits a JSON object such as
-`{"blocker": 0, "medium": 1, "low": 2}`. The application then compares each
-count to the configured thresholds:
+When `enableFormalReviewDecision` is on, the model classifies each finding as
+`BLOCKER`, `MEDIUM`, or `LOW`. After grounding, the application counts only
+surviving findings and compares those counts to the configured thresholds.
+Trailing model-provided aggregate counts cannot drive the decision:
 
 - If **all configured thresholds** are satisfied, the bot submits `APPROVE`.
 - If **any configured threshold** is exceeded, the bot submits `REQUEST_CHANGES`.
@@ -56,8 +148,25 @@ count to the configured thresholds:
 - An unset threshold is ignored entirely, so you can enforce only the severities
   that matter to you (for example, only `BLOCKER`).
 
-If the model fails to emit a clean classification, the bot falls back to posting
-a plain review comment so the findings are never lost.
+The decision is submitted together with the inline review, so the approval or
+change request and its comments arrive as one review where the provider allows
+it. A degraded review never approves: held findings, unavailable double-checks,
+unpinned evidence, or unparseable output leave the decision at `NONE` unless
+surviving findings independently require changes. Unparseable output produces
+only a short failure summary, never the model's unverified review text.
+
+Previous findings and human replies are supplied as labeled history, not current
+code. Grounded re-reviews may reply to disputes or withdraw obsolete findings,
+using linked PR comments where native thread operations are unavailable. Failed
+thread actions leave the revision degraded for retry. An explicit request skips
+only a pinned, unchanged, non-degraded revision with no new non-bot comments.
+The bot replies with the reviewed SHA and clears its eyes acknowledgement.
+
+`review-state.lease-ttl` defaults to `10m`; `review-state.lease-wait-max` defaults
+to `30m`. Waiting occurs in the async workflow worker. A timeout posts a failure
+comment and clears the acknowledgement. The double-check shares the application's
+`review.chunking.max-diff-chars-per-chunk` and `review.chunking.max-diff-chunks`
+budgets.
 
 ## The review prompt
 

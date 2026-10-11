@@ -4,6 +4,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.remus.giteabot.agent.session.AgentSessionService;
 import org.remus.giteabot.agent.session.PendingMessage;
 import org.remus.giteabot.agent.shared.AgentMetricsHolder;
+import org.remus.giteabot.ai.AiAuditContext;
 import org.remus.giteabot.ai.AiClient;
 import org.remus.giteabot.ai.AiMessage;
 import org.remus.giteabot.ai.ChatTurn;
@@ -77,22 +78,30 @@ public final class AgentLoop {
 
         ToolingMode resolvedMode = resolveMode(strategy);
         ctx.setToolingMode(resolvedMode);
+        observeMode(ctx, resolvedMode);
         List<ToolDescriptor> tools = resolvedMode == ToolingMode.NATIVE
                 ? strategy.toolDescriptors() : List.of();
+        boolean prepareRequests = resolvedMode == ToolingMode.LEGACY && strategy.usesRequestPreparation();
         log.debug("AgentLoop starting for issue #{}: provider={}, mode={}, tools={}",
                 ctx.issueNumber(), providerTag, resolvedMode, tools.size());
 
         for (int round = 1; round <= budget.maxRounds(); round++) {
-            log.debug("AgentLoop round {}/{} for issue #{}: calling AI (history={} msgs, prompt={} chars, mode={})",
+            // The closing rounds keep their descriptors: empty the list and every client
+            // falls back to its plain-text message shape, which cannot carry the tool
+            // exchanges those rounds replay (see the writer's wrap-up round).
+            log.debug("AgentLoop round {}/{} for issue #{}: calling AI (history={} msgs, prompt={} chars, mode={}, tools={})",
                     round, budget.maxRounds(), ctx.issueNumber(), history.size(),
-                    currentMessage == null ? 0 : currentMessage.length(), resolvedMode);
+                    currentMessage == null ? 0 : currentMessage.length(), resolvedMode, tools.size());
 
             AgentMetricsHolder.recordToolCallMode(modeTag(resolvedMode), providerTag);
 
             long started = System.nanoTime();
             ChatTurn turn;
             try {
-                turn = callAiWithRetry(history, currentMessage, tools, systemPrompt);
+                PreparedTurn prepared = callAiWithRetry(ctx, history, currentMessage, tools,
+                        systemPrompt, round, strategy, prepareRequests);
+                turn = prepared.turn();
+                currentMessage = prepared.currentMessage();
             } finally {
                 AgentMetricsHolder.recordLatency(modeTag(resolvedMode), providerTag,
                         Duration.ofNanos(System.nanoTime() - started));
@@ -103,7 +112,9 @@ public final class AgentLoop {
                     round, budget.maxRounds(), ctx.issueNumber(),
                     aiResponse == null ? 0 : aiResponse.length(),
                     turn.toolCalls().size(), turn.stopReason());
-            pending.add(new PendingMessage("assistant", aiResponse));
+            pending.add(new PendingMessage("assistant", aiResponse,
+                    turn.toolCalls().isEmpty() ? null
+                            : new PendingMessage.ToolPayload(turn.toolCalls(), null)));
 
             // Track token usage (accumulated in-memory on the session; persisted by
             // flushRound) and trigger tool-message truncation when the context
@@ -116,7 +127,15 @@ public final class AgentLoop {
             // inputTokens, those take precedence in TokenUsageTracker.record().
             int promptChars = computePromptChars(history, systemPrompt, currentMessage, tools);
             tokenTracker.record(ctx.session(), turn, promptChars);
-            if (tokenTracker.shouldCompactProactively(ctx.session())) {
+            observeTurn(ctx, new AgentRunContext.RoundObservation(
+                    round,
+                    resolvedMode,
+                    turn.stopReason(),
+                    turn.outputTokens() > 0 ? turn.outputTokens() : null,
+                    budget.maxTokensPerCall(),
+                    promptChars,
+                    aiResponse == null ? 0 : aiResponse.length()));
+            if (!prepareRequests && tokenTracker.shouldCompactProactively(ctx.session())) {
                 log.info("AgentLoop round {}/{} for issue #{}: context budget exceeded (usage: {}%),"
                                 + " truncating tool messages",
                         round, budget.maxRounds(), ctx.issueNumber(),
@@ -142,8 +161,7 @@ public final class AgentLoop {
                 // Include toolResult (not just content) and tool descriptors
                 // in the estimation — these are part of every API call.
                 int historyChars = history.stream()
-                        .mapToInt(m -> (m.getContent() == null ? 0 : m.getContent().length())
-                                + (m.getToolResult() == null ? 0 : m.getToolResult().length()))
+                        .mapToInt(HistoryCompactor::messageChars)
                         .sum();
                 int systemPromptChars = systemPrompt != null ? systemPrompt.length() : 0;
                 int currentMessageChars = currentMessage != null ? currentMessage.length() : 0;
@@ -210,11 +228,7 @@ public final class AgentLoop {
             if (currentMessage != null && !currentMessage.isEmpty()) {
                 history.add(AiMessage.builder().role("user").content(currentMessage).build());
             }
-            history.add(AiMessage.builder()
-                    .role("assistant")
-                    .content(aiResponse)
-                    .toolCalls(turn.toolCalls().isEmpty() ? null : turn.toolCalls())
-                    .build());
+            history.add(turn.toAssistantMessage());
 
             if (decision instanceof StepDecision.ContinueWithToolResults(
                     List<StepDecision.ToolCallResult> results, String follow
@@ -227,10 +241,12 @@ public final class AgentLoop {
                             .toolCallId(r.toolCallId())
                             .toolResult(r.resultText())
                             .build());
-                    // Persist a textual marker in the session log so post-hoc review still shows
-                    // the tool flow. Full structured replay is intentionally out of scope here.
+                    // The row keeps a textual marker for post-hoc review and carries the
+                    // native call id, so a follow-up run can rebuild the pair for the
+                    // provider instead of replaying an orphaned tool message.
                     pending.add(new PendingMessage("tool",
-                            "[" + r.toolCallId() + "] " + r.resultText()));
+                            "[" + r.toolCallId() + "] " + r.resultText(),
+                            new PendingMessage.ToolPayload(null, r.toolCallId())));
                 }
                 currentMessage = (follow == null || follow.isEmpty()) ? "" : follow;
                 if (!currentMessage.isEmpty()) {
@@ -306,11 +322,10 @@ public final class AgentLoop {
         return mode == ToolingMode.NATIVE ? "native" : "legacy";
     }
 
-    /** Sums content + toolResult character counts for all history messages. */
+    /** Sums visible content, tool results and opaque reasoning for all history messages. */
     private static int historyMessageChars(List<AiMessage> history) {
         return history.stream()
-                .mapToInt(m -> (m.getContent() == null ? 0 : m.getContent().length())
-                        + (m.getToolResult() == null ? 0 : m.getToolResult().length()))
+                .mapToInt(HistoryCompactor::messageChars)
                 .sum();
     }
 
@@ -347,40 +362,94 @@ public final class AgentLoop {
      * <p>All other failures, and any failure on the second attempt, are
      * re-thrown to the caller.</p>
      *
-     * @return the {@link ChatTurn} from the successful AI call
+     * Opt-in legacy strategies prepare before each attempt and handle
+     * prompt-too-long recovery themselves, instead of generic compaction.
+     *
+     * @return the successful turn and the prepared current message it used
      * @throws RuntimeException if the failure is not retryable or the retry fails
      */
-    private ChatTurn callAiWithRetry(List<AiMessage> history, String currentMessage,
-                                     List<ToolDescriptor> tools, String systemPrompt) {
+    private PreparedTurn callAiWithRetry(AgentRunContext ctx, List<AiMessage> history, String currentMessage,
+                                         List<ToolDescriptor> tools, String systemPrompt, int round,
+                                         AgentStrategy strategy, boolean prepareRequests) {
         int maxAttempts = 2;
+        boolean aggressive = false;
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            // Preparation failures are local policy failures, not provider failures.
+            if (prepareRequests) {
+                currentMessage = strategy.prepareRequest(ctx, history, currentMessage,
+                        systemPrompt, tools, budget, aiClient, aggressive);
+            }
             try {
-                return aiClient.chatWithTools(history, currentMessage, tools, systemPrompt,
+                AiAuditContext.setRound(round);
+                ChatTurn turn = aiClient.chatWithTools(history, currentMessage, tools, systemPrompt,
                         null, budget.maxTokensPerCall());
+                return new PreparedTurn(turn, currentMessage);
             } catch (RuntimeException e) {
                 boolean promptTooLong = e instanceof HttpClientErrorException clientError
                         && aiClient.isPromptTooLongError(clientError);
                 boolean transientNetworkFailure = isTransientNetworkFailure(e);
 
                 if (attempt == maxAttempts || (!promptTooLong && !transientNetworkFailure)) {
+                    observeProviderCallFailure(ctx);
                     throw e;
                 }
 
                 if (promptTooLong) {
                     log.warn("AgentLoop: AI call failed with prompt-too-long error on attempt {}/{}. "
-                            + "Aggressively compacting history and retrying. Error: {}",
+                            + "Preparing a smaller request and retrying. Error: {}",
                             attempt, maxAttempts, e.getMessage());
-                    // Aggressive compaction: keep only the last 2 compaction units
-                    compactor.compactAggressively(history);
+                    if (prepareRequests) {
+                        aggressive = true;
+                    } else {
+                        // Generic compaction keeps only the last two exchange units.
+                        compactor.compactAggressively(history);
+                    }
                 } else {
                     log.warn("AgentLoop: AI call failed with a transient network error on attempt {}/{}. "
                             + "Retrying without changing history. Error: {}",
                             attempt, maxAttempts, e.getMessage());
                 }
+            } finally {
+                AiAuditContext.clearRound();
             }
         }
         // Unreachable, but keeps the compiler happy
         throw new IllegalStateException("callAiWithRetry: exceeded max retries");
+    }
+
+    private record PreparedTurn(ChatTurn turn, String currentMessage) {}
+
+    private static void observeTurn(AgentRunContext ctx, AgentRunContext.RoundObservation observation) {
+        if (ctx.roundObserver() == null) {
+            return;
+        }
+        try {
+            ctx.roundObserver().accept(observation);
+        } catch (RuntimeException e) {
+            log.warn("AgentLoop round observer failed; continuing without changing the run outcome");
+        }
+    }
+
+    private static void observeMode(AgentRunContext ctx, ToolingMode mode) {
+        if (ctx.modeObserver() == null) {
+            return;
+        }
+        try {
+            ctx.modeObserver().accept(mode);
+        } catch (RuntimeException e) {
+            log.warn("AgentLoop mode observer failed; continuing without changing the run outcome");
+        }
+    }
+
+    private static void observeProviderCallFailure(AgentRunContext ctx) {
+        if (ctx.providerCallFailureObserver() == null) {
+            return;
+        }
+        try {
+            ctx.providerCallFailureObserver().run();
+        } catch (RuntimeException e) {
+            log.warn("AgentLoop provider-failure observer failed; preserving the provider error");
+        }
     }
 
     static boolean isTransientNetworkFailure(Throwable error) {

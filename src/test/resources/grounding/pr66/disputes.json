@@ -1,0 +1,5 @@
+{
+  "historical-intended-fix": "@gitea-buddy This finding describes the bug this PR fixes, not an outstanding bug in the current revision. The old `409` selector is removed. Current code uses:\n\n```typescript\nexpect([downloadA.status, downloadB.status].sort()).toEqual([200, 428]);\nconst failed = firstResponse.status === 428 ? firstResponse : secondResponse;\nexpect(await failed.clone().text()).toContain(\"Open Download again\");\n```\n\nThe surrounding loop checks both response orderings. We reproduced the ZIP-versus-error-page assertion failure deterministically with the old 409 selector, then all seven integration tests passed with 428. Your own finding explicitly says this change fixes the test; that is not evidence of a HIGH-severity defect in the added code.\n\nPlease acknowledge this as a resolved historical bug, retract the severity finding against the current revision, and report only defects that remain in the new code.",
+  "valid": "The synthetic positive control is invalid; the cache header assertion already exists.",
+  "false": "The synthetic positive control cannot apply because this file has no cache header assertion."
+}

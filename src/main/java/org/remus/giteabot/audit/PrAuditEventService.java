@@ -92,6 +92,82 @@ public class PrAuditEventService {
     }
 
 
+    /** Records one dropped, held, or withdrawn finding with its evidence and disposition reason. */
+    @Transactional
+    public void recordFindingDisposition(PrAuditEvent event, AuditEventType dispositionType,
+                                         String findingId, String path, String side, Integer line,
+                                         String quote, String severity, String category, String stage,
+                                         String reason, String headSha, String effectiveBaseSha) {
+        if (dispositionType != AuditEventType.FINDING_DROPPED
+                && dispositionType != AuditEventType.FINDING_HELD
+                && dispositionType != AuditEventType.FINDING_WITHDRAWN) {
+            throw new IllegalArgumentException("dispositionType must be a finding disposition event type");
+        }
+        requireRun(event);
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("findingId", findingId);
+        payload.put("path", path);
+        payload.put("side", side);
+        payload.put("line", line);
+        payload.put("quoteHash", sha256(quote));
+        payload.put("quotePreview", preview(quote));
+        payload.put("severity", severity);
+        payload.put("category", category);
+        payload.put("stage", stage);
+        payload.put("reason", reason);
+        payload.put("headSha", headSha);
+        payload.put("effectiveBaseSha", effectiveBaseSha);
+
+        record(runEvent(event, dispositionType, toJson(payload)));
+    }
+
+    /** Records a run-level warning that affected grounding behavior. */
+    @Transactional
+    public void recordGroundingWarning(PrAuditEvent event, String stage, String reason,
+                                      String headSha, String effectiveBaseSha) {
+        requireRun(event);
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("stage", stage);
+        payload.put("reason", reason);
+        payload.put("headSha", headSha);
+        payload.put("effectiveBaseSha", effectiveBaseSha);
+
+        record(runEvent(event, AuditEventType.GROUNDING_WARNING, toJson(payload)));
+    }
+
+    private static PrAuditEvent runEvent(PrAuditEvent context, AuditEventType type, String payload) {
+        return PrAuditEvent.builder()
+                .eventType(type).eventPayloadJson(payload)
+                .botId(context.getBotId()).repoOwner(context.getRepoOwner()).repoName(context.getRepoName())
+                .prNumber(context.getPrNumber()).runId(context.getRunId())
+                .actorType(context.getActorType()).actorId(context.getActorId())
+                .stepIndex(context.getStepIndex()).stepName(context.getStepName()).stepStatus(context.getStepStatus())
+                .aiSessionId(context.getAiSessionId()).aiUsageSessionId(context.getAiUsageSessionId())
+                .correlationId(context.getCorrelationId())
+                .build();
+    }
+
+    private static void requireRun(PrAuditEvent event) {
+        if (event == null) throw new IllegalArgumentException("event must not be null");
+        if (event.getRunId() == null) throw new IllegalArgumentException("runId must not be null");
+    }
+
+    private static String preview(String quote) {
+        return quote != null && quote.length() > 200 ? quote.substring(0, 200) : quote;
+    }
+
+    private static String sha256(String value) {
+        if (value == null) return null;
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            return HexFormat.of().formatHex(digest.digest(value.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 not available", e);
+        }
+    }
+
     @Transactional(readOnly = true)
     public List<PrAuditEvent> findByBotAndRepoAndPr(Long botId, String repoOwner,
                                                      String repoName, Long prNumber) {

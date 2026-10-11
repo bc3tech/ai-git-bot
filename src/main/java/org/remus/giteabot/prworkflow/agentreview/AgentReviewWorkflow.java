@@ -9,7 +9,9 @@ import org.remus.giteabot.prworkflow.PrWorkflowContext;
 import org.remus.giteabot.prworkflow.WorkflowParamField;
 import org.remus.giteabot.prworkflow.WorkflowParamsSchema;
 import org.remus.giteabot.prworkflow.WorkflowResult;
+import org.remus.giteabot.prworkflow.WorkflowCancelledException;
 import org.remus.giteabot.prworkflow.config.WorkflowSelectionService;
+import org.remus.giteabot.review.grounding.DoubleCheckSettings;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
@@ -63,6 +65,12 @@ public class AgentReviewWorkflow implements PrWorkflow {
     @Override public PrWorkflowCategory category() { return PrWorkflowCategory.REVIEW; }
 
     @Override
+    public boolean supersedesReviews(Map<String, String> hints) {
+        String clarification = hints == null ? null : hints.get(PrWorkflowContext.HINT_AGENTIC_REVIEW_CLARIFICATION);
+        return clarification == null || clarification.isBlank();
+    }
+
+    @Override
     public WorkflowParamsSchema paramsSchema() {
         return WorkflowParamsSchema.of(
                 new WorkflowParamField(AgentReviewParam.MAX_TOOL_ROUNDS,
@@ -94,7 +102,10 @@ public class AgentReviewWorkflow implements PrWorkflow {
                         "Low must be less or equal",
                         WorkflowParamField.ParamType.INTEGER, false,
                         null,
-                        "Maximum allowed LOW findings for a formal APPROVE. Leave empty to ignore."));
+                        "Maximum allowed LOW findings for a formal APPROVE. Leave empty to ignore."),
+                DoubleCheckSettings.enabledField(AgentReviewParam.DOUBLE_CHECK_ENABLED),
+                DoubleCheckSettings.severityField(AgentReviewParam.DOUBLE_CHECK_MIN_SEVERITY),
+                DoubleCheckSettings.integrationField(AgentReviewParam.DOUBLE_CHECK_AI_INTEGRATION_ID));
     }
 
     @Override
@@ -107,7 +118,19 @@ public class AgentReviewWorkflow implements PrWorkflow {
             return doClarification(context, clarification);
         }
 
-        Map<String, Object> params = resolveParams(bot);
+        context.requireActive("before running agentic review");
+
+        Map<String, Object> params;
+        AgentReviewService service;
+        try {
+            params = resolveParams(bot);
+            service = serviceFactory.create(bot, DoubleCheckSettings.fromParams(params));
+        } catch (WorkflowCancelledException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            return complete(context, "agentic-review",
+                    serviceFactory.reportSetupFailure(bot, payload, context.runId(), false, context::requireActive));
+        }
         int maxToolRounds = intParam(params, AgentReviewParam.MAX_TOOL_ROUNDS, DEFAULT_MAX_TOOL_ROUNDS);
         boolean enableFormalDecision = boolParam(params, AgentReviewParam.ENABLE_FORMAL_REVIEW_DECISION, false);
         String decisionPrompt = strParam(params, AgentReviewParam.FORMAL_REVIEW_DECISION_PROMPT,
@@ -118,37 +141,62 @@ public class AgentReviewWorkflow implements PrWorkflow {
                 integerParam(params, AgentReviewParam.LOW_THRESHOLD));
 
         context.requireActive("before running agentic review");
-
-        AgentReviewService.ReviewResult reviewed = serviceFactory.create(bot)
-                .reviewPullRequest(payload, maxToolRounds, enableFormalDecision, decisionPrompt, thresholds,
-                        context.runId(), context.auditToolCallConsumer());
-
-        WorkflowResult result = switch (reviewed) {
-            case POSTED -> WorkflowResult.success("Agentic review posted");
-            case NO_DIFF -> WorkflowResult.skipped("No diff to review");
-            case FAILED -> WorkflowResult.failed("Agentic review failed; no complete review was produced");
-        };
-        context.appendStep("agentic-review", result.summary());
-        return result;
+        AgentReviewService.DetailedResult reviewed = service.reviewPullRequestDetailed(
+                payload, maxToolRounds, enableFormalDecision, decisionPrompt, thresholds,
+                context.runId(), context.auditToolCallConsumer(), context::requireActive, context.explicitRequest());
+        return complete(context, "agentic-review", reviewed);
     }
 
     private WorkflowResult doClarification(PrWorkflowContext context, String userQuestion) {
         Bot bot = context.bot();
         context.requireActive("before running agentic clarification");
 
-        Map<String, Object> params = resolveParams(bot);
+        Map<String, Object> params;
+        AgentReviewService service;
+        try {
+            params = resolveParams(bot);
+            service = serviceFactory.create(bot);
+        } catch (WorkflowCancelledException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            return complete(context, "agentic-clarification",
+                    serviceFactory.reportSetupFailure(bot, context.payload(), context.runId(), true, context::requireActive));
+        }
         int maxToolRounds = intParam(params, AgentReviewParam.MAX_TOOL_ROUNDS, DEFAULT_MAX_TOOL_ROUNDS);
 
-        AgentReviewService.ReviewResult answered = serviceFactory.create(bot)
-                .answerClarification(context.payload(), userQuestion, maxToolRounds);
+        AgentReviewService.DetailedResult answered = service.answerClarificationDetailed(
+                context.payload(), userQuestion, maxToolRounds, context.runId());
+        return complete(context, "agentic-clarification", answered);
+    }
 
-        WorkflowResult result = switch (answered) {
-            case POSTED -> WorkflowResult.success("Clarification posted");
-            case NO_DIFF -> WorkflowResult.skipped("No diff to answer clarification");
-            case FAILED -> WorkflowResult.failed("No clarification produced");
+    private WorkflowResult complete(PrWorkflowContext context, String stepName,
+                                    AgentReviewService.DetailedResult detailed) {
+        WorkflowResult result = switch (detailed.result()) {
+            case POSTED -> WorkflowResult.success(stepName.equals("agentic-review")
+                    ? "Agentic review posted" : "Clarification posted");
+            case SKIPPED -> WorkflowResult.skipped("No changes since last review");
+            case NO_DIFF -> WorkflowResult.skipped(stepName.equals("agentic-review")
+                    ? "No diff to review" : "No diff to answer clarification");
+            case FAILED -> WorkflowResult.failed(failureSummary(stepName, detailed));
         };
-        context.appendStep("agentic-clarification", result.summary());
+        String excerpt = detailed.failure() == null ? result.summary()
+                : detailed.failure().details() + "; noticeStatus=" + detailed.noticeStatus()
+                + "; noticeReason=" + (detailed.noticeReason() == null
+                ? "unavailable" : detailed.noticeReason());
+        try {
+            context.appendStep(stepName, excerpt);
+        } catch (RuntimeException e) {
+            log.warn("Could not persist agentic-review diagnostics; preserving run result: {}", result.summary());
+        }
         return result;
+    }
+
+    private String failureSummary(String stepName, AgentReviewService.DetailedResult detailed) {
+        String subject = detailed.failure() == null ? "unknown-execution-failure"
+                : detailed.failure().summary();
+        String prefix = stepName.equals("agentic-review") ? "Agentic review failed" : "Clarification failed";
+        return prefix + " (" + subject + "; notice "
+                + detailed.noticeStatus().name().toLowerCase() + ")";
     }
 
     private Map<String, Object> resolveParams(Bot bot) {

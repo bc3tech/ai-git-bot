@@ -3,6 +3,7 @@ package org.remus.giteabot.agent.loop;
 import lombok.Setter;
 import org.remus.giteabot.agent.session.AgentSession;
 import org.remus.giteabot.prworkflow.agentreview.DiffSummary;
+import org.remus.giteabot.ai.StopReason;
 
 import java.nio.file.Path;
 import java.util.function.Consumer;
@@ -26,6 +27,12 @@ public final class AgentRunContext {
     private DiffSummary diffSummary;
     @Setter
     private Consumer<ToolCallRecord> auditToolCallConsumer;
+    @Setter
+    private Consumer<RoundObservation> roundObserver;
+    @Setter
+    private Consumer<ToolingMode> modeObserver;
+    @Setter
+    private Runnable providerCallFailureObserver;
 
     public AgentRunContext(AgentSession session, String owner, String repo,
                            Long issueNumber, Path workspaceDir, String baseBranch) {
@@ -46,6 +53,20 @@ public final class AgentRunContext {
     public ToolingMode toolingMode() { return toolingMode; }
     public DiffSummary diffSummary() { return diffSummary; }
     public Consumer<ToolCallRecord> auditToolCallConsumer() { return auditToolCallConsumer; }
+    public Consumer<RoundObservation> roundObserver() { return roundObserver; }
+    public Consumer<ToolingMode> modeObserver() { return modeObserver; }
+    public Runnable providerCallFailureObserver() { return providerCallFailureObserver; }
+
+    /** Metadata-only observation; never includes prompts, responses, or tool arguments. */
+    public record RoundObservation(
+            int turn,
+            ToolingMode mode,
+            StopReason completionReason,
+            Long outputTokens,
+            int outputTokenLimit,
+            int promptCharacterEstimate,
+            int responseCharacters
+    ) {}
 
     public record ToolCallRecord(
             String toolName,

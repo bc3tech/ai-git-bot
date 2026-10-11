@@ -121,6 +121,36 @@ class WorkflowConfigurationControllerMvcTest {
         }
     }
 
+    @Test
+    @WithMockUser(roles = "ADMIN")
+    void doubleCheckSettingsRenderAndPersistForBothReviewWorkflows() throws Exception {
+        MockMvc mvc = MockMvcBuilders.webAppContextSetup(wac).apply(springSecurity()).build();
+        Long cfgId = tx.execute(s -> {
+            WorkflowConfiguration cfg = new WorkflowConfiguration();
+            cfg.setName("Double-check-" + System.nanoTime());
+            cfg.setCreatedAt(Instant.now());
+            cfg.setUpdatedAt(Instant.now());
+            return configurationRepository.save(cfg).getId();
+        });
+        for (String key : java.util.List.of("review", "agentic-review")) {
+            PrWorkflow workflow = registry.all().stream().filter(w -> key.equals(w.key())).findFirst().orElseThrow();
+            assertEquals("true", workflow.paramsSchema().require("doubleCheckEnabled").defaultValue());
+            assertEquals("LOW", workflow.paramsSchema().require("doubleCheckMinSeverity").defaultValue());
+            assertEquals("0", workflow.paramsSchema().require("doubleCheckAiIntegrationId").defaultValue());
+            Map<String, String> values = Map.of("doubleCheckEnabled", "false",
+                    "doubleCheckMinSeverity", "HIGH", "doubleCheckAiIntegrationId", "42");
+            post1(mvc, cfgId, key, values);
+            Map<String, String> stored = tx.execute(s -> selectionRepository
+                    .findByConfigurationIdAndWorkflowKey(cfgId, key).orElseThrow().getParamsMap());
+            values.forEach((name, value) -> assertEquals(value, stored.get(name)));
+            String html = mvc.perform(get("/system-settings/workflow-configurations/{id}/workflows", cfgId))
+                    .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+            for (String name : values.keySet()) {
+                assertTrue(html.contains("name=\"params." + key + "." + name + "\""));
+            }
+        }
+    }
+
     private void post1(MockMvc mvc, Long cfgId, String key,
                        Map<String, String> values) throws Exception {
         var req = post("/system-settings/workflow-configurations/{id}/workflows/save", cfgId)

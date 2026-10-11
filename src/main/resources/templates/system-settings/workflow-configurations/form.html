@@ -17,8 +17,6 @@
             </a>
         </div>
 
-        <div th:if="${error}" class="alert alert-danger" th:text="${error}"></div>
-
         <form th:action="@{${workflowConfigBaseUrl + '/save'}}" method="post"
               th:object="${workflowConfiguration}">
             <input type="hidden" th:field="*{id}"/>

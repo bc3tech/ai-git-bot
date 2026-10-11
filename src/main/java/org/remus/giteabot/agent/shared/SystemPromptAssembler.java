@@ -53,6 +53,7 @@ public class SystemPromptAssembler {
     public enum PromptKind {
         ISSUE_AGENT("issue-agent"),
         WRITER_AGENT("writer-agent"),
+        REVIEW_AGENT("review-agent"),
         E2E_AGENT("e2e-agent");
 
         private final String fileBase;
@@ -90,7 +91,7 @@ public class SystemPromptAssembler {
      *                             render every catalog tool" (test paths only)
      * @param mcpToolCatalog       the MCP tool catalog to inline in LEGACY mode
      * @param mode                 LEGACY or NATIVE
-     * @param kind                 ISSUE_AGENT or WRITER_AGENT
+     * @param kind                 agent role whose transport protocol should be appended
      */
     public String assemble(String basePrompt,
                            ToolCatalog toolCatalog,
@@ -131,6 +132,7 @@ public class SystemPromptAssembler {
         return switch (kind) {
             case ISSUE_AGENT  -> legacyRenderer.renderIssueAgent(toolCatalog, allowedBuiltinTools);
             case WRITER_AGENT -> legacyRenderer.renderWriterAgent(toolCatalog, allowedBuiltinTools);
+            case REVIEW_AGENT -> legacyRenderer.renderReviewAgent(toolCatalog, allowedBuiltinTools);
             case E2E_AGENT    -> legacyRenderer.renderE2eAgent(toolCatalog, allowedBuiltinTools);
         };
     }
@@ -143,7 +145,9 @@ public class SystemPromptAssembler {
     }
 
     private String loadNativeTemplate(PromptKind kind) {
-        String resourcePath = "/prompts/native/" + kind.fileBase() + "-tool-protocol.md";
+        // Review previously used the writer native hint; keep that transport contract unchanged.
+        PromptKind nativeKind = kind == PromptKind.REVIEW_AGENT ? PromptKind.WRITER_AGENT : kind;
+        String resourcePath = "/prompts/native/" + nativeKind.fileBase() + "-tool-protocol.md";
         return NATIVE_TEMPLATE_CACHE.computeIfAbsent(resourcePath, this::readResource);
     }
 
@@ -163,4 +167,3 @@ public class SystemPromptAssembler {
         }
     }
 }
-

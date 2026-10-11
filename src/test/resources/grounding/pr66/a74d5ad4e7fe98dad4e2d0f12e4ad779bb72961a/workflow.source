@@ -1,0 +1,18 @@
+          persist-credentials: false
+
+      - name: Preflight release state
+        env:
+          RELEASE_VERSION: ${{ github.event.inputs.version }}
+          GITEA_TOKEN: [redacted]
+          PLUGIN_PUBLISH_TOKEN: [redacted]
+        run: pwsh -NoProfile -File eng/Publish-Plugin.ps1 -Preflight
+
+      - name: Install release dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Gate the plugin artifact and publish or resume the release
+        env:
+          RELEASE_VERSION: ${{ github.event.inputs.version }}
+          GITEA_TOKEN: [redacted]
+          PLUGIN_PUBLISH_TOKEN: [redacted]
+        run: pwsh -NoProfile -File eng/Publish-Plugin.ps1

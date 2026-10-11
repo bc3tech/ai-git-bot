@@ -234,6 +234,18 @@ default; requires a Claude 5.x model (`claude-fable-5`, `claude-opus-5`,
 | `JPA_DDL_AUTO` | `validate` | Hibernate DDL auto mode. |
 | `FLYWAY_ENABLED` | `true` | Enable Flyway database migrations. |
 
+#### OpenRouter settings upgrade (V56)
+
+The H2 and PostgreSQL `V56__openrouter_settings.sql` migrations deliberately use `ADD COLUMN IF NOT EXISTS` to preserve settings when some OpenRouter columns already exist. This supports partial-column upgrades and SQL replay; it does **not** detect or repair schema drift. Flyway checksum validation does not validate existing column definitions.
+
+If these columns were added manually, verify the following definitions on `ai_integrations` before upgrading. All three columns must be **NOT NULL**; reconcile mismatches explicitly after backing up the database rather than relying on the existence guards.
+
+| Column | Type | Default |
+|--------|------|---------|
+| `openrouter_region` | `VARCHAR(16)` | `'GLOBAL'` |
+| `openrouter_data_collection` | `VARCHAR(16)` | `'DENY'` |
+| `openrouter_zdr` | `BOOLEAN` | `FALSE` |
+
 ### HTTP Client Timeouts (Optional)
 
 These timeouts apply to all outbound HTTP clients, including AI providers and Git host APIs:
@@ -307,9 +319,14 @@ The published image is a **multi-arch manifest** covering `linux/amd64` and
 automatically — including on Apple Silicon, AWS Graviton and Raspberry Pi 4/5
 (64-bit OS).
 
-Both variants ship the same agent toolchain (JDK/Maven, Node.js 22, Python,
-Go, Rust, .NET SDK, C/C++, Ruby, k6, Playwright and Cypress). Two
-architecture-specific details are worth knowing:
+Both variants ship the same agent toolchain (JDK/Maven, Node.js 22 with npm and pnpm, Python,
+Go, Rust, .NET SDK, C/C++, Ruby, k6, Playwright and Cypress).
+
+pnpm is installed globally and available to the non-root app user, including when
+called by a repository's `npm test` script. Its version is pinned by the
+`PNPM_VERSION` Docker build argument (default `10.11.0`).
+
+Two architecture-specific details are worth knowing:
 
 - **k6** is installed from the Grafana APT repository on `amd64` and from the
   official release tarball on `arm64`, because that repository publishes no
@@ -379,6 +396,7 @@ Included metrics:
 | `giteabot_ai_usage_output_tokens{integration}` | gauge | Total output tokens per AI integration |
 | `giteabot_ai_errors` | gauge | Total AI provider errors |
 | `giteabot_audit_tool_calls` | gauge | Total tool calls recorded in the audit trail |
+| `giteabot_agent_sessions{status}` | gauge | Coding-agent sessions per status — terminal statuses (`answered`, `failed`, `completed`, …) only grow, so alert on `answered` to catch runs that answered instead of changing code |
 | `prworkflow.run_total` | counter | PR workflow runs by workflow and status |
 | `prworkflow.run_duration_seconds` | timer | PR workflow run durations |
 | `agent.tool_calls_total{provider}` | counter | Individual tool-call invocations per provider |

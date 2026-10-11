@@ -103,36 +103,17 @@ class BitbucketWebhookHandlerTest {
     }
 
     @Test
-    void ownerReviewAgainComment_triggersReview() {
-        lenient().when(botWebhookService.isReviewAgainRequest(any(WebhookPayload.class), eq("@ai_bot"))).thenReturn(true);
-        lenient().when(botWebhookService.isReviewAgainRequestFromPullRequestAuthor(any(WebhookPayload.class), eq("@ai_bot")))
-                .thenReturn(true);
-
+    void reviewAgainComment_routesToBotCommandWhichRunsTheReview() {
         ResponseEntity<String> response = handler.handleWebhook(bot, "pullrequest:comment_created",
                 commentPayload("@ai_bot - Review the Pull-Request again", null));
 
-        assertEquals("review triggered", response.getBody());
-        verify(botWebhookService).reviewPullRequest(eq(bot), any(WebhookPayload.class));
-        verify(botWebhookService, never()).handleBotCommand(any(), any());
-    }
-
-    @Test
-    void nonOwnerReviewAgainComment_isIgnored() {
-        lenient().when(botWebhookService.isReviewAgainRequest(any(WebhookPayload.class), eq("@ai_bot"))).thenReturn(true);
-        lenient().when(botWebhookService.isReviewAgainRequestFromPullRequestAuthor(any(WebhookPayload.class), eq("@ai_bot")))
-                .thenReturn(false);
-
-        ResponseEntity<String> response = handler.handleWebhook(bot, "pullrequest:comment_created",
-                commentPayload("@ai_bot - Review the Pull-Request again", null));
-
-        assertEquals("ignored", response.getBody());
+        assertEquals("command received", response.getBody());
+        verify(botWebhookService).handleBotCommand(eq(bot), any(WebhookPayload.class));
         verify(botWebhookService, never()).reviewPullRequest(any(), any());
     }
 
     @Test
     void regularOwnerMention_routesToBotCommand() {
-        lenient().when(botWebhookService.isReviewAgainRequest(any(WebhookPayload.class), eq("@ai_bot"))).thenReturn(false);
-
         ResponseEntity<String> response = handler.handleWebhook(bot, "pullrequest:comment_created",
                 commentPayload("@ai_bot please explain this", null));
 

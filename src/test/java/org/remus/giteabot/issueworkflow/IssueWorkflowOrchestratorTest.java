@@ -6,6 +6,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.remus.giteabot.admin.AiIntegration;
+import org.remus.giteabot.admin.AiIntegrationConcurrencyLimiter;
 import org.remus.giteabot.admin.Bot;
 import org.remus.giteabot.admin.BotService;
 import org.remus.giteabot.ai.AiRetryContext;
@@ -20,8 +22,12 @@ import org.remus.giteabot.prworkflow.config.WorkflowSelectionService;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.mockito.ArgumentMatchers.any;
@@ -78,7 +84,7 @@ class IssueWorkflowOrchestratorTest {
         orchestrator = new IssueWorkflowOrchestrator(
                 new IssueWorkflowRegistry(List.of(recording)),
                 workflowSelectionService, botService, eventHookPublisher,
-                retryNotices, commentAcknowledgement);
+                retryNotices, commentAcknowledgement, new AiIntegrationConcurrencyLimiter());
         bot = new Bot();
         bot.setName("test-bot");
         WorkflowConfiguration configuration = new WorkflowConfiguration();
@@ -89,6 +95,44 @@ class IssueWorkflowOrchestratorTest {
                 .thenReturn(List.of("issue-x"));
         lenient().when(workflowSelectionService.resolveParams(5L, "issue-x"))
                 .thenReturn(Map.of("k", "v"));
+    }
+
+    @Test
+    void runAssigned_doesNotReportACancelledWaitAsAFailure() throws Exception {
+        AiIntegration integration = new AiIntegration();
+        integration.setId(3L);
+        integration.setParallelWorkerLimit(1);
+        bot.setAiIntegration(integration);
+        AiIntegrationConcurrencyLimiter limiter = new AiIntegrationConcurrencyLimiter();
+        IssueWorkflowOrchestrator limitedOrchestrator = new IssueWorkflowOrchestrator(
+                new IssueWorkflowRegistry(List.of(recording)), workflowSelectionService, botService,
+                eventHookPublisher, retryNotices, commentAcknowledgement, limiter);
+
+        CountDownLatch holding = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        Thread holder = new Thread(() -> limiter.runWithPermit(integration, () -> {
+            holding.countDown();
+            try { release.await(5, TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        }));
+        holder.start();
+        assertTrue(holding.await(5, TimeUnit.SECONDS), "the first job must hold the only slot");
+
+        Thread waiting = new Thread(() -> limitedOrchestrator.runAssigned(bot, issuePayload()));
+        waiting.start();
+        Thread.sleep(150);
+        waiting.interrupt();
+        waiting.join(5000);
+        assertFalse(waiting.isAlive());
+
+        release.countDown();
+        holder.join(5000);
+        assertFalse(holder.isAlive(), "the slot holder must have finished");
+
+        // A cancelled wait is not a workflow failure: the workflow never ran, no
+        // STARTED/FAILED event went out and no error is recorded against the bot.
+        assertEquals(0, recording.assigned.size(), "the workflow must not run without a slot");
+        verify(botService, never()).recordError(any(), any());
+        verify(eventHookPublisher, never()).publish(any(), any(), any(), any(), any(), any(), anyMap());
     }
 
     @AfterEach
@@ -223,7 +267,7 @@ class IssueWorkflowOrchestratorTest {
         orchestrator = new IssueWorkflowOrchestrator(
                 new IssueWorkflowRegistry(List.of(failing)),
                 workflowSelectionService, botService, eventHookPublisher,
-                retryNotices, commentAcknowledgement);
+                retryNotices, commentAcknowledgement, new AiIntegrationConcurrencyLimiter());
 
         orchestrator.runComment(bot, issuePayload());
 

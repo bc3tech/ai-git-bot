@@ -14,11 +14,8 @@ import tools.jackson.core.JacksonException;
 import tools.jackson.databind.ObjectMapper;
 
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -135,63 +132,6 @@ public class AiResponseParser {
             log.debug("JSON content that failed to parse: {}", jsonStr);
             return null;
         }
-    }
-
-    /**
-     * Parses the AI's response for requested files, validating them against the repository tree.
-     *
-     * @param aiResponse The raw AI response
-     * @param tree       The repository file tree
-     * @return List of valid requested file paths
-     */
-    public List<String> parseRequestedFiles(String aiResponse, List<Map<String, Object>> tree) {
-        List<String> requestedFiles = new ArrayList<>();
-
-        // Build set of valid paths
-        Set<String> validPaths = new HashSet<>();
-        for (Map<String, Object> entry : tree) {
-            String path = (String) entry.getOrDefault("path", "");
-            String type = (String) entry.getOrDefault("type", "blob");
-            if ("blob".equals(type)) {
-                validPaths.add(path);
-            }
-        }
-
-        // Try to extract JSON from response
-        String jsonStr = extractJsonFromResponse(aiResponse);
-        if (jsonStr != null) {
-            jsonStr = truncateToFirstJsonObject(jsonStr);
-            try {
-                FileRequestResponse response = objectMapper.readValue(jsonStr, FileRequestResponse.class);
-                if (response != null && response.getRequestedFiles() != null) {
-                    for (String file : response.getRequestedFiles()) {
-                        if (validPaths.contains(file)) {
-                            requestedFiles.add(file);
-                        } else {
-                            log.debug("Requested file not found in tree: {}", file);
-                        }
-                    }
-                }
-            } catch (JacksonException e) {
-                log.warn("Failed to parse file request response: {}", e.getMessage());
-            }
-        }
-
-        // If parsing failed, fall back to pattern matching
-        if (requestedFiles.isEmpty()) {
-            for (String path : validPaths) {
-                if (aiResponse.contains(path)) {
-                    requestedFiles.add(path);
-                }
-            }
-        }
-
-        // Limit to 30 files
-        if (requestedFiles.size() > 30) {
-            requestedFiles = requestedFiles.subList(0, 30);
-        }
-
-        return requestedFiles;
     }
 
     /**
@@ -519,14 +459,5 @@ public class AiResponseParser {
         private String id;
         private String tool;
         private Object args;
-    }
-
-    @Data
-    @NoArgsConstructor
-    @JsonIgnoreProperties(ignoreUnknown = true)
-    static class FileRequestResponse {
-        private String reasoning;
-        @JsonAlias("requestFiles")
-        private List<String> requestedFiles;
     }
 }

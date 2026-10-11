@@ -4,19 +4,41 @@ This guide covers running AI-Git-Bot with [llama.cpp](https://github.com/ggergan
 
 ## Overview
 
-llama.cpp is a high-performance C++ inference engine for LLMs that supports a wide range of quantized model formats (GGUF). The bot connects to llama.cpp's native `/completion` endpoint, which provides full support for GBNF grammar constraints.
+llama.cpp is a high-performance C++ inference engine for LLMs that supports a wide range of quantized model formats (GGUF). The bot connects to llama.cpp's OpenAI-compatible `/v1/completions` endpoint, which supports model routing and GBNF grammar constraints.
 
 ### Key Advantages over Ollama
 
 | Feature | llama.cpp | Ollama |
 |---------|-----------|--------|
-| **GBNF Grammar** | ✅ Full native support | ❌ JSON mode only |
+| **GBNF Grammar** | ✅ Supported through the OpenAI-compatible endpoint | ❌ JSON mode only |
 | **Model Format** | GGUF files directly | Ollama-specific format |
 | **Agent Reliability** | ✅ Grammar-constrained JSON | ⚠️ Often fails |
 | **Memory Efficiency** | Highly optimized | Good |
 | **Setup Complexity** | Model download required | `ollama pull` |
 
 The **GBNF grammar support** is the main advantage for this bot — it allows constraining the model's output to valid JSON matching the agent's expected schema, significantly improving reliability for issue implementation.
+
+The bot requests streaming usage counters with `stream_options.include_usage`. Use a current llama.cpp server build that supports this OpenAI-compatible option if token usage reporting is required; completions remain supported when an older build omits those counters.
+
+### Agentic Review recovery
+
+Full legacy Agentic Review uses bare JSON for both exploration and completed
+reviews, matching the active grammar. Optional classification is nested inside
+the review object. This does not require native function calling or a model
+upgrade.
+
+Repeated requests for retained complete evidence receive one recovery turn
+without replaying full source blocks. Continued non-progress fails explicitly;
+large optional reads yield labeled excerpts and narrower-read guidance.
+Completed reviews with unresolved requested evidence disclose limited coverage
+and cannot approve.
+
+Pre-send budgeting includes the rendered ChatML request and output headroom.
+Its conservative estimate is not an exact tokenizer or a guarantee of provider
+fit; the bounded prompt-too-long retry remains available. Configure the AI
+integration's context window to match the server. Higher round limits are not a
+remedy for stalled repetition. See [Agentic PR Review](PR_WORKFLOWS_AGENTIC_REVIEW.md#legacy-evidence-recovery)
+for the failure categories and unchanged safety gates.
 
 ## Quick Start
 
@@ -35,7 +57,7 @@ Then start the bot and configure the AI Integration in the **web UI**:
 1. Go to **AI Integrations → New Integration**
 2. Select **llamacpp** as the provider type
 3. Set the **API URL** to `http://localhost:8081`
-4. Enter the **Model** name (e.g., `qwen2.5-coder-7b-instruct`)
+4. Enter the **Model** identifier (e.g., `qwen2.5-coder-7b-instruct`)
 5. Click **Save**
 
 **For CPU-only systems**, the default docker-compose uses the CPU-only image. For GPU acceleration, change the image to `ghcr.io/ggml-org/llama.cpp:server-cuda13` and uncomment the `deploy.resources` section.
@@ -47,7 +69,7 @@ All AI provider settings are configured through the **web UI** under **AI Integr
 1. Go to **AI Integrations → New Integration**
 2. Select **llamacpp** as the provider type
 3. Set the **API URL** to your llama.cpp server (e.g., `http://localhost:8081` or `http://llamacpp:8081` if using Docker networking)
-4. Enter the **Model** name (informational — the actual model is set in the llama.cpp server)
+4. Enter the model name configured in the server. With a single model launched using `--model`, llama.cpp ignores this value; in router mode, enter the exact model ID returned by `GET /v1/models` because it selects the model for each request.
 5. Adjust settings as needed:
 
 | Setting | Recommended Value | Why |
@@ -84,6 +106,10 @@ The bot uses **GBNF grammar constraints** to ensure valid JSON output from llama
 | `codellama-13b-instruct` | ~8 GB | ✅ Decent quality |
 
 **Note:** While grammar constraints significantly improve JSON reliability, smaller models may still struggle with complex multi-file implementations. For production agent usage, larger models (13B+) or cloud providers are recommended.
+
+### Router Mode
+
+When starting llama.cpp without a model argument (router mode), configure the integration's **Model** field with the exact model ID returned by `GET /v1/models`. The bot sends this identifier in each `/v1/completions` request so llama.cpp can route and load the selected model. With a server started using `--model`, llama.cpp serves that model and ignores the request's model identifier.
 
 ## Model Download
 
@@ -221,6 +247,8 @@ INFO: llama.cpp chat request: GBNF grammar enabled for structured JSON output
 
 ## Server Configuration
 
+The bot sends `Connection: close` on every llama.cpp request. Each completion uses a fresh HTTP connection because some server builds advertise keep-alive but close the connection after streaming, causing the next request to fail with `Broken pipe` or `failed to respond`. This does not disable streaming or change the configured HTTP timeouts.
+
 ### Context Size
 
 Adjust `--ctx-size` based on your needs and available memory:
@@ -286,6 +314,19 @@ Then configure the AI Integration in the web UI with API URL `http://llamacpp:80
 
 ## Troubleshooting
 
+### Agentic Review Fails Before Producing a Review
+
+Check the workflow run summary and its detailed step for the failure category.
+The diagnostics distinguish context-exploration rounds from total model turns
+and report the effective output-token limit and reported usage when available.
+An `END_TURN` provider response can still be followed by another context
+request, so it does not necessarily mean the review is complete.
+
+Repeated context requests are recorded as an observation, not as a confirmed
+cause. Use the category and counts to investigate before changing limits or
+models; increasing a budget is not guaranteed to resolve a stalled run. The PR
+failure notice is intentionally brief and does not include partial findings.
+
 ### Short or Generic Reviews
 
 Local models may produce shorter responses than cloud providers. To get more detailed reviews:
@@ -347,4 +388,3 @@ If the agent still produces invalid JSON despite grammar constraints:
 - [GBNF Grammar Documentation](https://github.com/ggerganov/llama.cpp/blob/master/grammars/README.md)
 - [TheBloke's GGUF Models](https://huggingface.co/TheBloke)
 - [Using Ollama](OLLAMA.md) — Alternative local LLM option
-

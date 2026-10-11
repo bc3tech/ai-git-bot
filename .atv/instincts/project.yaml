@@ -1,0 +1,12 @@
+instincts:
+  - id: verify-final-agent-request
+    trigger: "when agent behavior depends on retained context"
+    behavior: "Test the final prepared request and delivered regions, not fetch success or cache membership."
+    confidence: 0.5
+    domain: testing
+    observations: 1
+    first_seen: 2026-10-10
+    last_seen: 2026-10-10
+    evidence:
+      - "commit 6ef627ef: source fetch success was incorrectly treated as delivered full coverage"
+      - "commit 05f26ef6: retry retention can remove tentative evidence progress"

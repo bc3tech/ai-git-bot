@@ -14,6 +14,8 @@ import org.remus.giteabot.prworkflow.WorkflowResult;
 import org.remus.giteabot.prworkflow.config.WorkflowSelectionService;
 import org.remus.giteabot.repository.RepositoryApiClient;
 import org.remus.giteabot.review.CodeReviewService;
+import org.remus.giteabot.review.state.ReviewRunLeaseService.LeaseAcquisitionTimeoutException;
+import org.remus.giteabot.review.grounding.DoubleCheckSettings;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
@@ -83,7 +85,7 @@ public class ReviewWorkflow implements PrWorkflow {
 
     @Override
     public String description() {
-        return "Posts an AI code review as a single PR comment whenever a pull request is opened "
+        return "Posts a grounded AI code review with inline findings and a concise summary whenever a pull request is opened "
                 + "or updated, responds to @-mentions and inline review comments with conversational "
                 + "follow-ups, and optionally approves or requests changes based on the bot's "
                 + "configured post-review action.";
@@ -118,12 +120,21 @@ public class ReviewWorkflow implements PrWorkflow {
                         "Comma-separated glob or filename patterns for files to exclude from the "
                                 + "review diff (e.g. *.lock, *.min.js, package-lock.json, **/generated/**). "
                                 + "Matching file sections are stripped before the diff is sent to the AI, "
-                                + "reducing token usage and noise. Leave blank to review all files."));
+                                + "reducing token usage and noise. Leave blank to review all files."),
+                DoubleCheckSettings.enabledField(ReviewParam.DOUBLE_CHECK_ENABLED),
+                DoubleCheckSettings.severityField(ReviewParam.DOUBLE_CHECK_MIN_SEVERITY),
+                DoubleCheckSettings.integrationField(ReviewParam.DOUBLE_CHECK_AI_INTEGRATION_ID));
     }
 
     @Override
     public PrWorkflowCategory category() {
         return PrWorkflowCategory.REVIEW;
+    }
+
+    @Override
+    public boolean supersedesReviews(Map<String, String> hints) {
+        String action = hints == null ? null : hints.get(HINT_REVIEW_ACTION);
+        return action == null || action.isEmpty() || ACTION_REVIEW.equals(action);
     }
 
     @Override
@@ -147,7 +158,7 @@ public class ReviewWorkflow implements PrWorkflow {
 
         return switch (action) {
             case ACTION_REVIEW -> doReview(context, maxDiffCharsPerChunk, maxDiffChunks,
-                    retryTruncatedChunkChars, excludedFilePatterns);
+                    retryTruncatedChunkChars, excludedFilePatterns, DoubleCheckSettings.fromParams(params));
             case ACTION_BOT_COMMAND -> doBotCommand(context, maxDiffCharsPerChunk, maxDiffChunks,
                     retryTruncatedChunkChars, excludedFilePatterns);
             case ACTION_INLINE_COMMENT -> doInlineComment(context, maxDiffCharsPerChunk, maxDiffChunks,
@@ -170,28 +181,39 @@ public class ReviewWorkflow implements PrWorkflow {
     /** Automated PR diff review on open/update. */
     private WorkflowResult doReview(PrWorkflowContext context,
                                     int maxDiffCharsPerChunk, int maxDiffChunks,
-                                    int retryTruncatedChunkChars, String excludedFilePatterns) {
+                                    int retryTruncatedChunkChars, String excludedFilePatterns,
+                                    DoubleCheckSettings doubleCheckSettings) {
         Bot bot = context.bot();
         WebhookPayload payload = context.payload();
         RepositoryApiClient repositoryClient = giteaClientFactory.getApiClient(bot.getGitIntegration());
 
         context.requireActive("before invoking CodeReviewService.reviewPullRequest");
-
-        boolean reviewed = codeReviewServiceFactory.create(bot, repositoryClient,
-                        maxDiffCharsPerChunk, maxDiffChunks, retryTruncatedChunkChars, excludedFilePatterns)
-                .reviewPullRequest(payload, null);
+        CodeReviewService.ReviewRun run;
+        try {
+            run = codeReviewServiceFactory.create(bot, repositoryClient,
+                            maxDiffCharsPerChunk, maxDiffChunks, retryTruncatedChunkChars, excludedFilePatterns, doubleCheckSettings)
+                    .runReview(payload, null, context.runId(), context.explicitRequest(),
+                            bot.getGitIntegration() == null ? null : bot.getGitIntegration().getPostReviewAction(),
+                            context::requireActive);
+        } catch (LeaseAcquisitionTimeoutException e) {
+            context.requireActive("before clearing timed-out review acknowledgement");
+            try {
+                repositoryClient.removePullRequestReaction(payload.getRepository().getOwner().getLogin(),
+                        payload.getRepository().getName(), payload.getPullRequest().getNumber(), "eyes");
+            } catch (RuntimeException cleanupFailure) {
+                log.warn("Could not clear timed-out review acknowledgement: {}", cleanupFailure.getMessage());
+            }
+            throw e;
+        }
+        boolean reviewed = run.reviewed();
 
         context.appendStep("review",
-                reviewed ? "Posted review comment for PR" : "Skipped — no diff or no eligible content");
+                reviewed ? "Posted review for PR" : "Skipped — no diff or no eligible content");
 
-        if (reviewed && bot.getGitIntegration() != null) {
-            context.requireActive("before posting post-review action");
-
-            String owner = payload.getRepository().getOwner().getLogin();
-            String repo = payload.getRepository().getName();
-            Long prNumber = payload.getPullRequest().getNumber();
-            repositoryClient.postReviewAction(owner, repo, prNumber,
-                    bot.getGitIntegration().getPostReviewAction());
+        if (reviewed && !run.actionAllowed()) {
+            context.appendStep("post-review-action",
+                    "Skipped — a pending review blocks submitting the post-review action");
+        } else if (reviewed && bot.getGitIntegration() != null) {
             context.appendStep("post-review-action",
                     "Forwarded post-review action: " + bot.getGitIntegration().getPostReviewAction());
         }

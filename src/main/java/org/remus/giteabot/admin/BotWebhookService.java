@@ -8,6 +8,8 @@ import org.remus.giteabot.gitea.model.WebhookPayload;
 import org.remus.giteabot.issueworkflow.IssueWorkflowOrchestrator;
 import org.remus.giteabot.prworkflow.PrWorkflowContext;
 import org.remus.giteabot.prworkflow.PrWorkflowOrchestrator;
+import org.remus.giteabot.prworkflow.PrWorkflowRun;
+import org.remus.giteabot.prworkflow.PrWorkflowRunStatus;
 import org.remus.giteabot.prworkflow.agentreview.AgentReviewSlashCommandHandler;
 import org.remus.giteabot.prworkflow.agentreview.AgentReviewWorkflow;
 import org.remus.giteabot.prworkflow.config.WorkflowSelectionService;
@@ -19,14 +21,19 @@ import org.remus.giteabot.prworkflow.readmesync.ReadmeSyncSlashCommandHandler;
 import org.remus.giteabot.prworkflow.review.ReviewWorkflow;
 import org.remus.giteabot.prworkflow.unittest.UnitTestSlashCommandHandler;
 import org.remus.giteabot.prworkflow.unittest.UnitTestWorkflow;
+import org.remus.giteabot.repository.Reactions;
 import org.remus.giteabot.repository.RepositoryApiClient;
 import org.remus.giteabot.review.CodeReviewService;
+import org.remus.giteabot.review.state.ReviewStateService;
 import org.remus.giteabot.util.BranchFilter;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.time.Instant;
+import java.util.regex.Pattern;
 
 /**
  * Handles webhook events for persisted {@link Bot} entities using their
@@ -57,6 +64,7 @@ public class BotWebhookService {
     private final I18nCoverageSlashCommandHandler i18nCoverageSlashCommandHandler;
     private final WorkflowSelectionService workflowSelectionService;
     private final IssueWorkflowOrchestrator issueWorkflowOrchestrator;
+    private final ReviewStateService reviewStateService;
 
     public BotWebhookService(GiteaClientFactory giteaClientFactory,
                              AgentSessionService agentSessionService,
@@ -69,7 +77,8 @@ public class BotWebhookService {
                              ReadmeSyncSlashCommandHandler readmeSyncSlashCommandHandler,
                              I18nCoverageSlashCommandHandler i18nCoverageSlashCommandHandler,
                              WorkflowSelectionService workflowSelectionService,
-                             IssueWorkflowOrchestrator issueWorkflowOrchestrator) {
+                             IssueWorkflowOrchestrator issueWorkflowOrchestrator,
+                             ReviewStateService reviewStateService) {
         this.giteaClientFactory = giteaClientFactory;
         this.agentSessionService = agentSessionService;
         this.botService = botService;
@@ -82,6 +91,7 @@ public class BotWebhookService {
         this.i18nCoverageSlashCommandHandler = i18nCoverageSlashCommandHandler;
         this.workflowSelectionService = workflowSelectionService;
         this.issueWorkflowOrchestrator = issueWorkflowOrchestrator;
+        this.reviewStateService = reviewStateService;
     }
 
     /**
@@ -93,21 +103,227 @@ public class BotWebhookService {
     public void reviewPullRequest(Bot bot, WebhookPayload payload) {
         try {
             AiAuditContext.setSessionId(auditSessionId(payload));
-
-            if (!prWorkflowAllowedForBranch(bot, payload)) {
-                return;
+            if ("reopened".equals(payload.getAction()) || "opened".equals(payload.getAction())) {
+                updateReviewStateOnReopen(bot, payload);
             }
-            if (!isCallerAllowed(bot, payload)) {
-                return;
-            }
-            try {
-                prWorkflowOrchestrator.runAll(bot, payload);
-            } catch (Exception e) {
-                log.error("[Bot '{}'] Failed to run PR workflows: {}", bot.getName(), e.getMessage(), e);
-                botService.recordError(bot, e.getMessage());
-            }
+            runPullRequestReview(bot, payload, null);
         } finally {
             AiAuditContext.clear();
+        }
+    }
+
+    /**
+     * The single path every PR review takes, whatever triggered it (PR opened/updated, bot
+     * assigned or added as reviewer, or an explicit review request in a comment).
+     *
+     * @param triggerCommentId the comment that requested the review, acknowledged with 👀 and
+     *                         un-acknowledged if the review fails; {@code null} for PR events
+     */
+    private void runPullRequestReview(Bot bot, WebhookPayload payload, Long triggerCommentId) {
+        if (!prWorkflowAllowedForBranch(bot, payload)) {
+            return;
+        }
+        if (!isCallerAllowed(bot, payload)) {
+            return;
+        }
+        acknowledgePullRequest(bot, payload);
+        boolean commentAcknowledged = triggerCommentId != null && acknowledgeComment(bot, payload, triggerCommentId);
+        boolean reviewFailed;
+        boolean agenticReviewFailed;
+        try {
+            boolean explicitRequest = triggerCommentId != null || "review_requested".equals(payload.getAction());
+            List<PrWorkflowRun> runs = explicitRequest
+                    ? prWorkflowOrchestrator.runAll(bot, payload,
+                            Map.of(PrWorkflowContext.HINT_EXPLICIT_REVIEW_REQUEST, "true"))
+                    : prWorkflowOrchestrator.runAll(bot, payload);
+            reviewFailed = hasFailedRun(runs, ReviewWorkflow.KEY);
+            agenticReviewFailed = hasFailedRun(runs, AgentReviewWorkflow.KEY);
+        } catch (Exception e) {
+            log.error("[Bot '{}'] Failed to run PR workflows: {}", bot.getName(), e.getMessage(), e);
+            botService.recordError(bot, e.getMessage());
+            reviewFailed = true;
+            agenticReviewFailed = false;
+        }
+        if (reviewFailed || agenticReviewFailed) {
+            // The agentic review reports its own errors on the PR; only the standard review needs a notice.
+            reportReviewFailure(bot, payload, commentAcknowledged ? triggerCommentId : null, reviewFailed);
+        }
+    }
+
+    private static boolean hasFailedRun(List<PrWorkflowRun> runs, String workflowKey) {
+        return runs != null && runs.stream().anyMatch(run ->
+                run.getStatus() == PrWorkflowRunStatus.FAILED && workflowKey.equals(run.getWorkflowKey()));
+    }
+
+    private boolean acknowledgeComment(Bot bot, WebhookPayload payload, Long commentId) {
+        try {
+            giteaClientFactory.getApiClient(bot.getGitIntegration())
+                    .addReaction(payload.getRepository().getOwner().getLogin(),
+                            payload.getRepository().getName(), commentId, Reactions.EYES);
+            return true;
+        } catch (RuntimeException e) {
+            log.warn("[Bot '{}'] Failed to add 👀 reaction to comment #{}: {}",
+                    bot.getName(), commentId, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Withdraws the 👀 acknowledgement from the requesting comment and, when asked, tells the
+     * PR that no review was produced.
+     */
+    private void reportReviewFailure(Bot bot, WebhookPayload payload, Long acknowledgedCommentId,
+                                     boolean postNotice) {
+        String owner = payload.getRepository().getOwner().getLogin();
+        String repo = payload.getRepository().getName();
+        Long prNumber = payload.getPullRequest().getNumber();
+        RepositoryApiClient client = giteaClientFactory.getApiClient(bot.getGitIntegration());
+        if (acknowledgedCommentId != null) {
+            try {
+                client.removeReaction(owner, repo, acknowledgedCommentId, Reactions.EYES);
+            } catch (RuntimeException e) {
+                log.warn("[Bot '{}'] Failed to remove 👀 reaction from comment #{}: {}",
+                        bot.getName(), acknowledgedCommentId, e.getMessage());
+            }
+        }
+        if (!postNotice) {
+            return;
+        }
+        try {
+            client.postPullRequestComment(owner, repo, prNumber, REVIEW_FAILED_NOTICE);
+        } catch (RuntimeException e) {
+            log.warn("[Bot '{}'] Failed to post review failure notice on PR #{}: {}",
+                    bot.getName(), prNumber, e.getMessage());
+        }
+    }
+
+    static final String REVIEW_FAILED_NOTICE =
+            "⚠️ I couldn't complete the AI review because an error occurred while processing this request. "
+                    + "Please try again later.";
+
+    /**
+     * Runs a review requested from a PR comment ({@code /review}, "review again", "re-review")
+     * through {@link #runPullRequestReview}, after loading the PR details the comment event lacks.
+     */
+    private void reviewOnRequest(Bot bot, WebhookPayload payload) {
+        log.info("[Bot '{}'] Review requested in comment #{}", bot.getName(),
+                payload.getComment() != null ? payload.getComment().getId() : null);
+        hydratePullRequest(bot, payload);
+        if (payload.getPullRequest() == null || payload.getPullRequest().getNumber() == null) {
+            log.warn("[Bot '{}'] Cannot run requested review: pull request details unavailable", bot.getName());
+            return;
+        }
+        runPullRequestReview(bot, payload,
+                payload.getComment() != null ? payload.getComment().getId() : null);
+    }
+
+    /**
+     * Completes a comment event's pull request (head/base refs, title, body) from the provider.
+     * Comment events carry at most a minimal PR, but the branch filter and the review need these.
+     */
+    @SuppressWarnings("unchecked")
+    private void hydratePullRequest(Bot bot, WebhookPayload payload) {
+        WebhookPayload.PullRequest target = payload.getPullRequest();
+        if (target != null && target.getHead() != null && target.getHead().getRef() != null
+                && !target.getHead().getRef().isBlank()) {
+            return;
+        }
+        Long prNumber = resolvePrOrIssueNumber(payload);
+        if (prNumber == null || payload.getRepository() == null || payload.getRepository().getOwner() == null) {
+            return;
+        }
+        Map<String, Object> pr;
+        try {
+            pr = giteaClientFactory.getApiClient(bot.getGitIntegration()).getPullRequestDetails(
+                    payload.getRepository().getOwner().getLogin(), payload.getRepository().getName(), prNumber);
+        } catch (RuntimeException e) {
+            log.warn("[Bot '{}'] Failed to load details of PR #{}: {}", bot.getName(), prNumber, e.getMessage());
+            pr = Map.of();
+        }
+        if (target == null) {
+            target = new WebhookPayload.PullRequest();
+            if (payload.getIssue() != null) {
+                target.setTitle(payload.getIssue().getTitle());
+                target.setBody(payload.getIssue().getBody());
+                target.setUser(payload.getIssue().getUser());
+            }
+            payload.setPullRequest(target);
+        }
+        target.setNumber(prNumber);
+        if (pr == null) {
+            return;
+        }
+        if (pr.get("title") instanceof String t) target.setTitle(t);
+        if (pr.get("body") instanceof String b) target.setBody(b);
+        if (pr.get("state") instanceof String s) target.setState(s);
+        if (pr.get("head") instanceof Map<?, ?> head) {
+            target.setHead(toHead((Map<String, Object>) head));
+        }
+        if (pr.get("base") instanceof Map<?, ?> base) {
+            target.setBase(toHead((Map<String, Object>) base));
+        }
+    }
+
+    private static WebhookPayload.Head toHead(Map<String, Object> source) {
+        WebhookPayload.Head head = new WebhookPayload.Head();
+        if (source.get("ref") instanceof String r) head.setRef(r);
+        if (source.get("sha") instanceof String s) head.setSha(s);
+        return head;
+    }
+
+    private void acknowledgeAssignedIssue(Bot bot, WebhookPayload payload) {
+        if (payload.getIssue() == null
+                || payload.getIssue().getNumber() == null
+                || payload.getRepository() == null) {
+            return;
+        }
+        String owner = payload.getRepository().getOwner() != null
+                ? payload.getRepository().getOwner().getLogin() : null;
+        String repo = payload.getRepository().getName();
+        if (owner == null || repo == null) {
+            return;
+        }
+        Long issueNumber = payload.getIssue().getNumber();
+        try {
+            if (IssueWorkflowOrchestrator.enabledWorkflowKeys(bot, workflowSelectionService).isEmpty()) {
+                return;
+            }
+            giteaClientFactory.getApiClient(bot.getGitIntegration())
+                    .addIssueReaction(owner, repo, issueNumber, Reactions.EYES);
+        } catch (RuntimeException e) {
+            log.warn("[Bot '{}'] Failed to add 👀 reaction to issue #{}: {}: {}",
+                    bot.getName(), issueNumber, e.getClass().getSimpleName(), e.getMessage());
+            log.debug("[Bot '{}'] 👀 reaction failure details", bot.getName(), e);
+        }
+    }
+
+    private void acknowledgePullRequest(Bot bot, WebhookPayload payload) {
+        if (!"opened".equals(payload.getAction())
+                && !"review_requested".equals(payload.getAction())) {
+            return;
+        }
+        if (payload.getRepository() == null
+                || payload.getPullRequest() == null
+                || payload.getPullRequest().getNumber() == null) {
+            return;
+        }
+        String owner = payload.getRepository().getOwner() != null
+                ? payload.getRepository().getOwner().getLogin() : null;
+        String repo = payload.getRepository().getName();
+        if (owner == null || repo == null) {
+            return;
+        }
+        Long pullNumber = payload.getPullRequest().getNumber();
+        try {
+            if (PrWorkflowOrchestrator.enabledWorkflowKeys(bot, workflowSelectionService).isEmpty()) {
+                return;
+            }
+            giteaClientFactory.getApiClient(bot.getGitIntegration())
+                    .addPullRequestReaction(owner, repo, pullNumber, Reactions.EYES);
+        } catch (RuntimeException e) {
+            log.warn("[Bot '{}'] Failed to add 👀 reaction to PR #{}: {}: {}",
+                    bot.getName(), pullNumber, e.getClass().getSimpleName(), e.getMessage());
+            log.debug("[Bot '{}'] 👀 reaction failure details", bot.getName(), e);
         }
     }
 
@@ -180,6 +396,10 @@ public class BotWebhookService {
                 log.debug("[Bot '{}'] No PR workflows enabled, ignoring pull request command", bot.getName());
                 return;
             }
+            if (isReviewAgainRequest(payload, getBotAlias(bot))) {
+                reviewOnRequest(bot, payload);
+                return;
+            }
             try {
                 if (e2eTestSlashCommandHandler.tryHandle(bot, payload)) {
                     return;
@@ -231,6 +451,14 @@ public class BotWebhookService {
         try {
             AiAuditContext.setSessionId(auditSessionId(payload));
             if (!isPrCommenterAllowed(bot, payload)) {
+                return;
+            }
+            if (isReviewAgainRequest(payload, getBotAlias(bot))) {
+                if (hasNoEnabledPrWorkflows(bot)) {
+                    log.debug("[Bot '{}'] No PR workflows enabled, ignoring review request", bot.getName());
+                    return;
+                }
+                reviewOnRequest(bot, payload);
                 return;
             }
             String owner = payload.getRepository().getOwner().getLogin();
@@ -391,6 +619,7 @@ public class BotWebhookService {
     public void handlePrClosed(Bot bot, WebhookPayload payload) {
         try {
             AiAuditContext.setSessionId(auditSessionId(payload));
+            updateReviewStateOnClose(bot, payload);
             try {
                 if (isWorkflowEnabled(bot, ReviewWorkflow.KEY)) {
                     var hints = Map.of(ReviewWorkflow.HINT_REVIEW_ACTION, ReviewWorkflow.ACTION_PR_CLOSED);
@@ -422,6 +651,38 @@ public class BotWebhookService {
         }
     }
 
+    private void updateReviewStateOnClose(Bot bot, WebhookPayload payload) {
+        updateReviewStateLifecycle(bot, payload, true);
+    }
+
+    private void updateReviewStateOnReopen(Bot bot, WebhookPayload payload) {
+        updateReviewStateLifecycle(bot, payload, false);
+    }
+
+    private void updateReviewStateLifecycle(Bot bot, WebhookPayload payload, boolean closed) {
+        if (bot.getId() == null || payload.getRepository() == null
+                || payload.getRepository().getOwner() == null || payload.getPullRequest() == null
+                || payload.getPullRequest().getNumber() == null) {
+            return;
+        }
+        String owner = payload.getRepository().getOwner().getLogin();
+        String repo = payload.getRepository().getName();
+        Long prNumber = payload.getPullRequest().getNumber();
+        if (owner == null || repo == null) {
+            return;
+        }
+        try {
+            if (closed) {
+                reviewStateService.markPrClosed(bot.getId(), owner, repo, prNumber, Instant.now());
+            } else {
+                reviewStateService.markPrReopened(bot.getId(), owner, repo, prNumber);
+            }
+        } catch (RuntimeException e) {
+            log.warn("[Bot '{}'] Failed to update review-state lifecycle for PR #{}: {}",
+                    bot.getName(), prNumber, e.getMessage());
+        }
+    }
+
     /**
      * Handles an issue assigned event by running the {@code IssueWorkflow}(s)
      * enabled on the bot's issue-assigned {@code WorkflowConfiguration} (kind
@@ -435,6 +696,7 @@ public class BotWebhookService {
             if (!isCallerAllowed(bot, payload)) {
                 return;
             }
+            acknowledgeAssignedIssue(bot, payload);
             try {
                 issueWorkflowOrchestrator.runAssigned(bot, payload);
             } catch (Exception e) {
@@ -800,22 +1062,21 @@ public class BotWebhookService {
         return author != null && author.equalsIgnoreCase(commenter);
     }
 
-    public boolean isReviewAgainRequestFromPullRequestAuthor(WebhookPayload payload, String botAlias) {
-        if (!isPullRequestAuthor(payload)) {
-            return false;
-        }
-        return isReviewAgainRequest(payload, botAlias);
-    }
-
     public boolean isReviewAgainRequest(WebhookPayload payload, String botAlias) {
         String body = payload.getComment() != null ? payload.getComment().getBody() : null;
         if (body == null || botAlias == null || !body.contains(botAlias)) {
             return false;
         }
+        if (REVIEW_COMMAND.matcher(body).find()) {
+            return true;
+        }
         String normalized = body.toLowerCase();
         return normalized.contains("review")
                 && (normalized.contains("again") || normalized.contains("re-review") || normalized.contains("repeat"));
     }
+
+    /** A {@code /review} slash command, not a longer command such as {@code /review-foo}. */
+    private static final Pattern REVIEW_COMMAND = Pattern.compile("(?i)(?<![\\w/-])/review(?![\\w-])");
 
     /**
      * Extracts the body text from an inline review comment to use as a
