@@ -81,6 +81,7 @@ public final class AgentLoop {
         observeMode(ctx, resolvedMode);
         List<ToolDescriptor> tools = resolvedMode == ToolingMode.NATIVE
                 ? strategy.toolDescriptors() : List.of();
+        boolean prepareRequests = resolvedMode == ToolingMode.LEGACY && strategy.usesRequestPreparation();
         log.debug("AgentLoop starting for issue #{}: provider={}, mode={}, tools={}",
                 ctx.issueNumber(), providerTag, resolvedMode, tools.size());
 
@@ -97,7 +98,10 @@ public final class AgentLoop {
             long started = System.nanoTime();
             ChatTurn turn;
             try {
-                turn = callAiWithRetry(ctx, history, currentMessage, tools, systemPrompt, round);
+                PreparedTurn prepared = callAiWithRetry(ctx, history, currentMessage, tools,
+                        systemPrompt, round, strategy, prepareRequests);
+                turn = prepared.turn();
+                currentMessage = prepared.currentMessage();
             } finally {
                 AgentMetricsHolder.recordLatency(modeTag(resolvedMode), providerTag,
                         Duration.ofNanos(System.nanoTime() - started));
@@ -131,7 +135,7 @@ public final class AgentLoop {
                     budget.maxTokensPerCall(),
                     promptChars,
                     aiResponse == null ? 0 : aiResponse.length()));
-            if (tokenTracker.shouldCompactProactively(ctx.session())) {
+            if (!prepareRequests && tokenTracker.shouldCompactProactively(ctx.session())) {
                 log.info("AgentLoop round {}/{} for issue #{}: context budget exceeded (usage: {}%),"
                                 + " truncating tool messages",
                         round, budget.maxRounds(), ctx.issueNumber(),
@@ -358,17 +362,28 @@ public final class AgentLoop {
      * <p>All other failures, and any failure on the second attempt, are
      * re-thrown to the caller.</p>
      *
-     * @return the {@link ChatTurn} from the successful AI call
+     * Opt-in legacy strategies prepare before each attempt and handle
+     * prompt-too-long recovery themselves, instead of generic compaction.
+     *
+     * @return the successful turn and the prepared current message it used
      * @throws RuntimeException if the failure is not retryable or the retry fails
      */
-    private ChatTurn callAiWithRetry(AgentRunContext ctx, List<AiMessage> history, String currentMessage,
-                                     List<ToolDescriptor> tools, String systemPrompt, int round) {
+    private PreparedTurn callAiWithRetry(AgentRunContext ctx, List<AiMessage> history, String currentMessage,
+                                         List<ToolDescriptor> tools, String systemPrompt, int round,
+                                         AgentStrategy strategy, boolean prepareRequests) {
         int maxAttempts = 2;
+        boolean aggressive = false;
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            // Preparation failures are local policy failures, not provider failures.
+            if (prepareRequests) {
+                currentMessage = strategy.prepareRequest(ctx, history, currentMessage,
+                        systemPrompt, tools, budget, aiClient, aggressive);
+            }
             try {
                 AiAuditContext.setRound(round);
-                return aiClient.chatWithTools(history, currentMessage, tools, systemPrompt,
+                ChatTurn turn = aiClient.chatWithTools(history, currentMessage, tools, systemPrompt,
                         null, budget.maxTokensPerCall());
+                return new PreparedTurn(turn, currentMessage);
             } catch (RuntimeException e) {
                 boolean promptTooLong = e instanceof HttpClientErrorException clientError
                         && aiClient.isPromptTooLongError(clientError);
@@ -381,10 +396,14 @@ public final class AgentLoop {
 
                 if (promptTooLong) {
                     log.warn("AgentLoop: AI call failed with prompt-too-long error on attempt {}/{}. "
-                            + "Aggressively compacting history and retrying. Error: {}",
+                            + "Preparing a smaller request and retrying. Error: {}",
                             attempt, maxAttempts, e.getMessage());
                     // Aggressive compaction: keep only the last 2 compaction units
-                    compactor.compactAggressively(history);
+                    if (prepareRequests) {
+                        aggressive = true;
+                    } else {
+                        compactor.compactAggressively(history);
+                    }
                 } else {
                     log.warn("AgentLoop: AI call failed with a transient network error on attempt {}/{}. "
                             + "Retrying without changing history. Error: {}",
@@ -397,6 +416,8 @@ public final class AgentLoop {
         // Unreachable, but keeps the compiler happy
         throw new IllegalStateException("callAiWithRetry: exceeded max retries");
     }
+
+    private record PreparedTurn(ChatTurn turn, String currentMessage) {}
 
     private static void observeTurn(AgentRunContext ctx, AgentRunContext.RoundObservation observation) {
         if (ctx.roundObserver() == null) {

@@ -1,5 +1,7 @@
 package org.remus.giteabot.agent.loop;
 
+import org.remus.giteabot.ai.AiClient;
+import org.remus.giteabot.ai.AiMessage;
 import org.remus.giteabot.ai.ChatTurn;
 import org.remus.giteabot.ai.ToolDescriptor;
 
@@ -33,6 +35,28 @@ public interface AgentStrategy {
 
     /** System prompt to send on every provider chat call. */
     String systemPrompt();
+
+    /** Opts resolved legacy runs into strategy-owned request retention and sizing. */
+    default boolean usesRequestPreparation() {
+        return false;
+    }
+
+    /**
+     * Prepares each outbound legacy attempt. May mutate history and returns the
+     * current message actually sent, replayed in history and observed by the loop.
+     * The strategy owns retention instead of the loop's post-response compactor.
+     * Output headroom and the client estimate must be included in its fit policy;
+     * estimates are not exact tokenizer counts.
+     *
+     * @param aggressive true on the retry after a prompt-too-long rejection
+     * @throws ContextBudgetExceededException when mandatory context cannot fit
+     */
+    default String prepareRequest(AgentRunContext ctx, List<AiMessage> history,
+                                  String currentMessage, String systemPrompt,
+                                  List<ToolDescriptor> tools, AgentBudget budget,
+                                  AiClient client, boolean aggressive) {
+        return currentMessage;
+    }
 
     /**
      * Decide what to do given the AI's latest assistant turn (text path).

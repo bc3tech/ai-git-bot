@@ -3,6 +3,7 @@ package org.remus.giteabot.ai.llamacpp;
 import lombok.extern.slf4j.Slf4j;
 import org.remus.giteabot.agent.shared.AgentJackson;
 import org.remus.giteabot.ai.AbstractAiClient;
+import org.remus.giteabot.ai.AiClient;
 import org.remus.giteabot.ai.AiMessage;
 import org.remus.giteabot.ai.ChatTurn;
 import org.remus.giteabot.ai.StopReason;
@@ -117,6 +118,17 @@ public class LlamaCppClient extends AbstractAiClient {
         logTruncationIfNeeded(choice, "chat");
         return new ChatTurn(text, List.of(), mapStopReason(choice == null ? null : choice.getFinishReason()),
                 inputTokens, outputTokens);
+    }
+
+    /** Sizes the same ChatML prompt sent by the legacy completion transport. */
+    @Override
+    public long estimateRequestTokens(List<AiMessage> history, String currentMessage,
+                                      List<ToolDescriptor> tools, String systemPrompt) {
+        List<AiMessage> messages = new ArrayList<>(history == null ? List.of() : history);
+        messages.add(AiMessage.builder().role("user")
+                .content(currentMessage == null ? "" : currentMessage).build());
+        return AiClient.estimateSerializedRequestTokens(
+                buildChatPrompt(resolvePrompt(systemPrompt), messages));
     }
 
     @Override

@@ -1,10 +1,12 @@
 package org.remus.giteabot.ai;
 
+import org.remus.giteabot.agent.shared.AgentJackson;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClientResponseException;
 
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 /**
  * Provider-agnostic interface for AI-powered code review and agent chat.
@@ -56,6 +58,31 @@ public interface AiClient {
      */
     default boolean supportsNativeTools() {
         return false;
+    }
+
+    /**
+     * Conservative input-sizing policy, not an exact tokenizer count or fit
+     * guarantee. Counts UTF-8 serialized bytes (including escaping and opaque
+     * reasoning), at one token per byte, plus 25% and 256 tokens for provider
+     * framing. Callers must separately reserve output tokens. Providers with
+     * a different prompt representation should override this capability.
+     */
+    default long estimateRequestTokens(List<AiMessage> history, String currentMessage,
+                                       List<ToolDescriptor> tools, String systemPrompt) {
+        List<AiMessage> messages = history == null ? List.of() : history;
+        return estimateSerializedRequestTokens(Map.of(
+                "history", messages,
+                "currentMessage", currentMessage == null ? "" : currentMessage,
+                "tools", tools == null ? List.of() : tools,
+                "systemPrompt", systemPrompt == null ? "" : systemPrompt,
+                // AiMessage excludes reasoning from normal persistence serialization.
+                "reasoningDetails", messages.stream().map(AiMessage::getReasoningDetails).toList()));
+    }
+
+    /** Shared conservative byte policy for provider-specific request renderers. */
+    static long estimateSerializedRequestTokens(Object request) {
+        long bytes = AgentJackson.mapper().writeValueAsBytes(request).length;
+        return bytes + (bytes + 3) / 4 + 256;
     }
 
     /**

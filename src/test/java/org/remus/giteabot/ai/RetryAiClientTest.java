@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertSame;
 
 class RetryAiClientTest {
 
@@ -128,6 +129,39 @@ class RetryAiClientTest {
         return HttpServerErrorException.create(HttpStatus.SERVICE_UNAVAILABLE, "Service Unavailable",
                 HttpHeaders.EMPTY, "upstream unavailable".getBytes(StandardCharsets.UTF_8),
                 StandardCharsets.UTF_8);
+    }
+
+    @Test
+    void transientRetryReusesSamePreparedPayloadWithoutResizingOrChangingEvidence() {
+        List<AiMessage> preparedHistory = List.of(
+                AiMessage.builder().role("user").content("retained evidence").build());
+        List<ToolDescriptor> tools = List.of(new ToolDescriptor("read", "Read source", null));
+        ScriptedAiClient delegate = new ScriptedAiClient("done", highDemand()) {
+            @Override
+            public ChatTurn chatWithTools(List<AiMessage> history, String current,
+                                          List<ToolDescriptor> descriptors, String system,
+                                          String model, Integer maxTokens) {
+                assertSame(preparedHistory, history);
+                assertSame(tools, descriptors);
+                assertEquals("prepared current", current);
+                assertEquals("retained evidence", history.getFirst().getContent());
+                assertEquals("system", system);
+                assertEquals(64, maxTokens);
+                return super.chatWithTools(history, current, descriptors, system, model, maxTokens);
+            }
+            @Override
+            public long estimateRequestTokens(List<AiMessage> history, String current,
+                                              List<ToolDescriptor> descriptors, String system) {
+                throw new AssertionError("Internal transient retries must not reselect evidence");
+            }
+        };
+
+        ChatTurn turn = clientFor(delegate, properties(), new RecordingNotifier())
+                .chatWithTools(preparedHistory, "prepared current", tools, "system", null, 64);
+
+        assertEquals("done", turn.assistantText());
+        assertEquals(2, delegate.calls);
+        assertEquals(1, sleeps.size());
     }
 
     @Test

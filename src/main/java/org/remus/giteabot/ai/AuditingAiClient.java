@@ -51,6 +51,12 @@ public class AuditingAiClient implements AiClient {
     }
 
     @Override
+    public long estimateRequestTokens(List<AiMessage> history, String currentMessage,
+                                      List<ToolDescriptor> tools, String systemPrompt) {
+        return delegate.estimateRequestTokens(history, currentMessage, tools, systemPrompt);
+    }
+
+    @Override
     public boolean isPromptTooLongError(HttpClientErrorException e) {
         return delegate.isPromptTooLongError(e);
     }

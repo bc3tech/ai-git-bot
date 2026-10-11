@@ -1,6 +1,7 @@
 package org.remus.giteabot.ai;
 
 import org.junit.jupiter.api.Test;
+import org.remus.giteabot.config.AiRetryProperties;
 
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
@@ -8,8 +9,25 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.*;
 
 class AuditingAiClientTest {
+
+    @Test
+    void nestedWrappersDelegateProviderSpecificRequestSizingUnchanged() {
+        AiClient provider = mock(AiClient.class);
+        List<AiMessage> history = List.of(AiMessage.builder().role("user").content("history").build());
+        List<ToolDescriptor> tools = List.of(new ToolDescriptor("read", "Read source", null));
+        when(provider.estimateRequestTokens(history, "current", tools, "system")).thenReturn(9876L);
+        AiClient client = new AuditingAiClient(
+                new RetryAiClient(provider, new AiRetryProperties(), mock(ProviderRetryNotifier.class)),
+                new RecordingRecorder());
+
+        assertEquals(9876L, client.estimateRequestTokens(history, "current", tools, "system"));
+
+        verify(provider).estimateRequestTokens(same(history), eq("current"), same(tools), eq("system"));
+        verifyNoMoreInteractions(provider);
+    }
 
     private static class RecordingRecorder implements AiAuditRecorder {
         final AtomicReference<Throwable> lastError = new AtomicReference<>();

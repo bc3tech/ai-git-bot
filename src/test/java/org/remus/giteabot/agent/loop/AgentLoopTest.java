@@ -13,10 +13,15 @@ import org.remus.giteabot.ai.AiClient;
 import org.remus.giteabot.ai.AiMessage;
 import org.remus.giteabot.ai.ChatTurn;
 import org.remus.giteabot.ai.StopReason;
+import org.remus.giteabot.ai.ToolDescriptor;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.converter.HttpMessageNotWritableException;
 import org.springframework.web.client.ResourceAccessException;
+import org.springframework.web.client.HttpClientErrorException;
 
 import java.net.SocketException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -335,6 +340,284 @@ class AgentLoopTest {
         assertThat(AgentLoop.isTransientNetworkFailure(
                 new ResourceAccessException("I/O error on POST request to \"/completion\": Connection reset",
                         new java.net.SocketException("Connection reset")))).isTrue();
+    }
+
+    @Test
+    void run_preparationBoundsInitialRequestAndReplaysActualCurrentWithoutPostResponseCompaction() {
+        AgentBudget budget = new AgentBudget(2, 1, 0, 32, 4, 1, 2048, 0.7);
+        doCallRealMethod().when(aiClient).estimateRequestTokens(anyList(), anyString(), anyList(), anyString());
+        when(sessionService.toAiMessages(ctx.session())).thenReturn(List.of(
+                AiMessage.builder().role("user").content("old".repeat(1000)).build()));
+        List<List<AiMessage>> requests = new ArrayList<>();
+        List<String> currents = new ArrayList<>();
+        List<AgentRunContext.RoundObservation> observations = new ArrayList<>();
+        ctx.setRoundObserver(observations::add);
+        when(aiClient.chatWithTools(anyList(), anyString(), anyList(), anyString(), isNull(), anyInt()))
+                .thenAnswer(inv -> {
+                    requests.add(List.copyOf(inv.getArgument(0)));
+                    currents.add(inv.getArgument(1));
+                    return new ChatTurn("answer", List.of(), StopReason.END_TURN, 2000, 7);
+                });
+        String evidence = "evidence".repeat(40);
+        AgentStrategy strategy = new PreparingStrategy() {
+            @Override
+            public String prepareRequest(AgentRunContext c, List<AiMessage> history, String current,
+                                         String system, List<ToolDescriptor> tools, AgentBudget b,
+                                         AiClient client, boolean aggressive) {
+                assertThat(b).isSameAs(budget);
+                assertThat(client).isSameAs(aiClient);
+                assertThat(system).isEqualTo("sys");
+                assertThat(tools).isEmpty();
+                assertThat(aggressive).isFalse();
+                if (currents.isEmpty()) {
+                    history.clear();
+                    history.add(AiMessage.builder().role("tool").content(evidence).build());
+                }
+                return current.substring(0, Math.min(12, current.length()));
+            }
+            @Override
+            public StepDecision step(AgentRunContext c, String response, int round) {
+                return round == 1 ? new StepDecision.Continue("next".repeat(1000))
+                        : super.step(c, response, round);
+            }
+        };
+
+        new AgentLoop(aiClient, sessionService, budget).run(ctx, "task".repeat(1000), strategy);
+
+        assertThat(currents).containsExactly("tasktasktask", "nextnextnext");
+        assertThat(requests.getFirst()).extracting(AiMessage::getContent).containsExactly(evidence);
+        assertThat(requests.get(1)).extracting(AiMessage::getContent)
+                .containsExactly(evidence, "tasktasktask", "answer");
+        assertThat(observations.getFirst().promptCharacterEstimate()).isEqualTo(evidence.length() + 12 + 3);
+        for (int i = 0; i < requests.size(); i++) {
+            assertThat(aiClient.estimateRequestTokens(requests.get(i), currents.get(i), List.of(), "sys")
+                    + budget.maxTokensPerCall())
+                    .isLessThanOrEqualTo((long) (budget.contextWindowTokens() * budget.proactiveCompactionThreshold()));
+        }
+        verify(sessionService, never()).truncateToolMessages(anyLong(), anyInt());
+    }
+
+    @Test
+    void run_promptTooLongRetryRepreparesAggressivelyAndUsesSuccessfulCurrentInHistory() {
+        AgentBudget budget = new AgentBudget(2, 1, 0, 32, 4, 1, 2048, 0.7);
+        HttpClientErrorException rejection = HttpClientErrorException.create(HttpStatus.BAD_REQUEST,
+                "Bad Request", HttpHeaders.EMPTY, "prompt is too long".getBytes(StandardCharsets.UTF_8),
+                StandardCharsets.UTF_8);
+        when(aiClient.isPromptTooLongError(rejection)).thenReturn(true);
+        List<Boolean> aggressiveFlags = new ArrayList<>();
+        List<String> currents = new ArrayList<>();
+        List<List<AiMessage>> requests = new ArrayList<>();
+        when(aiClient.chatWithTools(anyList(), anyString(), anyList(), anyString(), isNull(), anyInt()))
+                .thenAnswer(inv -> {
+                    currents.add(inv.getArgument(1));
+                    requests.add(List.copyOf(inv.getArgument(0)));
+                    if (currents.size() == 1) {
+                        throw rejection;
+                    }
+                    return ChatTurn.text("answer");
+                });
+        AgentStrategy strategy = new PreparingStrategy() {
+            @Override
+            public String prepareRequest(AgentRunContext c, List<AiMessage> history, String current,
+                                         String system, List<ToolDescriptor> tools, AgentBudget b,
+                                         AiClient client, boolean aggressive) {
+                aggressiveFlags.add(aggressive);
+                if (aggressive) {
+                    assertThat(current).isEqualTo("prepared");
+                    // Generic aggressive compaction must not have removed this evidence.
+                    assertThat(history).hasSize(6);
+                    history.clear();
+                    history.add(AiMessage.builder().role("user").content("retained").build());
+                    return "smaller";
+                }
+                if (currents.isEmpty()) {
+                    for (int i = 0; i < 6; i++) {
+                        history.add(AiMessage.builder().role("user").content("evidence-" + i).build());
+                    }
+                    return "prepared";
+                }
+                return current;
+            }
+            @Override
+            public StepDecision step(AgentRunContext c, String response, int round) {
+                return round == 1 ? new StepDecision.Continue("next") : super.step(c, response, round);
+            }
+        };
+
+        new AgentLoop(aiClient, sessionService, budget).run(ctx, "original", strategy);
+
+        assertThat(aggressiveFlags).containsExactly(false, true, false);
+        assertThat(currents).containsExactly("prepared", "smaller", "next");
+        assertThat(requests.get(1)).extracting(AiMessage::getContent).containsExactly("retained");
+        assertThat(requests.get(2)).extracting(AiMessage::getContent)
+                .containsExactly("retained", "smaller", "answer");
+    }
+
+    @Test
+    void run_preparesAgainForNetworkRetryWithoutAggressiveFlag() {
+        List<Boolean> flags = new ArrayList<>();
+        when(aiClient.chatWithTools(anyList(), anyString(), anyList(), anyString(), isNull(), anyInt()))
+                .thenThrow(new ResourceAccessException("Connection reset"))
+                .thenReturn(ChatTurn.text("answer"));
+        AgentStrategy strategy = new PreparingStrategy() {
+            @Override
+            public String prepareRequest(AgentRunContext c, List<AiMessage> history, String current,
+                                         String system, List<ToolDescriptor> tools, AgentBudget b,
+                                         AiClient client, boolean aggressive) {
+                flags.add(aggressive);
+                return "prepared";
+            }
+        };
+
+        new AgentLoop(aiClient, sessionService,
+                new AgentBudget(1, 1, 0, 32, 4, 1000, 2048, 0.7)).run(ctx, "go", strategy);
+
+        assertThat(flags).containsExactly(false, false);
+        verify(aiClient, times(2)).chatWithTools(anyList(), eq("prepared"), anyList(),
+                eq("sys"), isNull(), eq(32));
+    }
+
+    @Test
+    void run_promptTooLongWithPreparationStillStopsAfterTwoProviderAttempts() {
+        HttpClientErrorException rejection = HttpClientErrorException.create(HttpStatus.BAD_REQUEST,
+                "Bad Request", HttpHeaders.EMPTY, "prompt is too long".getBytes(StandardCharsets.UTF_8),
+                StandardCharsets.UTF_8);
+        when(aiClient.isPromptTooLongError(rejection)).thenReturn(true);
+        when(aiClient.chatWithTools(anyList(), anyString(), anyList(), anyString(), isNull(), anyInt()))
+                .thenThrow(rejection);
+        List<Boolean> flags = new ArrayList<>();
+        AgentStrategy strategy = new PreparingStrategy() {
+            @Override
+            public String prepareRequest(AgentRunContext c, List<AiMessage> history, String current,
+                                         String system, List<ToolDescriptor> tools, AgentBudget b,
+                                         AiClient client, boolean aggressive) {
+                flags.add(aggressive);
+                return current;
+            }
+        };
+
+        assertThatThrownBy(() -> new AgentLoop(aiClient, sessionService,
+                new AgentBudget(1, 1, 0, 32, 4, 1000, 2048, 0.7)).run(ctx, "go", strategy))
+                .isSameAs(rejection);
+
+        assertThat(flags).containsExactly(false, true);
+        verify(aiClient, times(2)).chatWithTools(anyList(), eq("go"), anyList(), eq("sys"), isNull(), eq(32));
+    }
+
+    @Test
+    void run_defaultLegacyPromptTooLongRetainsExistingAggressiveCompactor() {
+        List<AiMessage> history = new ArrayList<>();
+        for (int i = 0; i < 6; i++) {
+            history.add(AiMessage.builder().role("user").content("evidence-" + i).build());
+        }
+        when(sessionService.toAiMessages(ctx.session())).thenReturn(history);
+        HttpClientErrorException rejection = HttpClientErrorException.create(HttpStatus.BAD_REQUEST,
+                "Bad Request", HttpHeaders.EMPTY, "prompt is too long".getBytes(StandardCharsets.UTF_8),
+                StandardCharsets.UTF_8);
+        when(aiClient.isPromptTooLongError(rejection)).thenReturn(true);
+        List<List<AiMessage>> requests = new ArrayList<>();
+        when(aiClient.chatWithTools(anyList(), anyString(), anyList(), anyString(), isNull(), anyInt()))
+                .thenAnswer(inv -> {
+                    requests.add(List.copyOf(inv.getArgument(0)));
+                    if (requests.size() == 1) {
+                        throw rejection;
+                    }
+                    return ChatTurn.text("done");
+                });
+
+        new AgentLoop(aiClient, sessionService,
+                new AgentBudget(1, 1, 0, 32, 4, 1, 2048, 0.7)).run(ctx, "go", finishingStrategy());
+
+        assertThat(requests.getFirst()).hasSize(6);
+        assertThat(requests.get(1)).hasSize(3);
+        assertThat(requests.get(1).getFirst().getContent()).contains("aggressively compacted");
+        assertThat(requests.get(1).subList(1, 3)).extracting(AiMessage::getContent)
+                .containsExactly("evidence-4", "evidence-5");
+    }
+
+    @Test
+    void run_mandatoryOnlyOverflowFailsBeforeProviderWithoutProviderFailureObservation() {
+        AtomicInteger providerFailures = new AtomicInteger();
+        ctx.setProviderCallFailureObserver(providerFailures::incrementAndGet);
+        when(aiClient.estimateRequestTokens(anyList(), anyString(), anyList(), anyString())).thenReturn(701L);
+        ContextBudgetExceededException failure = new ContextBudgetExceededException("Mandatory context cannot fit");
+        AgentStrategy strategy = new PreparingStrategy() {
+            @Override
+            public String prepareRequest(AgentRunContext c, List<AiMessage> history, String current,
+                                         String system, List<ToolDescriptor> tools, AgentBudget b,
+                                         AiClient client, boolean aggressive) {
+                long input = client.estimateRequestTokens(history, current, tools, system);
+                if (input + b.maxTokensPerCall() > b.contextWindowTokens() * b.proactiveCompactionThreshold()) {
+                    throw failure;
+                }
+                return current;
+            }
+        };
+
+        assertThatThrownBy(() -> new AgentLoop(aiClient, sessionService,
+                new AgentBudget(1, 1, 0, 100, 4, 1000, 1000, 0.8)).run(ctx, "mandatory", strategy))
+                .isSameAs(failure);
+
+        verify(aiClient, never()).chatWithTools(anyList(), anyString(), anyList(), anyString(), any(), any());
+        assertThat(providerFailures).hasValue(0);
+        assertThat(AiAuditContext.getRound()).isNull();
+    }
+
+    @Test
+    void run_requestPreparationIsDefaultOffForLegacyStrategy() {
+        AgentStrategy strategy = new PreparingStrategy() {
+            @Override public boolean usesRequestPreparation() { return false; }
+            @Override
+            public String prepareRequest(AgentRunContext c, List<AiMessage> history, String current,
+                                         String system, List<ToolDescriptor> tools, AgentBudget b,
+                                         AiClient client, boolean aggressive) {
+                throw new AssertionError("Preparation must remain opt-in");
+            }
+        };
+        assertThat(finishingStrategy().usesRequestPreparation()).isFalse();
+        assertThat(finishingStrategy().prepareRequest(ctx, new ArrayList<>(), "original", "sys",
+                List.of(), null, aiClient, false)).isEqualTo("original");
+        when(aiClient.chatWithTools(anyList(), eq("original"), anyList(), anyString(), isNull(), anyInt()))
+                .thenReturn(ChatTurn.text("answer"));
+
+        new AgentLoop(aiClient, sessionService,
+                new AgentBudget(1, 1, 0, 32, 4, 1000, 2048, 0.7)).run(ctx, "original", strategy);
+
+        verify(aiClient).chatWithTools(anyList(), eq("original"), eq(List.of()), eq("sys"), isNull(), eq(32));
+    }
+
+    @Test
+    void run_nativeModeNeverInvokesOptInRequestPreparation() {
+        List<ToolDescriptor> tools = List.of(new ToolDescriptor("read", "Read source", null));
+        when(aiClient.supportsNativeTools()).thenReturn(true);
+        when(aiClient.chatWithTools(anyList(), eq("original"), eq(tools), anyString(), isNull(), anyInt()))
+                .thenReturn(ChatTurn.text("answer"));
+        AgentStrategy strategy = new PreparingStrategy() {
+            @Override public ToolingMode preferredToolMode() { return ToolingMode.NATIVE; }
+            @Override public List<ToolDescriptor> toolDescriptors() { return tools; }
+            @Override
+            public String prepareRequest(AgentRunContext c, List<AiMessage> history, String current,
+                                         String system, List<ToolDescriptor> descriptors, AgentBudget b,
+                                         AiClient client, boolean aggressive) {
+                throw new AssertionError("Native preparation is not supported");
+            }
+        };
+
+        new AgentLoop(aiClient, sessionService,
+                new AgentBudget(1, 1, 0, 32, 4, 1000, 2048, 0.7)).run(ctx, "original", strategy);
+
+        assertThat(ctx.toolingMode()).isEqualTo(ToolingMode.NATIVE);
+    }
+
+    private static class PreparingStrategy implements AgentStrategy {
+        @Override public String systemPrompt() { return "sys"; }
+        @Override public boolean usesRequestPreparation() { return true; }
+        @Override public StepDecision step(AgentRunContext c, String response, int round) {
+            return new StepDecision.Finish(LoopOutcome.success(c.baseBranch(), response));
+        }
+        @Override public LoopOutcome onBudgetExhausted(AgentRunContext c) {
+            throw new AssertionError("budget should not be exhausted");
+        }
     }
 
     private static AgentStrategy finishingStrategy() {
