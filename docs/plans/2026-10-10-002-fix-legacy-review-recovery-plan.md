@@ -330,3 +330,17 @@ review artifacts rather than adding unrelated hook tooling.
 - Diagnostics history: `docs/plans/2026-10-10-001-fix-agentic-review-failure-diagnostics-plan.md`
 - Grounding history: `docs/plans/2026-10-08-001-feat-grounded-re-reviews-plan.md`
 - Official provider reference linked in Context and Research.
+
+## Execution Findings
+
+- Initial integrated validation exposed a coverage bug: a successful full-file
+  fetch was counted as complete even when the outbound request retained only an
+  excerpt. Acquisition coverage now derives from actual delivered regions;
+  pending retry retention replaces provisional coverage rather than certifying
+  fetched-but-omitted source.
+- An oversized requested source must leave a completed zero-findings review
+  degraded and prohibit approval. Service regression coverage exercises this
+  boundary together with unavailable-source reads and same-ref recovery.
+- Browser validation is inapplicable: this change affects backend Java and
+  documentation, not routes, views, styles or components. No browser or server
+  was started, and no live review was triggered.
