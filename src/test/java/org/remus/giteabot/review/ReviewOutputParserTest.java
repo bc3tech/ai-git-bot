@@ -63,6 +63,68 @@ class ReviewOutputParserTest {
     }
 
     @Test
+    void nestedClassificationPreservesBareAndFencedReviewEvidence() {
+        String envelope = """
+                {"summary": "One issue.", "findings": [
+                  {"path": "src/A.java", "side": "new", "line": 12, "severity": "MEDIUM",
+                   "quote": "return value.toString();", "body": "Value may be null."},
+                  {"body": "Check the contract.", "citations": [
+                    {"path": "src/B.java", "quote": "return null;"}
+                  ]}
+                ], "classification": {"blocker": 0, "medium": 1, "low": 0}}
+                """;
+        for (String raw : List.of(envelope, "```json\n" + envelope + "```")) {
+            ReviewOutputParser.Result result = ReviewOutputParser.parse(raw);
+            assertThat(result.warning()).isNull();
+            assertThat(result.document().structured()).isTrue();
+            assertThat(result.document().summary()).isEqualTo("One issue.");
+            assertThat(result.document().findings()).hasSize(2);
+            assertThat(result.document().findings().getFirst()).satisfies(f -> {
+                assertThat(f.path()).isEqualTo("src/A.java");
+                assertThat(f.side()).isEqualTo(DiffSide.NEW);
+                assertThat(f.line()).isEqualTo(12);
+                assertThat(f.severity()).isEqualTo("MEDIUM");
+                assertThat(f.quote()).isEqualTo("return value.toString();");
+                assertThat(f.body()).isEqualTo("Value may be null.");
+            });
+            assertThat(result.document().findings().get(1).citations()).containsExactly(
+                    new ReviewDocument.Citation("src/B.java", "return null;"));
+        }
+    }
+
+    @Test
+    void legacyInstructionExamplesParseWithOptionalNestedClassification() {
+        for (boolean formalDecision : List.of(false, true)) {
+            String instructions = ReviewOutputInstructions.agenticLegacy(formalDecision);
+            String example = instructions.split("Completion example:\\n", 2)[1].split("\\n\\n", 2)[0];
+            ReviewOutputParser.Result result = ReviewOutputParser.parse(example);
+            assertThat(result.warning()).isNull();
+            assertThat(result.document().structured()).isTrue();
+            assertThat(result.document().summary()).startsWith("Concise overall assessment");
+            assertThat(result.document().findings()).singleElement().satisfies(f -> {
+                assertThat(f.path()).isEqualTo("src/main/java/Foo.java");
+                assertThat(f.quote()).isEqualTo("return value.toString();");
+                assertThat(f.body()).startsWith("Markdown explanation");
+            });
+            assertThat(instructions).doesNotContain("```", "must come after the block");
+        }
+    }
+
+    @Test
+    void standardAndHistoricalAgenticInstructionsKeepFencedContracts() {
+        String standard = ReviewOutputInstructions.standard();
+        assertThat(ReviewOutputInstructions.agentic(false)).isEqualTo(standard);
+        assertThat(standard).contains(
+                "Write your final review as exactly one JSON object inside a ```json fenced code block:",
+                "Do not write anything outside the fenced JSON block.");
+        String example = standard.split("```json\\n", 2)[1].split("\\n```", 2)[0];
+        assertThat(ReviewOutputParser.parse(example).document().findings()).hasSize(1);
+        assertThat(ReviewOutputInstructions.agentic(true)).contains(
+                "classification line, which must come after the block as instructed.");
+        assertThat(standard).doesNotContain("\"classification\"");
+    }
+
+    @Test
     void invalidLocationsKeepTheFindingAsSummaryOnly() {
         String raw = """
                 ```json

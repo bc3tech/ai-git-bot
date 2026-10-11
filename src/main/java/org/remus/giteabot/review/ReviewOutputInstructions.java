@@ -10,13 +10,7 @@ public final class ReviewOutputInstructions {
     private ReviewOutputInstructions() {
     }
 
-    private static final String ENVELOPE = """
-            ## Review Output Format (required)
-
-            Write your final review as exactly one JSON object inside a ```json fenced code block:
-
-            ```json
-            {
+    private static final String EXAMPLE_FIELDS = """
               "summary": "Concise overall assessment in Markdown. Do not repeat the individual findings here.",
               "findings": [
                 {
@@ -29,9 +23,9 @@ public final class ReviewOutputInstructions {
                   "body": "Markdown explanation of the problem and a concrete suggestion."
                 }
               ]
-            }
-            ```
+            """;
 
+    private static final String FINDING_RULES = """
             Rules for findings:
             - Emit one finding per distinct issue, anchored to the single most relevant line.
             - "path" is the file path exactly as shown in the diff header ("b/" path without the
@@ -54,6 +48,15 @@ public final class ReviewOutputInstructions {
             - Escape the JSON correctly; Markdown is allowed inside string values.
             """;
 
+    private static final String ENVELOPE = """
+            ## Review Output Format (required)
+
+            Write your final review as exactly one JSON object inside a ```json fenced code block:
+
+            ```json
+            {
+            """ + EXAMPLE_FIELDS + "}\n```\n\n" + FINDING_RULES;
+
     /** Instructions for the standard (single-shot) review. */
     public static String standard() {
         return "\n\n" + ENVELOPE + "\nDo not write anything outside the fenced JSON block.";
@@ -70,5 +73,35 @@ public final class ReviewOutputInstructions {
                   + "classification line, which must come after the block as instructed."
                 : "\nDo not write anything outside the fenced JSON block.";
         return "\n\n" + ENVELOPE + tail;
+    }
+
+    /**
+     * Grammar-compatible final-answer instructions for full legacy agentic reviews.
+     *
+     * @param formalDecision whether to include severity counts inside the completed envelope
+     */
+    public static String agenticLegacy(boolean formalDecision) {
+        String fields = EXAMPLE_FIELDS.stripTrailing();
+        if (formalDecision) {
+            fields += ",\n  \"classification\": {\"blocker\": 0, \"medium\": 1, \"low\": 0}";
+        }
+        return """
+
+
+                ## Review Output Format (required)
+
+                When exploration is complete, return exactly one bare JSON object with "summary" and
+                "findings". Do not wrap it in Markdown fences or add prose or another JSON object.
+                Do not include requestFiles, requestTools or runTools in the completed review.
+
+                Completion example:
+                {
+                """ + fields + "\n}\n\n" + FINDING_RULES
+                + (formalDecision
+                ? "\nInclude \"classification\" inside this same completed object, with non-negative integer "
+                  + "\"blocker\", \"medium\" and \"low\" counts matching the findings. "
+                  + "Never append a separate classification object."
+                : "\nClassification is optional; if included, nest it inside this same completed object.")
+                + "\nWrite nothing outside the single bare JSON object.";
     }
 }
