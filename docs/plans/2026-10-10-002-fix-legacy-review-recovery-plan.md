@@ -363,8 +363,10 @@ review artifacts rather than adding unrelated hook tooling.
   coverage disclosure and lease loss during a singleton file fetch.
 - An 18-second deterministic explanatory walkthrough was encoded locally and
   verified as H.264 at 1280x900. It explicitly is not a live model/server
-  recording. Native GitHub attachment upload returned HTTP 404, and the browser
-  upload alternative failed with a connection timeout. The ignored
-  `target/recovery-walkthrough.mp4` is preserved; no video is attached to PR #4.
-  Media publication remains blocked. Implementation completion does not imply
-  deployment or a verified live model replay.
+  recording. Native GitHub attachment upload returned HTTP 404. Browser
+  connectivity recovered, but GitHub browser sign-in was unavailable unattended.
+  The walkthrough is published in
+  `.context/compound-engineering/ce-review/legacy-review-recovery/recovery-walkthrough.mp4`
+  and linked from PR #4 as the repository-hosted fallback, not an inline user
+  attachment. Implementation completion does not imply deployment or a verified
+  live model replay.
