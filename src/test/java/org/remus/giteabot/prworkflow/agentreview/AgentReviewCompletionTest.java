@@ -6,6 +6,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.remus.giteabot.admin.Bot;
@@ -44,6 +45,7 @@ import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -85,7 +87,7 @@ class AgentReviewCompletionTest {
                 new ToolExecutionService(config, catalog, workspaceService), catalog, workspaceService,
                 config, null, new Bot(), eventHooks);
         lenient().when(aiClient.supportsNativeTools()).thenReturn(true);
-        when(repositoryClient.getPullRequestDiff("owner", "repo", 1L)).thenReturn(DIFF);
+        lenient().when(repositoryClient.getPullRequestDiff("owner", "repo", 1L)).thenReturn(DIFF);
         lenient().when(workspaceService.prepareWorkspace(repositoryClient, "owner", "repo", "feature", 1L))
                 .thenReturn(WorkspaceResult.success(WORKSPACE));
     }
@@ -100,7 +102,7 @@ class AgentReviewCompletionTest {
                 new AgentReviewService.SeverityThresholds(null, null, null), 1L, null);
 
         assertThat(reviewed).isEqualTo(AgentReviewService.ReviewResult.FAILED);
-        assertNothingPublished();
+        assertFailureNoticeOnly();
     }
 
     @Test
@@ -112,13 +114,15 @@ class AgentReviewCompletionTest {
                 new AgentReviewService.SeverityThresholds(null, null, null), 1L, null);
 
         assertThat(reviewed).isEqualTo(AgentReviewService.ReviewResult.FAILED);
-        assertNothingPublished();
+        assertFailureNoticeOnly();
     }
 
-    private void assertNothingPublished() {
+    private void assertFailureNoticeOnly() {
         verify(repositoryClient, never()).postReview(anyString(), anyString(), anyLong(), anyString(), any());
         verify(repositoryClient, never()).postReviewComment(anyString(), anyString(), anyLong(), anyString());
-        verify(repositoryClient, never()).postPullRequestComment(anyString(), anyString(), anyLong(), anyString());
+        verify(repositoryClient).postPullRequestComment(eq("owner"), eq("repo"), eq(1L),
+                argThat(body -> body.contains("failure") && body.contains("run diagnostics")
+                        && !body.contains("Error details")));
         verifyNoInteractions(eventHooks);
         verify(workspaceService).cleanupWorkspace(WORKSPACE);
     }
@@ -139,7 +143,7 @@ class AgentReviewCompletionTest {
                         new AgentReviewService.SeverityThresholds(null, null, null), 1L, null);
 
         assertThat(result).isEqualTo(AgentReviewService.ReviewResult.FAILED);
-        assertNothingPublished();
+        assertFailureNoticeOnly();
         verify(aiClient, never()).chat(anyList(), any(), anyString(), isNull(), anyInt());
     }
 
@@ -155,7 +159,7 @@ class AgentReviewCompletionTest {
 
         assertThat(reviewed).isEqualTo(AgentReviewService.ReviewResult.FAILED);
         assertThat(toolCalls).isEmpty();
-        assertNothingPublished();
+        assertFailureNoticeOnly();
     }
 
     @Test
@@ -166,7 +170,148 @@ class AgentReviewCompletionTest {
         assertThat(service.answerClarification(payload, "Why was this changed?", 1))
                 .isEqualTo(AgentReviewService.ReviewResult.FAILED);
 
-        assertNothingPublished();
+        assertFailureNoticeOnly();
+    }
+
+    @Test
+    void providerRequestFailureKeepsProviderBoundaryAndSanitizesException() {
+        when(aiClient.chatWithTools(anyList(), any(), anyList(), anyString(), isNull(), anyInt()))
+                .thenThrow(new IllegalStateException("token=secret\r\n/private/source.java"));
+
+        AgentReviewService.DetailedResult result = service.reviewPullRequestDetailed(payload, 1, false, null,
+                new AgentReviewService.SeverityThresholds(null, null, null), 1L, null);
+
+        assertThat(result.result()).isEqualTo(AgentReviewService.ReviewResult.FAILED);
+        assertThat(result.failure().category()).isEqualTo(ReviewDiagnostics.Category.PROVIDER_REQUEST_FAILURE);
+        assertThat(result.failure().providerCallFailed()).isTrue();
+        assertThat(result.noticeStatus()).isEqualTo(ReviewDiagnostics.NoticeStatus.DELIVERED);
+        ArgumentCaptor<String> comment = ArgumentCaptor.forClass(String.class);
+        verify(repositoryClient).postPullRequestComment(eq("owner"), eq("repo"), eq(1L), comment.capture());
+        assertThat(comment.getValue()).contains("provider request failed")
+                .doesNotContain("secret", "source.java", "IllegalStateException");
+        verify(repositoryClient, never()).postReview(anyString(), anyString(), anyLong(), anyString(), any());
+        verify(workspaceService).cleanupWorkspace(WORKSPACE);
+    }
+
+    @Test
+    void diffFetchExceptionIsReportedAsSetupFailureWithoutExceptionText() {
+        when(repositoryClient.getPullRequestDiff("owner", "repo", 1L))
+                .thenThrow(new IllegalStateException("token=secret\r\n/private/source.java"));
+
+        AgentReviewService.DetailedResult result = service.reviewPullRequestDetailed(payload, 1, false, null,
+                new AgentReviewService.SeverityThresholds(null, null, null), 1L, null);
+
+        assertThat(result.result()).isEqualTo(AgentReviewService.ReviewResult.FAILED);
+        assertThat(result.failure().category()).isEqualTo(ReviewDiagnostics.Category.SETUP_FAILURE);
+        assertThat(result.noticeStatus()).isEqualTo(ReviewDiagnostics.NoticeStatus.DELIVERED);
+        ArgumentCaptor<String> comment = ArgumentCaptor.forClass(String.class);
+        verify(repositoryClient).postPullRequestComment(eq("owner"), eq("repo"), eq(1L), comment.capture());
+        assertThat(comment.getValue()).contains("setup-failure")
+                .doesNotContain("secret", "source.java", "IllegalStateException");
+        verifyNoInteractions(aiClient);
+    }
+
+    @Test
+    void workspacePreparationFailureIsReportedWithoutLeakingWorkspaceError() {
+        when(workspaceService.prepareWorkspace(repositoryClient, "owner", "repo", "feature", 1L))
+                .thenReturn(WorkspaceResult.failure("private checkout path"));
+
+        AgentReviewService.DetailedResult result = service.reviewPullRequestDetailed(payload, 1, false, null,
+                new AgentReviewService.SeverityThresholds(null, null, null), 1L, null);
+
+        assertThat(result.failure().category()).isEqualTo(ReviewDiagnostics.Category.SETUP_FAILURE);
+        assertThat(result.noticeStatus()).isEqualTo(ReviewDiagnostics.NoticeStatus.DELIVERED);
+        ArgumentCaptor<String> comment = ArgumentCaptor.forClass(String.class);
+        verify(repositoryClient).postPullRequestComment(eq("owner"), eq("repo"), eq(1L), comment.capture());
+        assertThat(comment.getValue()).contains("setup-failure")
+                .doesNotContain("private checkout path");
+        verifyNoInteractions(aiClient);
+    }
+
+    @Test
+    void missingPullRequestIdentityRecordsNoticeUnavailableWithoutCallingClient() {
+        AgentReviewService.DetailedResult result = service.reviewPullRequestDetailed(new WebhookPayload(),
+                1, false, null, new AgentReviewService.SeverityThresholds(null, null, null), 1L, null);
+
+        assertThat(result.result()).isEqualTo(AgentReviewService.ReviewResult.FAILED);
+        assertThat(result.failure().category()).isEqualTo(ReviewDiagnostics.Category.SETUP_FAILURE);
+        assertThat(result.noticeStatus()).isEqualTo(ReviewDiagnostics.NoticeStatus.UNAVAILABLE);
+        assertThat(result.noticeReason()).isEqualTo("pull-request-identity-unavailable");
+        verifyNoInteractions(repositoryClient, aiClient, workspaceService);
+    }
+
+    @Test
+    void outputTokenFailureReportsProviderUsageSeparatelyFromRoundCounts() {
+        when(aiClient.chatWithTools(anyList(), any(), anyList(), anyString(), isNull(), anyInt()))
+                .thenReturn(new ChatTurn("partial", List.of(), StopReason.MAX_TOKENS, 100, 32));
+
+        AgentReviewService.DetailedResult result = service.reviewPullRequestDetailed(payload, 1, false, null,
+                new AgentReviewService.SeverityThresholds(null, null, null), 1L, null);
+
+        assertThat(result.failure().category()).isEqualTo(ReviewDiagnostics.Category.OUTPUT_TOKEN_LIMIT);
+        assertThat(result.failure().outputTokenLimit()).isPositive();
+        assertThat(result.failure().outputTokens()).isEqualTo(32L);
+        assertThat(result.failure().totalTurns()).isEqualTo(1);
+        assertThat(result.failure().contextRounds()).isZero();
+        ArgumentCaptor<String> comment = ArgumentCaptor.forClass(String.class);
+        verify(repositoryClient).postPullRequestComment(eq("owner"), eq("repo"), eq(1L), comment.capture());
+        assertThat(comment.getValue()).contains("output-token limit", "reported usage 32")
+                .doesNotContain("partial");
+    }
+
+    @Test
+    void nativeToolRequestsCountContextTurnsButStillExhaustTheOverallLoopBudget() {
+        when(aiClient.chatWithTools(anyList(), any(), anyList(), anyString(), isNull(), anyInt()))
+                .thenReturn(exploration(1), exploration(2), exploration(3));
+
+        AgentReviewService.DetailedResult result = service.reviewPullRequestDetailed(payload, 1, false, null,
+                new AgentReviewService.SeverityThresholds(null, null, null), 1L, null);
+
+        assertThat(result.failure().category()).isEqualTo(ReviewDiagnostics.Category.LOOP_ROUND_LIMIT);
+        assertThat(result.failure().totalTurns()).isEqualTo(3);
+        assertThat(result.failure().contextRounds()).isEqualTo(3);
+        assertThat(result.failure().contextLimit()).isNull();
+        verify(aiClient, times(3)).chatWithTools(anyList(), any(), anyList(), anyString(), isNull(), anyInt());
+        assertFailureNoticeOnly();
+    }
+
+    @Test
+    void publicationFailureGetsOneAccurateNoticeWithoutChangingFailedOutcome() {
+        when(aiClient.chatWithTools(anyList(), any(), anyList(), anyString(), isNull(), anyInt()))
+                .thenReturn(ChatTurn.text("A completed review."));
+        org.mockito.Mockito.doThrow(new IllegalStateException("secret endpoint"))
+                .when(repositoryClient).postReview(eq("owner"), eq("repo"), eq(1L), anyString(),
+                        eq(PostReviewAction.NONE));
+
+        AgentReviewService.DetailedResult result = service.reviewPullRequestDetailed(payload, 1, false, null,
+                new AgentReviewService.SeverityThresholds(null, null, null), 1L, null);
+
+        assertThat(result.result()).isEqualTo(AgentReviewService.ReviewResult.FAILED);
+        assertThat(result.failure().category()).isEqualTo(ReviewDiagnostics.Category.PUBLICATION_FAILURE);
+        assertThat(result.noticeStatus()).isEqualTo(ReviewDiagnostics.NoticeStatus.DELIVERED);
+        ArgumentCaptor<String> comment = ArgumentCaptor.forClass(String.class);
+        verify(repositoryClient).postPullRequestComment(eq("owner"), eq("repo"), eq(1L), comment.capture());
+        assertThat(comment.getValue()).contains("completed review could not be published")
+                .doesNotContain("secret", "endpoint");
+        verify(repositoryClient, times(1)).postPullRequestComment(anyString(), anyString(), anyLong(), anyString());
+        verify(workspaceService).cleanupWorkspace(WORKSPACE);
+    }
+
+    @Test
+    void noticeFailureIsRecordedWithoutMaskingTheOriginalFailureOrRetrying() {
+        when(aiClient.chatWithTools(anyList(), any(), anyList(), anyString(), isNull(), anyInt()))
+                .thenReturn(new ChatTurn("", List.of(), StopReason.MAX_TOKENS, 100, 32));
+        org.mockito.Mockito.doThrow(new IllegalStateException("private endpoint"))
+                .when(repositoryClient).postPullRequestComment(eq("owner"), eq("repo"), eq(1L), anyString());
+
+        AgentReviewService.DetailedResult result = service.reviewPullRequestDetailed(payload, 1, false, null,
+                new AgentReviewService.SeverityThresholds(null, null, null), 1L, null);
+
+        assertThat(result.failure().category()).isEqualTo(ReviewDiagnostics.Category.OUTPUT_TOKEN_LIMIT);
+        assertThat(result.noticeStatus()).isEqualTo(ReviewDiagnostics.NoticeStatus.FAILED);
+        assertThat(result.noticeReason()).isEqualTo("delivery-failed");
+        verify(repositoryClient, times(1)).postPullRequestComment(anyString(), anyString(), anyLong(), anyString());
+        verify(workspaceService).cleanupWorkspace(WORKSPACE);
     }
 
     @Test

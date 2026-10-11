@@ -110,6 +110,13 @@ public class AgentReviewService {
         POSTED, NO_DIFF, FAILED
     }
 
+    public record DetailedResult(ReviewResult result, ReviewDiagnostics.Snapshot failure,
+                                 ReviewDiagnostics.NoticeStatus noticeStatus, String noticeReason) {}
+
+    private enum FailureStage {
+        SETUP, LOOP, POSTPROCESS, PUBLICATION
+    }
+
     private final AgentReviewContext context;
     private final Bot bot;
     private final EventHookPublisher eventHookPublisher;
@@ -175,69 +182,84 @@ public class AgentReviewService {
                                          SeverityThresholds severityThresholds,
                                          Long runId,
                                          Consumer<AgentRunContext.ToolCallRecord> toolCallConsumer) {
-        String owner = payload.getRepository().getOwner().getLogin();
-        String repo = payload.getRepository().getName();
-        Long prNumber = payload.getPullRequest().getNumber();
-        String prTitle = payload.getPullRequest().getTitle();
-        String prBody = payload.getPullRequest().getBody();
+        return reviewPullRequestDetailed(payload, maxToolRounds, enableFormalDecision, decisionPrompt,
+                severityThresholds, runId, toolCallConsumer).result();
+    }
 
-        log.info("Starting agentic review for PR #{} '{}' in {}/{} (formalDecision={})",
-                prNumber, prTitle, owner, repo, enableFormalDecision);
-
-        String diff = repositoryClient.getPullRequestDiff(owner, repo, prNumber);
-        if (diff == null || diff.isBlank()) {
-            log.warn("No diff found for PR #{} in {}/{} — skipping agentic review", prNumber, owner, repo);
-            return ReviewResult.NO_DIFF;
-        }
-
-        DiffSummary diffSummary = DiffSummary.parse(diff);
-        log.info("Parsed diff summary for PR #{}: {}", prNumber, diffSummary.statLine());
-
-        String headBranch = resolveHeadBranch(payload, owner, repo, prNumber);
-        if (headBranch == null) {
-            log.warn("Could not resolve PR head branch for PR #{} in {}/{} — skipping agentic review "
-                    + "(refusing to review the default branch)", prNumber, owner, repo);
-            return ReviewResult.FAILED;
-        }
-
+    public DetailedResult reviewPullRequestDetailed(WebhookPayload payload, int maxToolRounds,
+                                                    boolean enableFormalDecision, String decisionPrompt,
+                                                    SeverityThresholds severityThresholds, Long runId,
+                                                    Consumer<AgentRunContext.ToolCallRecord> toolCallConsumer) {
+        String owner = owner(payload);
+        String repo = repo(payload);
+        Long prNumber = pullRequestNumber(payload);
+        String prTitle = payload != null && payload.getPullRequest() != null
+                ? payload.getPullRequest().getTitle() : null;
+        String prBody = payload != null && payload.getPullRequest() != null
+                ? payload.getPullRequest().getBody() : null;
+        ReviewDiagnostics.Collector diagnostics = newCollector(maxToolRounds, runId, owner, repo, prNumber);
         Path workspaceDir = null;
+        FailureStage stage = FailureStage.SETUP;
+
         try {
+            if (owner == null || repo == null || prNumber == null) {
+                return reportFailure(diagnostics.snapshot(ReviewDiagnostics.Category.SETUP_FAILURE),
+                        owner, repo, prNumber, false);
+            }
+            log.info("Starting agentic review for PR #{} '{}' in {}/{} (formalDecision={})",
+                    prNumber, prTitle, owner, repo, enableFormalDecision);
+
+            String diff = repositoryClient.getPullRequestDiff(owner, repo, prNumber);
+            if (diff == null || diff.isBlank()) {
+                log.warn("No diff found for PR #{} in {}/{} — skipping agentic review", prNumber, owner, repo);
+                return new DetailedResult(ReviewResult.NO_DIFF, null,
+                        ReviewDiagnostics.NoticeStatus.NOT_ATTEMPTED, null);
+            }
+
+            DiffSummary diffSummary = DiffSummary.parse(diff);
+            log.info("Parsed diff summary for PR #{}: {}", prNumber, diffSummary.statLine());
+
+            String headBranch = resolveHeadBranch(payload, owner, repo, prNumber);
+            if (headBranch == null) {
+                return reportFailure(diagnostics.snapshot(ReviewDiagnostics.Category.SETUP_FAILURE),
+                        owner, repo, prNumber, false);
+            }
+
             WorkspaceResult wsResult = workspaceService.prepareWorkspace(
                     repositoryClient, owner, repo, headBranch, prNumber);
             if (!wsResult.success()) {
-                log.warn("Failed to prepare workspace for agentic review of PR #{}: {}",
-                        prNumber, wsResult.error());
-                repositoryClient.postPullRequestComment(owner, repo, prNumber,
-                        "⚠️ **AI Agent (Review)**: Failed to prepare workspace: " + wsResult.error());
-                return ReviewResult.FAILED;
+                log.warn("Failed to prepare workspace for agentic review of PR #{}", prNumber);
+                return reportFailure(diagnostics.snapshot(ReviewDiagnostics.Category.SETUP_FAILURE),
+                        owner, repo, prNumber, false);
             }
             workspaceDir = wsResult.workspacePath();
 
             String systemPrompt = resolveSystemPrompt(enableFormalDecision, decisionPrompt);
             String userMessage = buildKickoffMessage(prTitle, prBody, diffSummary);
-
             AgentSession session = new AgentSession(owner, repo, prNumber, prTitle);
 
+            stage = FailureStage.LOOP;
             LoopOutcome outcome = runReviewLoop(session, owner, repo, prNumber,
                     workspaceDir, headBranch, systemPrompt, userMessage, maxToolRounds, diffSummary,
-                    runId, toolCallConsumer);
-
+                    runId, toolCallConsumer, diagnostics);
             if (!outcome.success()) {
-                log.warn("Agentic review for PR #{} failed; no review will be published", prNumber);
-                return ReviewResult.FAILED;
+                ReviewDiagnostics.Snapshot failure = outcome.payload() instanceof ReviewDiagnostics.Snapshot snapshot
+                        ? snapshot : diagnostics.snapshot(ReviewDiagnostics.Category.UNKNOWN_EXECUTION_FAILURE);
+                return reportFailure(failure, owner, repo, prNumber, false);
             }
 
             String review = outcome.payload() instanceof String s ? s : null;
             if (review == null || review.isBlank()) {
-                log.warn("Agentic review for PR #{} produced no review text", prNumber);
-                return ReviewResult.FAILED;
+                return reportFailure(diagnostics.snapshot(ReviewDiagnostics.Category.EMPTY_FEEDBACK),
+                        owner, repo, prNumber, false);
             }
 
+            stage = FailureStage.POSTPROCESS;
             ParseResult parsed = enableFormalDecision
                     ? parseFormalReviewResult(review, severityThresholds) : ParseResult.noDecision(review);
-
             PostReviewAction action = parsed.action() != null ? parsed.action() : PostReviewAction.NONE;
             String reviewBody = formatReview(parsed.reviewText());
+            stage = FailureStage.PUBLICATION;
             try {
                 repositoryClient.postReview(owner, repo, prNumber, reviewBody, action);
                 if (action != PostReviewAction.NONE) {
@@ -248,24 +270,25 @@ public class AgentReviewService {
                 if (action == PostReviewAction.NONE) {
                     throw e;
                 }
-                // Fall back to a plain comment so the findings survive a failed formal submission.
-                log.warn("Failed to post formal review {} for PR #{} in {}/{}: {} — "
-                        + "falling back to a plain review comment",
-                        action, prNumber, owner, repo, e.getMessage());
+                log.warn("Failed to post formal review for PR #{} in {}/{}; falling back to a plain review comment",
+                        prNumber, owner, repo);
                 repositoryClient.postReviewComment(owner, repo, prNumber, reviewBody);
             }
 
             publishFindingEvents(eventHookPublisher, bot, parsed, owner, repo, prNumber);
             log.info("Agentic review completed for PR #{} in {}/{} (decision={})",
                     prNumber, owner, repo, action);
-            return ReviewResult.POSTED;
+            return new DetailedResult(ReviewResult.POSTED, null,
+                    ReviewDiagnostics.NoticeStatus.NOT_ATTEMPTED, null);
         } catch (Exception e) {
-            log.error("Agentic review failed for PR #{} in {}/{}: {}", prNumber, owner, repo, e.getMessage(), e);
-            postErrorComment(owner, repo, prNumber, "Agentic Review",
-                    "The review could not be completed because of an error. "
-                            + "This is usually a transient issue with the AI provider. "
-                            + "Please try again later.", e);
-            return ReviewResult.FAILED;
+            ReviewDiagnostics.Category category = stage == FailureStage.PUBLICATION
+                    ? ReviewDiagnostics.Category.PUBLICATION_FAILURE
+                    : diagnostics.snapshot(ReviewDiagnostics.Category.UNKNOWN_EXECUTION_FAILURE).providerCallFailed()
+                    ? ReviewDiagnostics.Category.PROVIDER_REQUEST_FAILURE
+                    : stage == FailureStage.LOOP || stage == FailureStage.POSTPROCESS
+                    ? ReviewDiagnostics.Category.UNKNOWN_EXECUTION_FAILURE
+                    : ReviewDiagnostics.Category.SETUP_FAILURE;
+            return reportFailure(diagnostics.snapshot(category), owner, repo, prNumber, false);
         } finally {
             if (workspaceDir != null) {
                 workspaceService.cleanupWorkspace(workspaceDir);
@@ -278,75 +301,85 @@ public class AgentReviewService {
      * a conversational agent loop. Formal review decisions are not applicable here.
      */
     public ReviewResult answerClarification(WebhookPayload payload, String userQuestion, int maxToolRounds) {
-        String owner = payload.getRepository().getOwner().getLogin();
-        String repo = payload.getRepository().getName();
-        Long prNumber = payload.getPullRequest().getNumber();
-        String prTitle = payload.getPullRequest().getTitle();
-        String prBody = payload.getPullRequest().getBody();
+        return answerClarificationDetailed(payload, userQuestion, maxToolRounds, null).result();
+    }
 
-        log.info("Answering clarification for PR #{} '{}' in {}/{}: {}", prNumber, prTitle, owner, repo,
-                userQuestion.length() > 120 ? userQuestion.substring(0, 117) + "..." : userQuestion);
-
-        String diff = repositoryClient.getPullRequestDiff(owner, repo, prNumber);
-        if (diff == null || diff.isBlank()) {
-            log.warn("No diff found for PR #{} in {}/{} — cannot answer clarification", prNumber, owner, repo);
-            return ReviewResult.NO_DIFF;
-        }
-
-        DiffSummary diffSummary = DiffSummary.parse(diff);
-        log.info("Parsed diff summary for clarification on PR #{}: {}", prNumber, diffSummary.statLine());
-
-        String headBranch = resolveHeadBranch(payload, owner, repo, prNumber);
-        if (headBranch == null) {
-            log.warn("Could not resolve PR head branch for PR #{} in {}/{} — cannot answer clarification "
-                    + "(refusing to review the default branch)", prNumber, owner, repo);
-            return ReviewResult.FAILED;
-        }
-
+    public DetailedResult answerClarificationDetailed(WebhookPayload payload, String userQuestion,
+                                                      int maxToolRounds, Long runId) {
+        String owner = owner(payload);
+        String repo = repo(payload);
+        Long prNumber = pullRequestNumber(payload);
+        String prTitle = payload != null && payload.getPullRequest() != null
+                ? payload.getPullRequest().getTitle() : null;
+        String prBody = payload != null && payload.getPullRequest() != null
+                ? payload.getPullRequest().getBody() : null;
+        ReviewDiagnostics.Collector diagnostics = newCollector(maxToolRounds, runId, owner, repo, prNumber);
         Path workspaceDir = null;
+        FailureStage stage = FailureStage.SETUP;
+
         try {
+            if (owner == null || repo == null || prNumber == null) {
+                return reportFailure(diagnostics.snapshot(ReviewDiagnostics.Category.SETUP_FAILURE),
+                        owner, repo, prNumber, true);
+            }
+            log.info("Answering clarification for PR #{} '{}' in {}/{}", prNumber, prTitle, owner, repo);
+            String diff = repositoryClient.getPullRequestDiff(owner, repo, prNumber);
+            if (diff == null || diff.isBlank()) {
+                log.warn("No diff found for PR #{} in {}/{} — cannot answer clarification", prNumber, owner, repo);
+                return new DetailedResult(ReviewResult.NO_DIFF, null,
+                        ReviewDiagnostics.NoticeStatus.NOT_ATTEMPTED, null);
+            }
+
+            DiffSummary diffSummary = DiffSummary.parse(diff);
+            log.info("Parsed diff summary for clarification on PR #{}: {}", prNumber, diffSummary.statLine());
+            String headBranch = resolveHeadBranch(payload, owner, repo, prNumber);
+            if (headBranch == null) {
+                return reportFailure(diagnostics.snapshot(ReviewDiagnostics.Category.SETUP_FAILURE),
+                        owner, repo, prNumber, true);
+            }
+
             WorkspaceResult wsResult = workspaceService.prepareWorkspace(
                     repositoryClient, owner, repo, headBranch, prNumber);
             if (!wsResult.success()) {
-                log.warn("Failed to prepare workspace for clarification on PR #{}: {}",
-                        prNumber, wsResult.error());
-                repositoryClient.postPullRequestComment(owner, repo, prNumber,
-                        "⚠️ **AI Agent**: Failed to prepare workspace: " + wsResult.error());
-                return ReviewResult.FAILED;
+                log.warn("Failed to prepare workspace for clarification on PR #{}", prNumber);
+                return reportFailure(diagnostics.snapshot(ReviewDiagnostics.Category.SETUP_FAILURE),
+                        owner, repo, prNumber, true);
             }
             workspaceDir = wsResult.workspacePath();
-
             String systemPrompt = resolveSystemPrompt(false, null);
             String userMessage = buildClarificationMessage(prTitle, prBody, diffSummary, userQuestion);
-
-
             AgentSession session = new AgentSession(owner, repo, prNumber, prTitle);
 
+            stage = FailureStage.LOOP;
             LoopOutcome outcome = runReviewLoop(session, owner, repo, prNumber,
-                    workspaceDir, headBranch, systemPrompt, userMessage,
-                    maxToolRounds, diffSummary, null, null);
-
+                    workspaceDir, headBranch, systemPrompt, userMessage, maxToolRounds,
+                    diffSummary, runId, null, diagnostics);
             if (!outcome.success()) {
-                log.warn("Clarification for PR #{} failed; no answer will be published", prNumber);
-                return ReviewResult.FAILED;
+                ReviewDiagnostics.Snapshot failure = outcome.payload() instanceof ReviewDiagnostics.Snapshot snapshot
+                        ? snapshot : diagnostics.snapshot(ReviewDiagnostics.Category.UNKNOWN_EXECUTION_FAILURE);
+                return reportFailure(failure, owner, repo, prNumber, true);
             }
 
             String answer = outcome.payload() instanceof String s ? s : null;
             if (answer == null || answer.isBlank()) {
-                log.warn("Clarification for PR #{} produced no answer", prNumber);
-                return ReviewResult.FAILED;
+                return reportFailure(diagnostics.snapshot(ReviewDiagnostics.Category.EMPTY_FEEDBACK),
+                        owner, repo, prNumber, true);
             }
 
+            stage = FailureStage.PUBLICATION;
             repositoryClient.postPullRequestComment(owner, repo, prNumber, formatClarification(answer));
             log.info("Clarification answered for PR #{} in {}/{}", prNumber, owner, repo);
-            return ReviewResult.POSTED;
+            return new DetailedResult(ReviewResult.POSTED, null,
+                    ReviewDiagnostics.NoticeStatus.NOT_ATTEMPTED, null);
         } catch (Exception e) {
-            log.error("Clarification failed for PR #{} in {}/{}: {}", prNumber, owner, repo, e.getMessage(), e);
-            postErrorComment(owner, repo, prNumber, "Clarification",
-                    "The clarification could not be completed because of an error. "
-                            + "This is usually a transient issue with the AI provider. "
-                            + "Please try again later.", e);
-            return ReviewResult.FAILED;
+            ReviewDiagnostics.Category category = stage == FailureStage.PUBLICATION
+                    ? ReviewDiagnostics.Category.PUBLICATION_FAILURE
+                    : diagnostics.snapshot(ReviewDiagnostics.Category.UNKNOWN_EXECUTION_FAILURE).providerCallFailed()
+                    ? ReviewDiagnostics.Category.PROVIDER_REQUEST_FAILURE
+                    : stage == FailureStage.LOOP || stage == FailureStage.POSTPROCESS
+                    ? ReviewDiagnostics.Category.UNKNOWN_EXECUTION_FAILURE
+                    : ReviewDiagnostics.Category.SETUP_FAILURE;
+            return reportFailure(diagnostics.snapshot(category), owner, repo, prNumber, true);
         } finally {
             if (workspaceDir != null) {
                 workspaceService.cleanupWorkspace(workspaceDir);
@@ -574,47 +607,54 @@ public class AgentReviewService {
                 + "\n\n---\n*Read-only agentic review follow-up by AI Git Bot*";
     }
 
-    private void postErrorComment(String owner, String repo, Long prNumber,
-                                  String stage, String userMessage, Throwable error) {
-        if (owner == null || repo == null || prNumber == null) {
-            return;
-        }
-        String reason = error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage();
-        String body = String.format("""
-                ⚠️ **AI Agent (%s)**: %s
-
-                Error details:
-                ```
-                %s
-                ```
-
-                _Check the bot logs for the full stack trace._
-                """, stage, userMessage, abbreviate(reason, 1500));
-        try {
-            repositoryClient.postPullRequestComment(owner, repo, prNumber, body);
-        } catch (RuntimeException postError) {
-            log.warn("Failed to post error comment on PR #{} in {}/{}: {}",
-                    prNumber, owner, repo, postError.getMessage());
-        }
+    private DetailedResult reportFailure(ReviewDiagnostics.Snapshot failure, String owner, String repo,
+                                         Long prNumber, boolean clarification) {
+        ReviewFailureReporter.Delivery delivery = new ReviewFailureReporter().report(
+                repositoryClient, owner, repo, prNumber, failure, clarification);
+        log.error("Agentic review failure: {}; noticeStatus={}; noticeReason={}",
+                failure.details(), delivery.status(),
+                delivery.reason() == null ? "unavailable" : delivery.reason());
+        return new DetailedResult(ReviewResult.FAILED, failure, delivery.status(), delivery.reason());
     }
 
-    private static String abbreviate(String s, int max) {
-        if (s == null) {
-            return "";
-        }
-        return s.length() <= max ? s : s.substring(0, max) + "…";
+    private ReviewDiagnostics.Collector newCollector(int maxToolRounds, Long runId,
+                                                     String owner, String repo, Long prNumber) {
+        AgentConfigProperties.BudgetConfig budgetCfg = agentConfig.getBudget();
+        int rounds = clamp(maxToolRounds, 1, 30);
+        int hardCap = Math.max(budgetCfg.getMaxRounds(), rounds + 2);
+        var integration = bot == null ? null : bot.getAiIntegration();
+        return new ReviewDiagnostics.Collector(
+                Math.max(1, budgetCfg.getMaxContextRounds()), hardCap, budgetCfg.getMaxTokensPerCall(),
+                runId, owner, repo, prNumber,
+                integration == null ? null : integration.getProviderType(),
+                integration == null ? null : integration.getId());
+    }
+
+    public static String owner(WebhookPayload payload) {
+        return payload == null || payload.getRepository() == null || payload.getRepository().getOwner() == null
+                ? null : payload.getRepository().getOwner().getLogin();
+    }
+
+    public static String repo(WebhookPayload payload) {
+        return payload == null || payload.getRepository() == null ? null : payload.getRepository().getName();
+    }
+
+    public static Long pullRequestNumber(WebhookPayload payload) {
+        return payload == null || payload.getPullRequest() == null
+                ? null : payload.getPullRequest().getNumber();
     }
 
     private LoopOutcome runReviewLoop(AgentSession session, String owner, String repo, Long prNumber,
                                       Path workspaceDir, String headBranch,
                                       String systemPrompt, String userMessage, int maxToolRounds,
                                       DiffSummary diffSummary, Long runId,
-                                      Consumer<AgentRunContext.ToolCallRecord> toolCallConsumer) {
+                                      Consumer<AgentRunContext.ToolCallRecord> toolCallConsumer,
+                                      ReviewDiagnostics.Collector diagnostics) {
         ReviewAgentStrategy strategy = new ReviewAgentStrategy(
                 systemPrompt, toolRouter, toolCatalog,
                 context.mcpToolCatalog(), context.allowedBuiltinTools(),
                 responseParser, branchSwitcher, this::fetchFiles,
-                agentConfig.getBudget().getMaxContextRounds());
+                agentConfig.getBudget().getMaxContextRounds(), diagnostics);
 
         AgentConfigProperties.BudgetConfig budgetCfg = agentConfig.getBudget();
         int rounds = clamp(maxToolRounds, 1, 30);
@@ -628,6 +668,9 @@ public class AgentReviewService {
         AgentRunContext ctx = new AgentRunContext(session, owner, repo, prNumber, workspaceDir, headBranch);
         ctx.setDiffSummary(diffSummary);
         ctx.setAuditToolCallConsumer(toolCallConsumer);
+        ctx.setModeObserver(diagnostics::observeMode);
+        ctx.setRoundObserver(diagnostics::observeTurn);
+        ctx.setProviderCallFailureObserver(diagnostics::providerCallFailed);
         return loop.run(ctx, userMessage, strategy);
     }
 

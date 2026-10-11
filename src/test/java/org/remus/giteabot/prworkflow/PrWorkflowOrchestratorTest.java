@@ -20,9 +20,11 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
@@ -153,6 +155,40 @@ class PrWorkflowOrchestratorTest {
         PrWorkflowRun result = orchestrator.run(bot, payloadFor("o", "r", 2), "test-wf");
 
         assertEquals(PrWorkflowRunStatus.SUCCESS, result.getStatus());
+    }
+
+    @Test
+    void runPersistsAndPropagatesFailureSummaryWithoutFindingEvent() {
+        String summary = "Agentic review failed (context-round-limit; notice delivered)";
+        when(runService.start(anyLong(), any(), any(), anyLong(), any()))
+                .thenReturn(runWithId(12L));
+        when(runService.complete(anyLong(), any(), any()))
+                .thenReturn(runWithIdAndSummary(12L, PrWorkflowRunStatus.FAILED, summary));
+
+        PrWorkflowOrchestrator orchestrator = newOrchestrator(
+                workflowWithResult(WorkflowResult.failed(summary)));
+        Bot bot = new Bot();
+        bot.setId(1L);
+        bot.setName("test-bot");
+
+        PrWorkflowRun result = orchestrator.run(bot, payloadFor("o", "r", 12), "test-wf");
+
+        assertEquals(PrWorkflowRunStatus.FAILED, result.getStatus());
+        verify(runService).complete(12L, PrWorkflowRunStatus.FAILED, summary);
+        verify(eventHookPublisher).publish(eq(EventHookEventType.PR_WORKFLOW_FAILED), eq(bot),
+                eq("o"), eq("r"), eq(12L), org.mockito.ArgumentMatchers.isNull(),
+                org.mockito.ArgumentMatchers.argThat(data -> summary.equals(data.get("summary"))));
+        verify(eventHookPublisher, org.mockito.Mockito.never()).publish(
+                eq(EventHookEventType.PR_WORKFLOW_COMPLETED), any(), any(), any(), anyLong(), any(), any());
+
+        ArgumentCaptor<org.remus.giteabot.audit.PrAuditEvent> captor =
+                ArgumentCaptor.forClass(org.remus.giteabot.audit.PrAuditEvent.class);
+        verify(auditService, org.mockito.Mockito.atLeast(1)).record(captor.capture());
+        assertTrue(captor.getAllValues().stream().anyMatch(event ->
+                event.getEventType() == org.remus.giteabot.audit.AuditEventType.PR_WORKFLOW_RUN_COMPLETED
+                        && event.getEventPayloadJson().contains(summary)));
+        assertFalse(captor.getAllValues().stream().anyMatch(event ->
+                event.getEventType() == org.remus.giteabot.audit.AuditEventType.FINDING_POSTED));
     }
 
     @Test
@@ -394,6 +430,12 @@ class PrWorkflowOrchestratorTest {
     private static PrWorkflowRun runWithIdAndStatus(long id, PrWorkflowRunStatus status) {
         PrWorkflowRun run = runWithId(id);
         run.setStatus(status);
+        return run;
+    }
+
+    private static PrWorkflowRun runWithIdAndSummary(long id, PrWorkflowRunStatus status, String summary) {
+        PrWorkflowRun run = runWithIdAndStatus(id, status);
+        run.setSummary(summary);
         return run;
     }
 }

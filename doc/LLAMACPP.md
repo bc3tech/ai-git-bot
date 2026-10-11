@@ -286,6 +286,19 @@ Then configure the AI Integration in the web UI with API URL `http://llamacpp:80
 
 ## Troubleshooting
 
+### Agentic Review Fails Before Producing a Review
+
+Check the workflow run summary and its detailed step for the failure category.
+The diagnostics distinguish context-exploration rounds from total model turns
+and report the effective output-token limit and reported usage when available.
+An `END_TURN` provider response can still be followed by another context
+request, so it does not necessarily mean the review is complete.
+
+Repeated context requests are recorded as an observation, not as a confirmed
+cause. Use the category and counts to investigate before changing limits or
+models; increasing a budget is not guaranteed to resolve a stalled run. The PR
+failure notice is intentionally brief and does not include partial findings.
+
 ### Short or Generic Reviews
 
 Local models may produce shorter responses than cloud providers. To get more detailed reviews:
@@ -347,4 +360,3 @@ If the agent still produces invalid JSON despite grammar constraints:
 - [GBNF Grammar Documentation](https://github.com/ggerganov/llama.cpp/blob/master/grammars/README.md)
 - [TheBloke's GGUF Models](https://huggingface.co/TheBloke)
 - [Using Ollama](OLLAMA.md) — Alternative local LLM option
-

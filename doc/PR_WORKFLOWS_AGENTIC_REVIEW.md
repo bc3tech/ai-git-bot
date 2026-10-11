@@ -28,6 +28,40 @@ The bot is **read-only**: this workflow never commits, pushes, creates branches,
 or changes your code. Its only outputs are the review comment and, when you
 enable it, the formal review decision.
 
+## Failure diagnostics
+
+If the run fails before producing a complete review, the run summary records
+the failure category and known limiting counts. Categories distinguish
+`context-round-limit`, `loop-round-limit`, `output-token-limit`,
+`incomplete-completion`, `unknown-completion`, `empty-feedback`,
+`setup-failure`, `provider-request-failure`, `publication-failure`, and
+`unknown-execution-failure`.
+
+The detailed workflow step records available `turns`, `contextRounds`,
+`loopRounds`, `outputTokenLimit`, `outputTokens`, `mode`, normalized
+`completion`, `promptCharsEstimate`, `responseChars`, `contextChars`, and
+provider/integration correlation. `requestOccurrences` counts context
+operations; `repeatedRequestOccurrences` counts duplicates, while
+`repeatedRequestRounds` counts turns containing at least one duplicate. The step
+also records `providerCallFailed` and whether the single plain PR failure notice
+was delivered, failed, or unavailable, including a controlled reason when it
+could not be attempted. Unknown metadata is shown as unavailable.
+
+Duplicate identities include the repository ref. Native calls are observed in
+execution order: a successful `branch-switcher` changes the diagnostic ref for
+subsequent calls, including calls in the same batch, without changing the loop's
+base branch or tool dispatch. Legacy requests use the selected context branch.
+
+Context-exploration rounds and total model turns are separate limits. A
+provider response ending with `END_TURN` does not by itself mean the review
+finished: the agent may still request context. Repeated requests are an
+observation to help investigate a run, not proof of cause. A failure notice
+does not contain partial findings or make a formal review decision. Successful
+reviews do not receive a failure notice, and no-diff runs remain skipped.
+
+Added diagnostics contain bounded metadata only; they do not include prompts,
+model output, source contents, or tool arguments.
+
 ## Settings
 
 Set these on **System settings → Workflow configurations → Workflows → Agentic

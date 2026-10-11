@@ -77,6 +77,7 @@ public final class AgentLoop {
 
         ToolingMode resolvedMode = resolveMode(strategy);
         ctx.setToolingMode(resolvedMode);
+        observeMode(ctx, resolvedMode);
         List<ToolDescriptor> tools = resolvedMode == ToolingMode.NATIVE
                 ? strategy.toolDescriptors() : List.of();
         log.debug("AgentLoop starting for issue #{}: provider={}, mode={}, tools={}",
@@ -92,7 +93,7 @@ public final class AgentLoop {
             long started = System.nanoTime();
             ChatTurn turn;
             try {
-                turn = callAiWithRetry(history, currentMessage, tools, systemPrompt);
+                turn = callAiWithRetry(ctx, history, currentMessage, tools, systemPrompt);
             } finally {
                 AgentMetricsHolder.recordLatency(modeTag(resolvedMode), providerTag,
                         Duration.ofNanos(System.nanoTime() - started));
@@ -116,6 +117,14 @@ public final class AgentLoop {
             // inputTokens, those take precedence in TokenUsageTracker.record().
             int promptChars = computePromptChars(history, systemPrompt, currentMessage, tools);
             tokenTracker.record(ctx.session(), turn, promptChars);
+            observeTurn(ctx, new AgentRunContext.RoundObservation(
+                    round,
+                    resolvedMode,
+                    turn.stopReason(),
+                    turn.outputTokens() > 0 ? turn.outputTokens() : null,
+                    budget.maxTokensPerCall(),
+                    promptChars,
+                    aiResponse == null ? 0 : aiResponse.length()));
             if (tokenTracker.shouldCompactProactively(ctx.session())) {
                 log.info("AgentLoop round {}/{} for issue #{}: context budget exceeded (usage: {}%),"
                                 + " truncating tool messages",
@@ -350,7 +359,7 @@ public final class AgentLoop {
      * @return the {@link ChatTurn} from the successful AI call
      * @throws RuntimeException if the failure is not retryable or the retry fails
      */
-    private ChatTurn callAiWithRetry(List<AiMessage> history, String currentMessage,
+    private ChatTurn callAiWithRetry(AgentRunContext ctx, List<AiMessage> history, String currentMessage,
                                      List<ToolDescriptor> tools, String systemPrompt) {
         int maxAttempts = 2;
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -363,6 +372,7 @@ public final class AgentLoop {
                 boolean transientNetworkFailure = isTransientNetworkFailure(e);
 
                 if (attempt == maxAttempts || (!promptTooLong && !transientNetworkFailure)) {
+                    observeProviderCallFailure(ctx);
                     throw e;
                 }
 
@@ -381,6 +391,39 @@ public final class AgentLoop {
         }
         // Unreachable, but keeps the compiler happy
         throw new IllegalStateException("callAiWithRetry: exceeded max retries");
+    }
+
+    private static void observeTurn(AgentRunContext ctx, AgentRunContext.RoundObservation observation) {
+        if (ctx.roundObserver() == null) {
+            return;
+        }
+        try {
+            ctx.roundObserver().accept(observation);
+        } catch (RuntimeException e) {
+            log.warn("AgentLoop round observer failed; continuing without changing the run outcome");
+        }
+    }
+
+    private static void observeMode(AgentRunContext ctx, ToolingMode mode) {
+        if (ctx.modeObserver() == null) {
+            return;
+        }
+        try {
+            ctx.modeObserver().accept(mode);
+        } catch (RuntimeException e) {
+            log.warn("AgentLoop mode observer failed; continuing without changing the run outcome");
+        }
+    }
+
+    private static void observeProviderCallFailure(AgentRunContext ctx) {
+        if (ctx.providerCallFailureObserver() == null) {
+            return;
+        }
+        try {
+            ctx.providerCallFailureObserver().run();
+        } catch (RuntimeException e) {
+            log.warn("AgentLoop provider-failure observer failed; preserving the provider error");
+        }
     }
 
     static boolean isTransientNetworkFailure(Throwable error) {

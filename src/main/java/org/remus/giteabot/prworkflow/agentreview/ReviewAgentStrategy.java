@@ -8,6 +8,7 @@ import org.remus.giteabot.agent.loop.LoopOutcome;
 import org.remus.giteabot.agent.loop.StepDecision;
 import org.remus.giteabot.agent.loop.ToolingMode;
 import org.remus.giteabot.agent.model.ImplementationPlan;
+import org.remus.giteabot.agent.shared.BranchRefs;
 import org.remus.giteabot.agent.shared.BranchSwitcher;
 import org.remus.giteabot.agent.shared.McpTools;
 import org.remus.giteabot.agent.shared.ToolFailures;
@@ -72,9 +73,12 @@ public final class ReviewAgentStrategy implements AgentStrategy {
     private final BranchSwitcher branchSwitcher;
     private final FileFetcher fileFetcher;
     private final int maxContextRounds;
+    private final ReviewDiagnostics.Collector diagnostics;
 
     /** Read-only context-fetch rounds consumed in legacy mode. */
     private int contextRounds = 0;
+    // Native switches affect the workspace but must not change the loop's base branch.
+    private String diagnosticBranch;
 
     public ReviewAgentStrategy(String systemPrompt,
                                AgentToolRouter toolRouter,
@@ -85,6 +89,20 @@ public final class ReviewAgentStrategy implements AgentStrategy {
                                BranchSwitcher branchSwitcher,
                                FileFetcher fileFetcher,
                                int maxContextRounds) {
+        this(systemPrompt, toolRouter, catalog, mcpToolCatalog, allowedBuiltinTools,
+                responseParser, branchSwitcher, fileFetcher, maxContextRounds, null);
+    }
+
+    public ReviewAgentStrategy(String systemPrompt,
+                               AgentToolRouter toolRouter,
+                               ToolCatalog catalog,
+                               McpToolCatalog mcpToolCatalog,
+                               Set<String> allowedBuiltinTools,
+                               AiResponseParser responseParser,
+                               BranchSwitcher branchSwitcher,
+                               FileFetcher fileFetcher,
+                               int maxContextRounds,
+                               ReviewDiagnostics.Collector diagnostics) {
         this.systemPrompt = systemPrompt;
         this.toolRouter = toolRouter;
         this.catalog = catalog;
@@ -94,6 +112,7 @@ public final class ReviewAgentStrategy implements AgentStrategy {
         this.branchSwitcher = branchSwitcher;
         this.fileFetcher = fileFetcher;
         this.maxContextRounds = Math.max(1, maxContextRounds);
+        this.diagnostics = diagnostics;
     }
 
     @Override
@@ -116,7 +135,7 @@ public final class ReviewAgentStrategy implements AgentStrategy {
     public StepDecision step(AgentRunContext ctx, ChatTurn turn, int round) {
         StopReason expected = turn.hasToolCalls() ? StopReason.TOOL_USE : StopReason.END_TURN;
         if (turn.stopReason() != expected) {
-            return incompleteTurn(ctx, turn.stopReason());
+            return incompleteTurn(ctx, turn);
         }
         // Only a completed, non-empty text turn may become the final review.
         if (!turn.hasToolCalls()) {
@@ -128,8 +147,19 @@ public final class ReviewAgentStrategy implements AgentStrategy {
         for (ToolCall call : turn.toolCalls()) {
             requests.add(toRequest(call));
         }
-        List<ToolResult> results = executeAll(ctx, requests);
+        if (diagnostics != null) {
+            diagnostics.contextRoundExecuted();
+            if (diagnosticBranch == null) {
+                diagnosticBranch = BranchRefs.normalize(ctx.baseBranch());
+            }
+        }
+        List<ToolResult> results = executeAll(ctx, requests, turn.toolCalls(), round);
         List<StepDecision.ToolCallResult> packaged = packageResults(requests, results, turn.toolCalls());
+        if (diagnostics != null) {
+            diagnostics.addContextCharacters(packaged.stream()
+                    .mapToInt(result -> result.resultText() == null ? 0 : result.resultText().length())
+                    .sum());
+        }
         return new StepDecision.ContinueWithToolResults(packaged, null);
     }
 
@@ -139,15 +169,20 @@ public final class ReviewAgentStrategy implements AgentStrategy {
         // JSON protocol has no native-call envelope, so such a mix can only be
         // provider metadata leaking into a text turn — never accept its text.
         if (turn.stopReason() != StopReason.END_TURN || turn.hasToolCalls()) {
-            return incompleteTurn(ctx, turn.stopReason());
+            return incompleteTurn(ctx, turn);
         }
         return step(ctx, turn.assistantText(), round);
     }
 
-    private StepDecision incompleteTurn(AgentRunContext ctx, StopReason reason) {
-        log.warn("Agentic review stopped before completion for PR #{}: {}", ctx.issueNumber(), reason);
-        return new StepDecision.Finish(LoopOutcome.fail(ctx.baseBranch(),
-                "Agentic review stopped before completion: " + reason));
+    private StepDecision incompleteTurn(AgentRunContext ctx, ChatTurn turn) {
+        ReviewDiagnostics.Category category = switch (turn.stopReason()) {
+            case MAX_TOKENS -> ReviewDiagnostics.Category.OUTPUT_TOKEN_LIMIT;
+            case OTHER -> ReviewDiagnostics.Category.UNKNOWN_COMPLETION;
+            default -> ReviewDiagnostics.Category.INCOMPLETE_COMPLETION;
+        };
+        log.warn("Agentic review stopped before completion for PR #{}: {}", ctx.issueNumber(),
+                turn.stopReason());
+        return new StepDecision.Finish(LoopOutcome.fail(ctx.baseBranch(), failureSnapshot(category)));
     }
 
     @Override
@@ -174,14 +209,24 @@ public final class ReviewAgentStrategy implements AgentStrategy {
         // Gather the requested read-only context and ask the model to continue.
         if (wantsContext && contextRounds < maxContextRounds) {
             contextRounds++;
+            if (diagnostics != null) {
+                diagnostics.contextRoundExecuted();
+            }
             log.info("Agentic review (legacy) gathering context for PR #{} (round {}/{})",
                     ctx.issueNumber(), contextRounds, maxContextRounds);
 
             BranchSwitcher.Result branchResult = branchSwitcher.apply(
                     ctx.workspaceDir(), ctx.baseBranch(), toolRequests, ctx.issueNumber());
             ctx.setBaseBranch(branchResult.selectedBranch());
+            if (diagnostics != null) {
+                diagnosticBranch = BranchRefs.normalize(ctx.baseBranch());
+                diagnostics.observeLegacyRequests(toolRequests, requestFiles, ctx.baseBranch(), round);
+            }
 
             String context = gatherContext(ctx, requestFiles, branchResult.remainingToolRequests());
+            if (diagnostics != null) {
+                diagnostics.addContextCharacters(context.length());
+            }
             return new StepDecision.Continue(
                     "Here is the requested repository context:\n" + context
                             + "\n\nContinue your review. When you have gathered enough context, reply with "
@@ -191,7 +236,11 @@ public final class ReviewAgentStrategy implements AgentStrategy {
         if (wantsContext) {
             log.warn("Agentic review (legacy) hit the context-round cap ({}) for PR #{} before completion",
                     maxContextRounds, ctx.issueNumber());
-            return new StepDecision.Finish(onBudgetExhausted(ctx));
+            if (diagnostics != null) {
+                diagnostics.observeLegacyRequests(toolRequests, requestFiles, ctx.baseBranch(), round);
+            }
+            return new StepDecision.Finish(LoopOutcome.fail(ctx.baseBranch(),
+                    failureSnapshot(ReviewDiagnostics.Category.CONTEXT_ROUND_LIMIT)));
         }
         return finish(ctx, finalReviewText(plan, aiResponse));
     }
@@ -200,7 +249,7 @@ public final class ReviewAgentStrategy implements AgentStrategy {
     public LoopOutcome onBudgetExhausted(AgentRunContext ctx) {
         log.warn("Agentic review loop exhausted its round budget for PR #{}", ctx.issueNumber());
         return LoopOutcome.fail(ctx.baseBranch(),
-                "⚠️ *The review loop reached its round budget limit and could not generate a review.*");
+                failureSnapshot(ReviewDiagnostics.Category.LOOP_ROUND_LIMIT));
     }
 
     // ---------------------------------------------------------------------
@@ -208,9 +257,17 @@ public final class ReviewAgentStrategy implements AgentStrategy {
     private StepDecision finish(AgentRunContext ctx, String review) {
         if (review == null || review.isBlank()) {
             return new StepDecision.Finish(LoopOutcome.fail(ctx.baseBranch(),
-                    "⚠️ *The review feedback was empty or could not be generated by the agent.*"));
+                    failureSnapshot(ReviewDiagnostics.Category.EMPTY_FEEDBACK)));
         }
         return new StepDecision.Finish(LoopOutcome.success(ctx.baseBranch(), review));
+    }
+
+    private ReviewDiagnostics.Snapshot failureSnapshot(ReviewDiagnostics.Category category) {
+        if (diagnostics != null) {
+            return diagnostics.snapshot(category);
+        }
+        return new ReviewDiagnostics.Collector(maxContextRounds, null, null, null,
+                null, null, null, null, null).snapshot(category);
     }
 
     /**
@@ -269,11 +326,28 @@ public final class ReviewAgentStrategy implements AgentStrategy {
     }
 
     private List<ToolResult> executeAll(AgentRunContext ctx, List<ImplementationPlan.ToolRequest> requests) {
+        return executeAll(ctx, requests, null, 0);
+    }
+
+    private List<ToolResult> executeAll(AgentRunContext ctx, List<ImplementationPlan.ToolRequest> requests,
+                                        List<ToolCall> nativeCalls, int round) {
         List<ToolResult> results = new ArrayList<>(requests.size());
-        for (ImplementationPlan.ToolRequest req : requests) {
-            results.add(toolRouter.execute(AgentToolRouter.Mode.WRITER,
+        for (int i = 0; i < requests.size(); i++) {
+            ImplementationPlan.ToolRequest req = requests.get(i);
+            if (diagnostics != null && nativeCalls != null) {
+                diagnostics.observeNativeRequests(List.of(nativeCalls.get(i)), diagnosticBranch, round);
+            }
+            ToolResult result = toolRouter.execute(AgentToolRouter.Mode.WRITER,
                     new ToolCallContext(ctx.owner(), ctx.repo(), ctx.issueNumber(),
-                            ctx.workspaceDir(), req, ctx.diffSummary())));
+                            ctx.workspaceDir(), req, ctx.diffSummary()));
+            results.add(result);
+            if (diagnostics != null && nativeCalls != null
+                    && "branch-switcher".equalsIgnoreCase(req.getTool())) {
+                String switchedBranch = BranchRefs.extractSwitchedBranch(result);
+                if (switchedBranch != null) {
+                    diagnosticBranch = switchedBranch;
+                }
+            }
         }
         return results;
     }
@@ -338,4 +412,3 @@ public final class ReviewAgentStrategy implements AgentStrategy {
         return node.isString() ? node.asString() : node.toString();
     }
 }
-

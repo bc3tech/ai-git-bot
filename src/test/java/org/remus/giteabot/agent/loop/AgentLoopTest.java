@@ -17,6 +17,7 @@ import org.springframework.web.client.ResourceAccessException;
 
 import java.net.SocketException;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -214,6 +215,69 @@ class AgentLoopTest {
         assertThatThrownBy(() -> loop.run(ctx, "go", finishingStrategy()))
                 .isSameAs(serializationFailure);
         verify(aiClient).chatWithTools(anyList(), anyString(), eq(List.of()), anyString(), isNull(), anyInt());
+    }
+
+    @Test
+    void run_observesOnlySafeReturnedTurnMetadata() {
+        AgentLoop loop = new AgentLoop(aiClient, sessionService,
+                new AgentBudget(2, 1, 0, 1024, 8000, 120_000, 200_000, 0.7));
+        List<AgentRunContext.RoundObservation> observations = new ArrayList<>();
+        ctx.setRoundObserver(observations::add);
+        when(aiClient.chatWithTools(anyList(), anyString(), eq(List.of()), anyString(), isNull(), anyInt()))
+                .thenReturn(new ChatTurn("safe response", List.of(), StopReason.END_TURN, 30, 7));
+
+        loop.run(ctx, "go", finishingStrategy());
+
+        assertThat(observations).containsExactly(new AgentRunContext.RoundObservation(
+                1, ToolingMode.LEGACY, StopReason.END_TURN, 7L, 1024, 5, 13));
+    }
+
+    @Test
+    void run_providerFailureObserverRunsAtFinalProviderBoundary() {
+        AgentLoop loop = new AgentLoop(aiClient, sessionService,
+                new AgentBudget(2, 1, 0, 1024, 8000, 120_000, 200_000, 0.7));
+        AtomicInteger failures = new AtomicInteger();
+        ctx.setProviderCallFailureObserver(failures::incrementAndGet);
+        HttpMessageNotWritableException failure = new HttpMessageNotWritableException("provider failed");
+        when(aiClient.chatWithTools(anyList(), anyString(), eq(List.of()), anyString(), isNull(), anyInt()))
+                .thenThrow(failure);
+
+        assertThatThrownBy(() -> loop.run(ctx, "go", finishingStrategy())).isSameAs(failure);
+
+        assertThat(failures).hasValue(1);
+    }
+
+    @Test
+    void run_providerFailureAfterRetryNotifiesOnceWithoutChangingRetryCount() {
+        AgentLoop loop = new AgentLoop(aiClient, sessionService,
+                new AgentBudget(2, 1, 0, 1024, 8000, 120_000, 200_000, 0.7));
+        AtomicInteger failures = new AtomicInteger();
+        ctx.setProviderCallFailureObserver(failures::incrementAndGet);
+        ResourceAccessException first = new ResourceAccessException("first", new SocketException("Connection reset"));
+        ResourceAccessException second = new ResourceAccessException("second", new SocketException("Connection reset"));
+        when(aiClient.chatWithTools(anyList(), anyString(), eq(List.of()), anyString(), isNull(), anyInt()))
+                .thenThrow(first).thenThrow(second);
+
+        assertThatThrownBy(() -> loop.run(ctx, "go", finishingStrategy())).isSameAs(second);
+
+        assertThat(failures).hasValue(1);
+        verify(aiClient, times(2)).chatWithTools(anyList(), anyString(), eq(List.of()),
+                anyString(), isNull(), anyInt());
+    }
+
+    @Test
+    void run_roundObserverFailureCannotChangeTheStrategyOutcome() {
+        AgentLoop loop = new AgentLoop(aiClient, sessionService,
+                new AgentBudget(2, 1, 0, 1024, 8000, 120_000, 200_000, 0.7));
+        ctx.setRoundObserver(observation -> {
+            throw new IllegalStateException("observer failure");
+        });
+        when(aiClient.chatWithTools(anyList(), anyString(), eq(List.of()), anyString(), isNull(), anyInt()))
+                .thenReturn(ChatTurn.text("done"));
+
+        LoopOutcome outcome = loop.run(ctx, "go", finishingStrategy());
+
+        assertThat(outcome.success()).isTrue();
     }
 
     @Test
