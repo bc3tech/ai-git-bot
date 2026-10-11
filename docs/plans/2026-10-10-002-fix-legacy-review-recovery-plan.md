@@ -361,6 +361,10 @@ review artifacts rather than adding unrelated hook tooling.
 - Affected regression suites and final targeted fixes pass in local Podman,
   including Unicode numbered-source parsing, retry stall enforcement, trusted
   coverage disclosure and lease loss during a singleton file fetch.
-- Feature-video is not recorded: there is no changed browser surface, and no
-  live workflow demonstration or server mutation is authorized. Implementation
-  completion does not imply deployment or a verified live model replay.
+- An 18-second deterministic explanatory walkthrough was encoded locally and
+  verified as H.264 at 1280x900. It explicitly is not a live model/server
+  recording. Native GitHub attachment upload returned HTTP 404, and the browser
+  upload alternative failed with a connection timeout. The ignored
+  `target/recovery-walkthrough.mp4` is preserved; no video is attached to PR #4.
+  Media publication remains blocked. Implementation completion does not imply
+  deployment or a verified live model replay.

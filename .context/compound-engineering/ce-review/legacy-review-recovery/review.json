@@ -19,5 +19,5 @@
     "skipped": "Retained diagnostic compatibility constructor per explicit caller-compatibility invariant."
   },
   "operational": "Deployment and same-model live replay require separate permission; remote Compose remains read-only.",
-  "video": "Not recorded: no changed browser surface or authorized live workflow demonstration."
+  "video": "An 18-second deterministic explanatory MP4 was encoded locally and verified as H.264, 1280x900. It explicitly is not a live model/server recording. Native GitHub upload returned HTTP 404; the browser upload alternative failed with a connection timeout. No video is attached to PR #4; the ignored target/recovery-walkthrough.mp4 is preserved for upload."
 }
