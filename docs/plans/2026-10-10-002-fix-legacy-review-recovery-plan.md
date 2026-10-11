@@ -344,3 +344,10 @@ review artifacts rather than adding unrelated hook tooling.
 - Browser validation is inapplicable: this change affects backend Java and
   documentation, not routes, views, styles or components. No browser or server
   was started, and no live review was triggered.
+- Independent review identified remaining retry-boundary, omitted-source
+  inventory, source-line splitting and tool EOF/empty-result cases. The final
+  retry must not grant an extra recovery turn if its retention removes tentative
+  progress. Inventory labels must survive source eviction within the same budget.
+- Regression assertions must prove application-owned coverage disclosure, not
+  merely match wording already present in a model summary. Historical fenced
+  envelopes with trailing classification remain accepted for compatibility.
