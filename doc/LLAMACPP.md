@@ -20,6 +20,26 @@ The **GBNF grammar support** is the main advantage for this bot — it allows co
 
 The bot requests streaming usage counters with `stream_options.include_usage`. Use a current llama.cpp server build that supports this OpenAI-compatible option if token usage reporting is required; completions remain supported when an older build omits those counters.
 
+### Agentic Review recovery
+
+Full legacy Agentic Review uses bare JSON for both exploration and completed
+reviews, matching the active grammar. Optional classification is nested inside
+the review object. This does not require native function calling or a model
+upgrade.
+
+Repeated requests for retained complete evidence receive one recovery turn
+without replaying full source blocks. Continued non-progress fails explicitly;
+large optional reads yield labeled excerpts and narrower-read guidance.
+Completed reviews with unresolved requested evidence disclose limited coverage
+and cannot approve.
+
+Pre-send budgeting includes the rendered ChatML request and output headroom.
+Its conservative estimate is not an exact tokenizer or a guarantee of provider
+fit; the bounded prompt-too-long retry remains available. Configure the AI
+integration's context window to match the server. Higher round limits are not a
+remedy for stalled repetition. See [Agentic PR Review](PR_WORKFLOWS_AGENTIC_REVIEW.md#legacy-evidence-recovery)
+for the failure categories and unchanged safety gates.
+
 ## Quick Start
 
 A ready-to-use Docker Compose environment is provided:

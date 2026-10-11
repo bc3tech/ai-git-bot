@@ -37,15 +37,49 @@ persistence. Cancellation and lease loss prevent further writes. When both
 workflows react to the same update, agentic review takes precedence.
 
 The workspace uses a detached checkout of the snapshot's head SHA, and API file
-reads use that same SHA. A failed pinned checkout or read stops the review; the
-bot never substitutes a branch's newer content. If no head SHA is available,
+reads use that same SHA. A failed pinned checkout stops the review; a failed
+legacy evidence read remains an explicit coverage limitation and never falls
+back to a branch's newer content. If no head SHA is available,
 exploration is limited to the supplied diff, with summary-only publication.
+
+## Legacy evidence recovery
+
+Full reviews using the legacy JSON tool protocol return one bare JSON object:
+either a context request or the completed `summary`/`findings` envelope.
+Optional formal classification lives inside that envelope, not in a second
+trailing object. Native reviews and follow-up answers retain their existing
+protocols.
+
+Evidence is tracked at the pinned revision. An equivalent request whose
+complete evidence remains in the effective request is acknowledged instead of
+being executed or appended again. Mixed file batches fetch only eligible files.
+Evicted evidence may be requested again; a fetch-cache entry is not proof that
+the model still has the source.
+
+A context turn without new or restored usable evidence gets one recovery
+opportunity. Another consecutive non-progress turn fails with
+`stalled-context`. Failed reads and identical excerpts do not count as progress.
+Recovery uses the existing overall and context-round budgets, not extra turns.
+
+Before each provider attempt, the bot budgets instructions, active task,
+pinned revision, history, evidence inventory and reserved output headroom.
+Optional oversized reads become labeled excerpts with included and omitted
+regions and narrower-read guidance. Mandatory task/instruction overflow fails
+with `mandatory-context-limit`, without sending the oversized request.
+Conservative request estimates are policy checks, not exact tokenization;
+the existing bounded prompt-too-long retry remains a last resort.
+
+Known requested evidence that remains unavailable or incomplete degrades an
+otherwise completed review: its summary discloses limited coverage and it
+cannot approve. Eviction alone does not erase previously complete acquisition.
+An unfinished response never becomes a degraded fallback review.
 
 ## Failure diagnostics
 
 If the run fails before producing a complete review, the run summary records
 the failure category and known limiting counts. Categories distinguish
-`context-round-limit`, `loop-round-limit`, `output-token-limit`,
+`context-round-limit`, `loop-round-limit`, `stalled-context`,
+`mandatory-context-limit`, `output-token-limit`,
 `incomplete-completion`, `unknown-completion`, `empty-feedback`,
 `setup-failure`, `provider-request-failure`, `publication-failure`, and
 `unknown-execution-failure`.
@@ -74,6 +108,8 @@ reviews do not receive a failure notice, and no-diff runs remain skipped.
 
 Added diagnostics contain bounded metadata only; they do not include prompts,
 model output, source contents, or tool arguments.
+Recovery also distinguishes executed and suppressed context operations using
+safe counts; evidence identities remain private to the run.
 
 ## Settings
 

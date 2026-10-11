@@ -398,10 +398,10 @@ public final class AgentLoop {
                     log.warn("AgentLoop: AI call failed with prompt-too-long error on attempt {}/{}. "
                             + "Preparing a smaller request and retrying. Error: {}",
                             attempt, maxAttempts, e.getMessage());
-                    // Aggressive compaction: keep only the last 2 compaction units
                     if (prepareRequests) {
                         aggressive = true;
                     } else {
+                        // Generic compaction keeps only the last two exchange units.
                         compactor.compactAggressively(history);
                     }
                 } else {

@@ -8,6 +8,7 @@ import org.remus.giteabot.agent.issueimpl.AiResponseParser;
 import org.remus.giteabot.agent.loop.AgentBudget;
 import org.remus.giteabot.agent.loop.AgentLoop;
 import org.remus.giteabot.agent.loop.AgentRunContext;
+import org.remus.giteabot.agent.loop.ContextBudgetExceededException;
 import org.remus.giteabot.agent.loop.LoopOutcome;
 import org.remus.giteabot.agent.loop.ToolingMode;
 import org.remus.giteabot.agent.session.AgentSession;
@@ -347,9 +348,10 @@ public class AgentReviewService {
             AgentSession session = new AgentSession(owner, repo, prNumber, prTitle);
             runFence.requireActive("before running agentic review loop");
             stage = FailureStage.LOOP;
+            List<String> coverageNotes = new ArrayList<>();
             LoopOutcome outcome = runReviewLoop(session, owner, repo, prNumber, workspaceDir, snapshot.headSha(),
                     systemPrompt, userMessage, maxToolRounds, diffSummary, runId, toolCallConsumer, head, runFence,
-                    diagnostics);
+                    diagnostics, true, coverageNotes);
             if (!outcome.success()) {
                 ReviewDiagnostics.Snapshot failure = outcome.payload() instanceof ReviewDiagnostics.Snapshot detail
                         ? detail : diagnostics.snapshot(ReviewDiagnostics.Category.UNKNOWN_EXECUTION_FAILURE);
@@ -367,6 +369,12 @@ public class AgentReviewService {
             GroundingResult grounded = grounding.ground(document, new Evidence(head, base, snapshot.diff()), digest,
                     state.findingsForDedup(bot.getId(), owner, repo, prNumber, AgentReviewWorkflow.KEY),
                     doubleCheckSettings, aiClient, doubleCheckBudget, event, runFence);
+            if (!coverageNotes.isEmpty()) {
+                List<String> notes = new ArrayList<>(grounded.summaryNotes());
+                notes.addAll(coverageNotes);
+                grounded = new GroundingResult(grounded.publish(), notes, grounded.threadActions(),
+                        grounded.dispositions(), grounded.evidence(), grounded.supersedes(), true);
+            }
             ParseResult decision = groundedDecision(document.summary(), grounded, enableFormalDecision, severityThresholds);
             PostReviewAction publicationAction = decision.action() == PostReviewAction.APPROVE
                     ? PostReviewAction.NONE : decision.action();
@@ -414,7 +422,10 @@ public class AgentReviewService {
             return failureWithoutNotice(diagnostics.snapshot(ReviewDiagnostics.Category.UNKNOWN_EXECUTION_FAILURE),
                     "lease-lost");
         } catch (Exception e) {
-            ReviewDiagnostics.Category category = failureCategory(stage, diagnostics);
+            ReviewDiagnostics.Category category = e instanceof ContextBudgetExceededException
+                    ? ReviewDiagnostics.Category.MANDATORY_CONTEXT_LIMIT
+                    : e instanceof StalledReviewContextException
+                    ? ReviewDiagnostics.Category.STALLED_CONTEXT : failureCategory(stage, diagnostics);
             ReviewDiagnostics.Snapshot failure = diagnostics.snapshot(category);
             if (reviewDelivered) {
                 return failureWithoutNotice(failure, "review-already-delivered");
@@ -543,7 +554,7 @@ public class AgentReviewService {
                         owner, repo, prNumber, true);
             }
             workspaceDir = wsResult.workspacePath();
-            String systemPrompt = resolveSystemPrompt(false, null);
+            String systemPrompt = resolveSystemPrompt(false, null, false);
             String userMessage = buildClarificationMessage(prTitle, prBody, diffSummary, userQuestion);
             AgentSession session = new AgentSession(owner, repo, prNumber, prTitle);
 
@@ -590,6 +601,31 @@ public class AgentReviewService {
     static ParseResult parseFormalReviewResult(String review, SeverityThresholds thresholds) {
         if (review == null || review.isBlank()) {
             return ParseResult.noDecision(review);
+        }
+
+        if (ReviewOutputParser.parse(review).document().structured()) {
+            String json = review.strip();
+            if (json.startsWith("```")) {
+                int start = json.indexOf('\n');
+                int end = json.lastIndexOf("```");
+                if (start >= 0 && end > start && json.substring(end + 3).isBlank()) {
+                    json = json.substring(start + 1, end).strip();
+                }
+            }
+            try {
+                JsonNode root = OBJECT_MAPPER.reader()
+                        .with(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                        .readTree(json);
+                JsonNode classification = root.get("classification");
+                if (classification != null) {
+                    ClassificationBlock block = parseClassificationBlock(classification.toString());
+                    return new ParseResult(review,
+                            evaluateAction(block == null ? null : block.classification(), thresholds),
+                            block == null ? null : block.classification(), parseFindings(root.get("findings")));
+                }
+            } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+                // Older responses may append a separate classification object.
+            }
         }
 
         // Canonical form: a bare JSON object on the last line.
@@ -643,7 +679,7 @@ public class AgentReviewService {
                     intField(root, "low"));
             return new ClassificationBlock(classification, parseFindings(root.get("findings")));
         } catch (Exception e) {
-            log.warn("Failed to parse severity classification JSON: {}", json);
+            log.warn("Failed to parse severity classification JSON; ignoring model classification");
             return null;
         }
     }
@@ -876,7 +912,8 @@ public class AgentReviewService {
                                       Consumer<AgentRunContext.ToolCallRecord> toolCallConsumer,
                                       ReviewDiagnostics.Collector diagnostics) {
         return runReviewLoop(session, owner, repo, prNumber, workspaceDir, headBranch, systemPrompt, userMessage,
-                maxToolRounds, diffSummary, runId, toolCallConsumer, null, ReviewFence.NONE, diagnostics);
+                maxToolRounds, diffSummary, runId, toolCallConsumer, null, ReviewFence.NONE, diagnostics,
+                false, new ArrayList<>());
     }
 
     private LoopOutcome runReviewLoop(AgentSession session, String owner, String repo, Long prNumber,
@@ -884,7 +921,8 @@ public class AgentReviewService {
                                       int maxToolRounds, DiffSummary diffSummary, Long runId,
                                       Consumer<AgentRunContext.ToolCallRecord> toolCallConsumer,
                                       PinnedSourceReader source, ReviewFence fence,
-                                      ReviewDiagnostics.Collector diagnostics) {
+                                      ReviewDiagnostics.Collector diagnostics, boolean fullReview,
+                                      List<String> coverageNotes) {
         Set<String> tools = workspaceDir == null
                 ? Set.of("pr-diff").stream().filter(context.allowedBuiltinTools()::contains)
                     .collect(java.util.stream.Collectors.toSet()) : context.allowedBuiltinTools();
@@ -897,6 +935,23 @@ public class AgentReviewService {
                     if (source != null) return fetchPinnedFiles(source, paths);
                     return workspaceDir == null ? "No pinned source available; use the diff only." : fetchFiles(o, r, requestedRef, paths);
                 }, agentConfig.getBudget().getMaxContextRounds(), fence, diagnostics);
+        if (fullReview) {
+            strategy.enableLegacyRecovery(agentConfig.getMaxFileContentChars())
+                    .withFileEvidenceFetcher((o, r, requestedRef, path) -> {
+                        fence.requireActive("before fetching pinned review evidence");
+                        if (source == null || !source.revisionSha().equals(requestedRef)) {
+                            return ReviewAgentStrategy.FileEvidence.failed();
+                        }
+                        try {
+                            String content = source.read(path);
+                            fence.requireActive("after fetching pinned review evidence");
+                            return ReviewAgentStrategy.FileEvidence.complete(content);
+                        } catch (PinnedSourceReader.RevisionUnavailableException e) {
+                            fence.requireActive("after unavailable pinned review evidence");
+                            return ReviewAgentStrategy.FileEvidence.failed();
+                        }
+                    });
+        }
 
         AgentConfigProperties.BudgetConfig budgetCfg = agentConfig.getBudget();
         int rounds = clamp(maxToolRounds, 1, 30);
@@ -913,15 +968,22 @@ public class AgentReviewService {
         ctx.setModeObserver(diagnostics::observeMode);
         ctx.setRoundObserver(diagnostics::observeTurn);
         ctx.setProviderCallFailureObserver(diagnostics::providerCallFailed);
-        return loop.run(ctx, userMessage, strategy);
+        LoopOutcome outcome = loop.run(ctx, userMessage, strategy);
+        coverageNotes.addAll(strategy.coverageNotes());
+        return outcome;
     }
 
     private String resolveSystemPrompt(boolean enableFormalDecision, String decisionPrompt) {
+        return resolveSystemPrompt(enableFormalDecision, decisionPrompt, true);
+    }
+
+    private String resolveSystemPrompt(boolean enableFormalDecision, String decisionPrompt, boolean fullReview) {
         ToolingMode mode = (aiClient != null && aiClient.supportsNativeTools())
                 ? ToolingMode.NATIVE : ToolingMode.LEGACY;
         String base = systemPromptAssembler.assemble(context.reviewAgentSystemPrompt(), toolCatalog,
                 toolCatalog.reviewToolNames(context.allowedBuiltinTools()), context.mcpToolCatalog(), mode,
-                SystemPromptAssembler.PromptKind.WRITER_AGENT);
+                fullReview ? SystemPromptAssembler.PromptKind.REVIEW_AGENT
+                        : SystemPromptAssembler.PromptKind.WRITER_AGENT);
 
         if (!enableFormalDecision) {
             return base;
@@ -929,7 +991,9 @@ public class AgentReviewService {
 
         String prompt = decisionPrompt != null && !decisionPrompt.isBlank()
                 ? decisionPrompt : AgentReviewWorkflow.DEFAULT_FORMAL_REVIEW_DECISION_PROMPT;
-        return base + "\n\n" + prompt + DECISION_FORMAT_INSTRUCTION;
+        return base + "\n\n" + prompt + (mode == ToolingMode.LEGACY
+                ? "\nReturn optional severity counts inside the completed review object's classification field."
+                : DECISION_FORMAT_INSTRUCTION);
     }
 
     private String buildKickoffMessage(String prTitle, String prBody, DiffSummary diffSummary,
@@ -957,7 +1021,9 @@ public class AgentReviewService {
                 When you have gathered enough context, reply with your final review (no tool calls). \
                 Cover correctness, risks, and concrete suggestions. Anchor each finding to the \
                 changed line it concerns using the line numbers from `pr-diff`.""");
-        sb.append(ReviewOutputInstructions.agentic(enableFormalDecision));
+        sb.append(aiClient != null && aiClient.supportsNativeTools()
+                ? ReviewOutputInstructions.agentic(enableFormalDecision)
+                : ReviewOutputInstructions.agenticLegacy(enableFormalDecision));
         return sb.toString();
     }
 

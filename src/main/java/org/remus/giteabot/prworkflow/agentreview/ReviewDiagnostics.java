@@ -29,6 +29,8 @@ public final class ReviewDiagnostics {
         INCOMPLETE_COMPLETION("incomplete-completion"),
         UNKNOWN_COMPLETION("unknown-completion"),
         EMPTY_FEEDBACK("empty-feedback"),
+        STALLED_CONTEXT("stalled-context"),
+        MANDATORY_CONTEXT_LIMIT("mandatory-context-limit"),
         SETUP_FAILURE("setup-failure"),
         PROVIDER_REQUEST_FAILURE("provider-request-failure"),
         PUBLICATION_FAILURE("publication-failure"),
@@ -71,8 +73,22 @@ public final class ReviewDiagnostics {
             String repo,
             Long pullRequestNumber,
             String provider,
-            Long integrationId
+            Long integrationId,
+            int executedRequestOccurrences,
+            int suppressedRequestOccurrences
     ) {
+        public Snapshot(Category category, int totalTurns, int contextRounds, Integer contextLimit,
+                        Integer loopLimit, Integer outputTokenLimit, Long outputTokens, ToolingMode mode,
+                        StopReason completionReason, Integer promptCharsEstimate, long responseCharacters,
+                        long contextCharacters, int requestOccurrences, int repeatedRequestOccurrences,
+                        int repeatedRequestRounds, boolean providerCallFailed, Long runId, String owner,
+                        String repo, Long pullRequestNumber, String provider, Long integrationId) {
+            this(category, totalTurns, contextRounds, contextLimit, loopLimit, outputTokenLimit,
+                    outputTokens, mode, completionReason, promptCharsEstimate, responseCharacters,
+                    contextCharacters, requestOccurrences, repeatedRequestOccurrences, repeatedRequestRounds,
+                    providerCallFailed, runId, owner, repo, pullRequestNumber, provider, integrationId, 0, 0);
+        }
+
         public String summary() {
             return switch (category) {
                 case CONTEXT_ROUND_LIMIT -> category.label() + " (" + contextRounds + "/"
@@ -98,6 +114,8 @@ public final class ReviewDiagnostics {
                     + "; responseChars=" + responseCharacters
                     + "; contextChars=" + contextCharacters
                     + "; requestOccurrences=" + requestOccurrences
+                    + "; executedRequestOccurrences=" + executedRequestOccurrences
+                    + "; suppressedRequestOccurrences=" + suppressedRequestOccurrences
                     + "; repeatedRequestOccurrences=" + repeatedRequestOccurrences
                     + "; repeatedRequestRounds=" + repeatedRequestRounds
                     + "; providerCallFailed=" + providerCallFailed
@@ -144,6 +162,8 @@ public final class ReviewDiagnostics {
         private long contextCharacters;
         private int requestOccurrences;
         private int repeatedRequestOccurrences;
+        private int executedRequestOccurrences;
+        private int suppressedRequestOccurrences;
         private boolean providerCallFailed;
 
         public Collector(Integer contextLimit, Integer loopLimit, Integer outputTokenLimit,
@@ -186,6 +206,14 @@ public final class ReviewDiagnostics {
             contextCharacters += Math.max(0, characters);
         }
 
+        public void requestExecuted() {
+            executedRequestOccurrences++;
+        }
+
+        public void requestSuppressed() {
+            suppressedRequestOccurrences++;
+        }
+
         public void observeNativeRequests(List<ToolCall> calls, String ref, int round) {
             for (ToolCall call : calls) {
                 record(call.name(), canonical(call.args()), ref, round);
@@ -200,8 +228,10 @@ public final class ReviewDiagnostics {
                     record(request.getTool(), canonicalStrings(args), ref, round);
                 }
             }
-            if (files != null && !files.isEmpty()) {
-                record("requestFiles", canonicalStrings(files), ref, round);
+            if (files != null) {
+                for (String file : files) {
+                    record("requestFiles", canonicalStrings(java.util.Collections.singletonList(file)), ref, round);
+                }
             }
         }
 
@@ -211,7 +241,8 @@ public final class ReviewDiagnostics {
                     outputTokenLimit, outputTokens, mode, completionReason, promptCharsEstimate,
                     responseCharacters, contextCharacters, requestOccurrences,
                     repeatedRequestOccurrences, repeatedRounds.size(), providerCallFailed,
-                    runId, owner, repo, pullRequestNumber, provider, integrationId);
+                    runId, owner, repo, pullRequestNumber, provider, integrationId,
+                    executedRequestOccurrences, suppressedRequestOccurrences);
         }
 
         private void record(String operation, String arguments, String ref, int round) {

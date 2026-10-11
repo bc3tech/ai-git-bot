@@ -1,7 +1,7 @@
 ---
 title: "fix: Bound legacy Agentic Review recovery"
 type: fix
-status: active
+status: completed
 date: 2026-10-10
 origin: docs/brainstorms/2026-10-10-legacy-agentic-review-recovery-requirements.md
 ---
@@ -205,7 +205,7 @@ native/writer paths unchanged; network retry remains bounded.
 **Verification:** Captured outbound request representations meet configured
 policy including reserved output; tests distinguish estimate from exact count.
 
-- [ ] **Unit 3: Availability-aware evidence and bounded recovery**
+- [x] **Unit 3: Availability-aware evidence and bounded recovery**
 
 **Goal / Requirements:** R3-R8, R10. Private review-local evidence ledger,
 line-aware excerpts, valid final acknowledgements and one recovery opportunity.
@@ -246,7 +246,7 @@ an original full-file limitation without verified complete same-ref coverage.
 **Verification:** Tests inspect final prepared history/current message, not
 cache membership. Requested/executed/suppressed counters remain distinct.
 
-- [ ] **Unit 4: Service coverage and publication integration**
+- [x] **Unit 4: Service coverage and publication integration**
 
 **Goal / Requirements:** R1, R9-R10. Enable recovery only for full legacy
 reviews; propagate unresolved evidence to degraded summary/state before
@@ -276,7 +276,7 @@ Include recovery-specific forbidden-write/refetch and lease-loss regressions.
 **Verification:** Persistent revision degraded flag and actual publication
 summary/actions reflect acquisition limitations.
 
-- [ ] **Unit 5: Regression, documentation and rollout handoff**
+- [x] **Unit 5: Regression, documentation and rollout handoff**
 
 **Goal / Requirements:** All origin success criteria.
 
@@ -358,3 +358,9 @@ review artifacts rather than adding unrelated hook tooling.
 - Conservative cleanup moved the generic exchange-compaction comment into its
   actual branch. The compatibility diagnostic constructor is intentionally
   retained because preserving callers is an explicit scope invariant.
+- Affected regression suites and final targeted fixes pass in local Podman,
+  including Unicode numbered-source parsing, retry stall enforcement, trusted
+  coverage disclosure and lease loss during a singleton file fetch.
+- Feature-video is not recorded: there is no changed browser surface, and no
+  live workflow demonstration or server mutation is authorized. Implementation
+  completion does not imply deployment or a verified live model replay.

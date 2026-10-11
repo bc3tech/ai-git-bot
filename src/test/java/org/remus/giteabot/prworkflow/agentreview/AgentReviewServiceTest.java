@@ -23,6 +23,54 @@ import static org.mockito.Mockito.verify;
 class AgentReviewServiceTest {
 
     @Test
+    void fencedReviewWithHistoricalTrailingClassificationRemainsCompatible() {
+        String envelope = """
+                ```json
+                {"summary":"Reviewed","findings":[]}
+                ```""";
+        var result = AgentReviewService.parseFormalReviewResult(
+                envelope + "\n{\"blocker\":1,\"medium\":0,\"low\":0}", thresholds(0, 0, 0));
+        assertThat(result.reviewText()).isEqualTo(envelope);
+        assertThat(result.classification().blocker()).isEqualTo(1);
+        assertThat(result.action()).isEqualTo(PostReviewAction.REQUEST_CHANGES);
+    }
+
+    @Test
+    void nestedClassificationPreservesCompletedEnvelopeAndFindings() {
+        String review = """
+                {"summary":"Reviewed","findings":[{"severity":"BLOCKER","title":"Issue","file":"Example.java","line":1}],
+                 "classification":{"blocker":1,"medium":0,"low":0}}
+                """.strip();
+        var result = AgentReviewService.parseFormalReviewResult(review, thresholds(0, 0, 0));
+        assertThat(result.reviewText()).isEqualTo(review);
+        assertThat(result.classification().blocker()).isEqualTo(1);
+        assertThat(result.action()).isEqualTo(PostReviewAction.REQUEST_CHANGES);
+        assertThat(result.findings()).hasSize(1);
+    }
+
+    @Test
+    void fencedNestedClassificationDoesNotStripReview() {
+        String review = """
+                ```json
+                {"summary":"Reviewed","findings":[],"classification":{"blocker":0,"medium":0,"low":0}}
+                ```""";
+        var result = AgentReviewService.parseFormalReviewResult(review, thresholds(0, 0, 0));
+        assertThat(result.reviewText()).isEqualTo(review);
+        assertThat(result.action()).isEqualTo(PostReviewAction.APPROVE);
+    }
+
+    @Test
+    void invalidNestedClassificationDoesNotLoseCompletedReview() {
+        String review = """
+                {"summary":"Reviewed","findings":[],"classification":{"blocker":"invalid"}}
+                """.strip();
+        var result = AgentReviewService.parseFormalReviewResult(review, thresholds(0, 0, 0));
+        assertThat(result.reviewText()).isEqualTo(review);
+        assertThat(result.classification()).isNull();
+        assertThat(result.action()).isEqualTo(PostReviewAction.NONE);
+    }
+
+    @Test
     void parseFormalReviewResult_reviewEnvelopeIsNotMistakenForAClassification() {
         String review = """
                 ```json

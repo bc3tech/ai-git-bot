@@ -59,6 +59,13 @@ public final class ReviewFailureReporter {
                     + "limit was reached (" + failure.totalTurns() + "/"
                     + available(failure.loopLimit()) + " turns). Check the run diagnostics before "
                     + "changing limits.";
+            case STALLED_CONTEXT -> "No completed " + noun + " was produced. Reason: stalled-context. "
+                    + "Context requests made no usable progress after one recovery turn. "
+                    + "Check the run diagnostics; increasing limits does not resolve repeated evidence requests.";
+            case MANDATORY_CONTEXT_LIMIT -> "No completed " + noun
+                    + " was produced. Reason: mandatory-context-limit. "
+                    + "The review task and required instructions could not fit the configured context policy "
+                    + "with reserved output headroom. Check the run diagnostics and context settings.";
             case OUTPUT_TOKEN_LIMIT -> "No completed " + noun + " was produced. Reason: output-token-limit. "
                     + "The provider "
                     + "reached the output-token limit (limit " + available(failure.outputTokenLimit())

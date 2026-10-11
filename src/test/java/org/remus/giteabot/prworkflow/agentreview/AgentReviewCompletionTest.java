@@ -101,6 +101,7 @@ class AgentReviewCompletionTest {
             new PriorFindingsDigest.CommentCursor(Instant.parse("2026-10-08T00:00:00Z"), "100"));
 
     private AgentReviewService service;
+    private AgentConfigProperties config;
     private WebhookPayload payload;
 
     @BeforeEach
@@ -109,7 +110,7 @@ class AgentReviewCompletionTest {
                 {"repository":{"name":"repo","owner":{"login":"owner"}},
                  "pull_request":{"number":1,"title":"Update example","head":{"ref":"feature"}}}
                 """, WebhookPayload.class);
-        AgentConfigProperties config = new AgentConfigProperties();
+        config = new AgentConfigProperties();
         config.getBudget().setMaxRounds(3);
         ToolCatalog catalog = new ToolCatalog(config);
         Bot bot = new Bot();
@@ -586,6 +587,117 @@ class AgentReviewCompletionTest {
         verify(repositoryClient).postReviewReturningId(any(), any(), any(),
                 argThat(body -> body.contains("Legacy completed") && !body.contains(FindingGroundingService.PARSE_FAILURE)),
                 eq(PostReviewAction.NONE));
+    }
+
+    @Test
+    void legacyDuplicateRecoveryCanCompleteWithoutReplayingFullEvidence() {
+        when(aiClient.supportsNativeTools()).thenReturn(false);
+        List<String> requests = new ArrayList<>();
+        List<ChatTurn> turns = List.of(
+                ChatTurn.text("{\"requestFiles\":[\"Example.java\"]}"),
+                ChatTurn.text("{\"requestFiles\":[\"Example.java\"]}"),
+                ChatTurn.text("{\"summary\":\"Recovered\",\"findings\":[]}"));
+        when(aiClient.chatWithTools(anyList(), any(), eq(List.of()), anyString(), isNull(), anyInt()))
+                .thenAnswer(inv -> {
+                    List<org.remus.giteabot.ai.AiMessage> history = inv.getArgument(0);
+                    String current = inv.getArgument(1);
+                    requests.add(history.stream().map(message -> message.getContent() == null ? "" : message.getContent())
+                            .collect(Collectors.joining("\n")) + "\n" + current);
+                    return turns.get(requests.size() - 1);
+                });
+
+        assertThat(review(false)).isEqualTo(AgentReviewService.ReviewResult.POSTED);
+        assertThat(requests).hasSize(3);
+        assertThat(requests.get(2).split(java.util.regex.Pattern.quote("newCall();"), -1)).hasSize(2);
+        verify(repositoryClient, times(1)).getFileContent("owner", "repo", "Example.java", HEAD);
+        verify(repositoryClient, never()).postPullRequestComment(any(), any(), any(), any());
+    }
+
+    @Test
+    void legacySecondDuplicateFailsWithOneSafeNoticeAndNoReview() {
+        when(aiClient.supportsNativeTools()).thenReturn(false);
+        when(aiClient.chatWithTools(anyList(), any(), eq(List.of()), anyString(), isNull(), anyInt()))
+                .thenReturn(ChatTurn.text("{\"requestFiles\":[\"Example.java\"]}"));
+
+        AgentReviewService.DetailedResult reviewed = service.reviewPullRequestDetailed(payload, 1, true, null,
+                new AgentReviewService.SeverityThresholds(0, 0, 0), 1L, null);
+
+        assertThat(reviewed.result()).isEqualTo(AgentReviewService.ReviewResult.FAILED);
+        assertThat(reviewed.failure().category()).isEqualTo(ReviewDiagnostics.Category.STALLED_CONTEXT);
+        verify(aiClient, times(3)).chatWithTools(anyList(), any(), eq(List.of()), anyString(), isNull(), anyInt());
+        assertFailureNoticeOnly();
+    }
+
+    @Test
+    void mandatoryLegacyContextOverflowFailsBeforeProviderCall() {
+        config.getBudget().setMaxHistoryChars(50);
+        when(aiClient.supportsNativeTools()).thenReturn(false);
+
+        AgentReviewService.DetailedResult reviewed = service.reviewPullRequestDetailed(payload, 1, false, null,
+                new AgentReviewService.SeverityThresholds(null, null, null), 1L, null);
+
+        assertThat(reviewed.result()).isEqualTo(AgentReviewService.ReviewResult.FAILED);
+        assertThat(reviewed.failure().category()).isEqualTo(ReviewDiagnostics.Category.MANDATORY_CONTEXT_LIMIT);
+        verify(aiClient, never()).chatWithTools(anyList(), any(), anyList(), anyString(), isNull(), anyInt());
+        assertFailureNoticeOnly();
+    }
+
+    @Test
+    void completedLegacyReviewWithOversizedRequestedFileIsDegradedAndCannotApprove() {
+        config.setMaxFileContentChars(10_000);
+        when(aiClient.supportsNativeTools()).thenReturn(false);
+        when(repositoryClient.getFileContent("owner", "repo", "Example.java", HEAD))
+                .thenReturn("long source line\n".repeat(4_000));
+        when(aiClient.chatWithTools(anyList(), any(), eq(List.of()), anyString(), isNull(), anyInt()))
+                .thenReturn(ChatTurn.text("{\"requestFiles\":[\"Example.java\"]}"),
+                        ChatTurn.text("{\"summary\":\"Completed review\",\"findings\":[],"
+                                + "\"classification\":{\"blocker\":0,\"medium\":0,\"low\":0}}"));
+
+        assertThat(review(true)).isEqualTo(AgentReviewService.ReviewResult.POSTED);
+        verify(repositoryClient).postReviewReturningId(any(), any(), any(),
+                argThat(body -> body.contains("Completed review")
+                        && body.contains("Repository evidence acquisition remains incomplete for 1 requested read(s).")),
+                eq(PostReviewAction.NONE));
+        verify(repositoryClient, never()).postReviewAction(anyString(), anyString(), anyLong(), any());
+        verify(state).upsertRevision(argThat(ReviewRevisionRecord::isDegraded), eq(LEASE));
+    }
+
+    @Test
+    void completedLegacyReviewWithUnavailableRequestedFileIsDegradedWithoutRefFallback() {
+        when(aiClient.supportsNativeTools()).thenReturn(false);
+        when(repositoryClient.getFileContent("owner", "repo", "Missing.java", HEAD))
+                .thenThrow(new IllegalStateException("private source location"));
+        when(aiClient.chatWithTools(anyList(), any(), eq(List.of()), anyString(), isNull(), anyInt()))
+                .thenReturn(ChatTurn.text("{\"requestFiles\":[\"Missing.java\"]}"),
+                        ChatTurn.text("{\"summary\":\"Completed review\",\"findings\":[]}"));
+
+        assertThat(review(true)).isEqualTo(AgentReviewService.ReviewResult.POSTED);
+        verify(repositoryClient).postReviewReturningId(any(), any(), any(),
+                argThat(body -> body.contains("Completed review")
+                        && body.contains("Repository evidence acquisition remains incomplete for 1 requested read(s).")
+                        && !body.contains("private source location")), eq(PostReviewAction.NONE));
+        verify(repositoryClient, never()).getFileContent(any(), any(), any(), eq("feature"));
+        verify(repositoryClient, never()).postReviewAction(anyString(), anyString(), anyLong(), any());
+        verify(state).upsertRevision(argThat(ReviewRevisionRecord::isDegraded), eq(LEASE));
+        verify(repositoryClient, never()).postPullRequestComment(any(), any(), any(), any());
+    }
+
+    @Test
+    void leaseLossDuringLegacyFileReadStopsBatchAndPreventsContinuationOrPublication() {
+        when(aiClient.supportsNativeTools()).thenReturn(false);
+        when(aiClient.chatWithTools(anyList(), any(), eq(List.of()), anyString(), isNull(), anyInt()))
+                .thenReturn(ChatTurn.text("{\"requestFiles\":[\"Example.java\",\"Second.java\"]}"));
+        when(repositoryClient.getFileContent("owner", "repo", "Example.java", HEAD)).thenAnswer(invocation -> {
+            doThrow(new ReviewRunLeaseService.LeaseLostException(LEASE)).when(leases).assertHeld(LEASE);
+            return "newCall();";
+        });
+
+        assertThat(review(false)).isEqualTo(AgentReviewService.ReviewResult.FAILED);
+        verify(repositoryClient, never()).getFileContent("owner", "repo", "Second.java", HEAD);
+        verify(aiClient, times(1)).chatWithTools(anyList(), any(), anyList(), anyString(), isNull(), anyInt());
+        verify(repositoryClient, never()).postReviewReturningId(any(), any(), any(), any(), any());
+        verify(repositoryClient, never()).postPullRequestComment(any(), any(), any(), any());
+        verify(state, never()).upsertRevision(any(), any());
     }
 
     @Test

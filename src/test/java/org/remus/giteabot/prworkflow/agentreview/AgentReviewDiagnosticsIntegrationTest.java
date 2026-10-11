@@ -1,6 +1,7 @@
 package org.remus.giteabot.prworkflow.agentreview;
 
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.remus.giteabot.admin.Bot;
 import org.remus.giteabot.agent.session.AgentSessionRepository;
 import org.remus.giteabot.agent.session.AgentSessionService;
@@ -35,6 +36,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -65,8 +67,9 @@ class AgentReviewDiagnosticsIntegrationTest {
     private static final String HEAD_SHA = "abcdef012345abcdef012345abcdef012345abcd";
     private static final String BASE_SHA = "b".repeat(40);
 
-    @Test
-    void legacyContextCapFailureSurvivesLoopServiceAndWorkflowWithoutPublishingPartialText() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void legacyLimitFailureSurvivesLoopServiceAndWorkflowWithoutPublishingPartialText(boolean repeated) throws Exception {
         AiClient aiClient = mock(AiClient.class);
         RepositoryApiClient repositoryClient = mock(RepositoryApiClient.class);
         WorkspaceService workspaceService = mock(WorkspaceService.class);
@@ -93,12 +96,17 @@ class AgentReviewDiagnosticsIntegrationTest {
         ToolCatalog catalog = new ToolCatalog(config);
         Path workspace = Path.of("agent-review-diagnostics-workspace");
         when(aiClient.supportsNativeTools()).thenReturn(false);
+        AtomicInteger calls = new AtomicInteger();
         when(aiClient.chatWithTools(anyList(), any(), anyList(), anyString(), isNull(), anyInt()))
-                .thenAnswer(invocation -> new ChatTurn(CONTEXT_REQUEST, List.of(),
-                        StopReason.END_TURN, 100, 15));
+                .thenAnswer(invocation -> {
+                    int turn = calls.incrementAndGet();
+                    String request = repeated ? CONTEXT_REQUEST
+                            : "{\"requestFiles\":[\"private-token-" + turn + ".java\"]}";
+                    return new ChatTurn(request, List.of(), StopReason.END_TURN, 100, 15);
+                });
         when(repositoryClient.getReviewSnapshot("owner", "repo", 1L)).thenReturn(snapshot);
-        when(repositoryClient.getFileContent("owner", "repo", "private-token.java", HEAD_SHA))
-                .thenReturn("PRIVATE_SOURCE_CONTENT");
+        when(repositoryClient.getFileContent(eq("owner"), eq("repo"), anyString(), eq(HEAD_SHA)))
+                .thenAnswer(invocation -> "PRIVATE_SOURCE_CONTENT " + invocation.getArgument(2));
         when(workspaceService.prepareWorkspaceAtRevision(repositoryClient, "owner", "repo", HEAD_SHA, 1L))
                 .thenReturn(WorkspaceResult.success(workspace));
 
@@ -124,11 +132,20 @@ class AgentReviewDiagnosticsIntegrationTest {
         WorkflowResult result = workflow.run(context);
 
         assertThat(result.status()).isEqualTo(WorkflowResultStatus.FAILED);
-        assertThat(result.summary()).contains("context-round-limit", "10/10 context rounds", "11 total turns");
-        assertThat(excerpt.get()).contains("turns=11", "contextRounds=10/10",
-                "repeatedRequestOccurrences=10", "repeatedRequestRounds=10", "noticeStatus=DELIVERED");
+        if (repeated) {
+            assertThat(result.summary()).contains("stalled-context");
+            assertThat(excerpt.get()).contains("turns=3", "contextRounds=3/10",
+                    "executedRequestOccurrences=1", "suppressedRequestOccurrences=2",
+                    "repeatedRequestOccurrences=2", "repeatedRequestRounds=2", "noticeStatus=DELIVERED");
+        } else {
+            assertThat(result.summary()).contains("context-round-limit", "10/10 context rounds", "11 total turns");
+            assertThat(excerpt.get()).contains("turns=11", "contextRounds=10/10",
+                    "executedRequestOccurrences=10", "suppressedRequestOccurrences=0",
+                    "repeatedRequestOccurrences=0", "noticeStatus=DELIVERED");
+        }
         assertThat(excerpt.get()).doesNotContain("private-token.java", "PRIVATE_SOURCE_CONTENT");
-        verify(aiClient, times(11)).chatWithTools(anyList(), any(), anyList(), anyString(), isNull(), anyInt());
+        verify(aiClient, times(repeated ? 3 : 11))
+                .chatWithTools(anyList(), any(), anyList(), anyString(), isNull(), anyInt());
         verify(repositoryClient, times(1)).postPullRequestComment(eq("owner"), eq("repo"), eq(1L),
                 anyString());
         verify(repositoryClient, never()).postReview(anyString(), anyString(), anyLong(), anyString(), any());
@@ -137,7 +154,8 @@ class AgentReviewDiagnosticsIntegrationTest {
         verify(leases, org.mockito.Mockito.atLeastOnce()).assertHeld(lease);
         verify(leases).release(lease);
         verify(workspaceService).prepareWorkspaceAtRevision(repositoryClient, "owner", "repo", HEAD_SHA, 1L);
-        verify(repositoryClient).getFileContent("owner", "repo", "private-token.java", HEAD_SHA);
+        verify(repositoryClient, times(repeated ? 1 : 10))
+                .getFileContent(eq("owner"), eq("repo"), anyString(), eq(HEAD_SHA));
         org.mockito.Mockito.verifyNoInteractions(state, grounding, threadActions, eventHooks);
         verify(workspaceService).cleanupWorkspace(workspace);
     }
